@@ -26,6 +26,14 @@
 `.gitignore`은 위 경계를 강제한다. 공개 저장소의 문서는 데이터 내용을 포함하지 않고,
 로컬 artifact는 수상 검증이 필요한 경우 별도 비공개 전달물로만 사용한다.
 
+현재 checkout은 `.githooks/pre-commit`을 `core.hooksPath=.githooks`로 연결한다.
+이 hook은 staged Git blob만 읽어 `.gitignore`를 우회하는 force-add와 recognizable token
+pattern을 fail-closed로 막는다. 전체 tracked tree는 다음으로 별도 점검한다.
+
+```bash
+PYTHONPATH=src python3 -m deep_challenge.public_repo_guard --all
+```
+
 ## 2. 현재 확인된 운영 계약
 
 - 유일한 베이스: `Qwen/Qwen2.5-3B-Instruct`, 내부 재현 pin:

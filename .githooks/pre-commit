@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+set -eu
+
+# Do not rely on .gitignore: a force-add can bypass it.  The module uses only
+# Python's standard library and inspects the staged Git blob, not local data.
+PYTHONPATH=src "${PYTHON:-python3}" -m deep_challenge.public_repo_guard --staged
