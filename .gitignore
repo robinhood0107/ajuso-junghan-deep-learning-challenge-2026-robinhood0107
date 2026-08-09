@@ -46,11 +46,16 @@ mlruns/
 *.onnx
 *.npy
 *.npz
+*.csv
 *.parquet
 *.pkl
 *.pickle
 *.jsonl
 *.tsv
+*.zip
+*.tar
+*.gz
+*.xz
 adapter_model.bin
 submission.csv
 

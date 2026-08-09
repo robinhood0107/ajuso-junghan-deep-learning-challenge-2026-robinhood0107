@@ -52,6 +52,7 @@ _FORBIDDEN_SUFFIXES = frozenset(
         ".bin",
         ".ckpt",
         ".csv",
+        ".gz",
         ".jsonl",
         ".npy",
         ".npz",
@@ -62,7 +63,9 @@ _FORBIDDEN_SUFFIXES = frozenset(
         ".pth",
         ".pt",
         ".safetensors",
+        ".tar",
         ".tsv",
+        ".xz",
         ".zip",
     }
 )
