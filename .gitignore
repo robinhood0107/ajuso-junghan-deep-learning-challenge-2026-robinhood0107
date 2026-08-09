@@ -28,6 +28,14 @@ env
 .kaggle/
 kaggle.json
 access_token
+credentials
+id_ed25519
+id_rsa
+*.key
+*.kdbx
+*.p12
+*.pfx
+*.pem
 NU_
 이어서 하기 프롬프트.txt
 
