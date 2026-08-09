@@ -74,6 +74,9 @@ leaderboard/test 입력 또는 실제 development generation은 아직 사용하
   explicit final `gpu-smoke`, complete OOF 비교와 independent submission 교차검증
 - `gate_b.py`: split-bound SFT/dev records, response-only masking, full config SHA,
   structured generation result, parser conflict 보존, atomic no-overwrite JSONL/manifest
+- `parser_golden.py`: published development JSONL/manifest를 checksum·partition·stored
+  parser result까지 재검증하고 raw completion/ID/reference answer/value를 직렬화하지 않는
+  private parser-golden aggregate audit; locked holdout·leaderboard/test partition은 거부
 - `model_preflight.py`: exact pinned shard contract, isolated import/ABI probe, physical VRAM
   gate, prerequisite-ready와 execution-ready 분리
 - `gpu_smoke.py`: 고정 synthetic 2+3 prompt만 쓰는 lazy NF4 load + LoRA backward +
@@ -119,6 +122,8 @@ semantic config SHA는 `4530c14a4782c439ea3a8325b90d997793eda368b0371d765cb81069
 - `artifacts/analysis/model-preflight-gpu-current-20260810T001500KST.json`
 - `artifacts/analysis/gpu-smoke-20260810T001500KST.json`
 - `artifacts/analysis/source-manifest-final-v4.json` (2026-08-09 source edits 뒤 재생성 예정)
+- `artifacts/analysis/source-manifest-parser-golden-v1-20260810.json` (parser golden audit
+  implementation·docs·tests를 포함한 current source tree, 64 files)
 - `artifacts/analysis/CHECKSUMS.sha256`
 
 `model-preflight-current.json`은 기본 개발 환경의 의도적 package 부재까지 기록한다.
@@ -139,6 +144,14 @@ parser 상태, latency, finish reason을 확인하는 **진단 artifact**로만 
 data/split/config 계약에서 보강된 source, 새 B0 preflight/smoke, 새 versioned output target으로 실행한
 production baseline이 성공하기 전에는 QLoRA, OOF 비교, primary/fallback 선택을 시작하지
 않는다.
+
+실제 JSONL/manifest 쌍이 atomic publish된 뒤에는 CUDA를 쓰지 않는
+`audit-parser-golden`으로 bundle checksum, fold-validation/cross-validation partition,
+각 stored parser result를 다시 확인한다. 이 명령은 raw completion, completion hash, ID,
+question, reference answer, parsed integer를 새 artifact에 쓰지 않고 status/source/reason
+code별 count만 남긴다. 현재 도구와 synthetic privacy/negative regression tests는 구현됐지만
+실제 diagnostic artifact가 아직 없으므로 실제 golden observation과 그에 근거한 public
+structural parser fixture는 **미실행**이다.
 
 CPU-only SFT preflight v3는 fold 0 training 11,794행, validation 2,942행, union
 14,736행을 실제 pinned tokenizer로 encode했다. 최대 sequence는 1,127/2,048,

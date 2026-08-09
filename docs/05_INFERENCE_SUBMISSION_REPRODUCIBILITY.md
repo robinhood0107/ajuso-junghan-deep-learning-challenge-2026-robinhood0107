@@ -164,6 +164,25 @@ NaN
 pattern을 익명화한 regression fixture만 추가한다. 이 gate를 통과하기 전에는 다음 GPU
 단계로 넘어가지 않는다.
 
+`audit-parser-golden`은 이 작업의 private CPU-only 입력 검증 단계다. manifest checksum과
+JSONL line count, fold-validation/cross-validation partition, 각 row의 completion hash와
+stored parse result를 다시 대조한 뒤, raw completion/ID/question/reference answer/parsed
+integer를 전혀 직렬화하지 않은 status/source/reason-code count만 새 no-overwrite artifact에
+쓴다. 따라서 terminal 출력과 public Git fixture는 이 aggregate를 보고 만든 안전한
+synthetic structure만 사용한다.
+
+```bash
+RUN_DIR=artifacts/gate_b/<RUN_TAG>/fold-0
+uv run deep-challenge audit-parser-golden \
+  --records "$RUN_DIR/base-direct-predictions.jsonl" \
+  --manifest "$RUN_DIR/base-direct-manifest.json" \
+  --output "artifacts/analysis/parser-golden-<RUN_TAG>-fold0.json"
+```
+
+이 명령이 holdout/non-development partition, stale checksum, parser mismatch를 발견하면
+output을 publish하지 않는다. 현재 command와 synthetic privacy/negative tests는 구현됐고,
+실제 모델 output을 관찰해 추가한 fixture는 아직 없다.
+
 ## 4. 문제 본문의 답 누출과 parser 분리
 
 일부 question 자체에 `Answer` 또는 `boxed` 값이 있다. Parser는 **assistant completion 영역만** 읽어야 하며 prompt를 이어 붙인 전체 transcript에서 숫자를 찾으면 안 된다.

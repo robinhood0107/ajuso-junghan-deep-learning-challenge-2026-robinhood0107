@@ -258,6 +258,24 @@ mkdir -p "$RUN_DIR" "$CHECKPOINT_DIR"
 token 수, latency, peak VRAM, fold/group이 들어간다. 실제 generation을 얻은 직후 parser
 golden regression corpus를 추가하고 전체 Ruff/pytest를 다시 통과시킨다.
 
+두 output이 atomic publish된 뒤에는 GPU를 다시 쓰지 않고 먼저 private parser audit을
+실행한다. 이 명령은 raw completion이나 train-derived ID/answer를 stdout이나 새 artifact에
+복사하지 않는다. stale checksum, non-development partition, stored parser/result mismatch는
+fail-closed이며 output을 만들지 않는다.
+
+```bash
+PARSER_GOLDEN="artifacts/analysis/parser-golden-$RUN_TAG-fold$FOLD.json"
+uv run deep-challenge audit-parser-golden \
+  --records "$RUN_DIR/base-direct-predictions.jsonl" \
+  --manifest "$RUN_DIR/base-direct-manifest.json" \
+  --output "$PARSER_GOLDEN"
+```
+
+aggregate의 source/status/reason code에 새 구조가 있으면 공개 test에는 그 구조를
+재현하는 안전한 synthetic completion만 추가한다. 실제 question, ID, answer, raw completion,
+completion hash는 `artifacts/` 밖으로 옮기거나 Git에 stage하지 않는다. 이 regression과
+full CPU test가 green이 되기 전에는 QLoRA를 시작하지 않는다.
+
 새 source의 CLI는 25 generation마다 question/answer/raw completion을 출력하지 않는
 `gate_b_development_progress` JSON status line도 보낸다. 이 status는 장시간 run의 liveness
 확인용일 뿐 selection evidence가 아니며, 최종 JSONL과 manifest가 함께 atomic publish되기

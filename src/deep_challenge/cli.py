@@ -60,6 +60,7 @@ from .gate_b_sft_preflight import run_sft_encoding_preflight
 from .gpu_smoke import run_final_gpu_smoke
 from .independent_submission import verify_submission_independently
 from .model_preflight import run_model_preflight
+from .parser_golden import audit_development_parser_golden
 from .provenance import (
     build_source_tree_manifest,
     canonical_json_bytes,
@@ -279,6 +280,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="required successful fixed-base run manifest before adapter evaluation",
     )
     development.set_defaults(handler=_command_gate_b_development)
+
+    parser_golden = subparsers.add_parser(
+        "audit-parser-golden",
+        help="validate one development bundle and emit redacted parser-golden evidence",
+    )
+    parser_golden.add_argument("--records", required=True, type=Path)
+    parser_golden.add_argument("--manifest", required=True, type=Path)
+    parser_golden.add_argument("--output", required=True, type=Path)
+    parser_golden.set_defaults(handler=_command_audit_parser_golden)
 
     train_fold = subparsers.add_parser(
         "gate-b-train-fold",
@@ -1267,6 +1277,30 @@ def _command_gate_b_development(args: argparse.Namespace) -> int:
                 "record_count": result.record_count,
                 "records_sha256": result.records_sha256,
                 "manifest_sha256": result.manifest_sha256,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _command_audit_parser_golden(args: argparse.Namespace) -> int:
+    result = audit_development_parser_golden(
+        args.records,
+        args.manifest,
+        output_path=args.output,
+    )
+    print(
+        json.dumps(
+            {
+                "output": result.path,
+                "size_bytes": result.size_bytes,
+                "sha256": result.sha256,
+                "payload_sha256": result.payload_sha256,
+                "case_count": result.case_count,
+                "raw_completion_serialized": False,
+                "locked_holdout_accessed": False,
+                "leaderboard_or_test_used": False,
             },
             sort_keys=True,
         )

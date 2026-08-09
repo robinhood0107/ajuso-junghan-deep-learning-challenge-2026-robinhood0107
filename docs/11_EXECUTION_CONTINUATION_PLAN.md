@@ -104,6 +104,16 @@ wc -l "$RUN_DIR/base-direct-predictions.jsonl"
 sha256sum "$RUN_DIR/base-direct-predictions.jsonl" "$RUN_DIR/base-direct-manifest.json"
 ```
 
+그 다음 GPU 없이 다음 private audit을 실행한다. stale checksum, non-development partition,
+stored parser mismatch 중 하나라도 있으면 output을 만들지 않는다.
+
+```bash
+uv run deep-challenge audit-parser-golden \
+  --records "$RUN_DIR/base-direct-predictions.jsonl" \
+  --manifest "$RUN_DIR/base-direct-manifest.json" \
+  --output "artifacts/analysis/parser-golden-20260810T002000KST-fold0.json"
+```
+
 이 진단에서 실제 completion 구조를 관찰한 뒤에도 public test에는 question, ID,
 reference answer, raw completion을 넣지 않는다. marker/source/status/reason만
 익명화한 구조적 regression case를 별도로 재현하고, parser conflict가 보이면 반드시
