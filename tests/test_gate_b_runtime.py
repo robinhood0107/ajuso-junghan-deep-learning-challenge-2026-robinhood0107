@@ -917,6 +917,8 @@ def test_base_generation_backend_is_lazy_deterministic_and_reusable(
     assert model.kwargs["do_sample"] is False
     assert model.kwargs["num_beams"] == 1
     assert model.kwargs["max_new_tokens"] == DEFAULT_GATE_B_CONFIG.max_new_tokens
+    assert model.kwargs["eos_token_id"] == tokenizer.eos_token_id
+    assert model.kwargs["use_cache"] is True
 
     with pytest.raises(GateBValidationError, match="prompt_sha256"):
         backend.generate(replace(request, prompt_sha256="0" * 64))

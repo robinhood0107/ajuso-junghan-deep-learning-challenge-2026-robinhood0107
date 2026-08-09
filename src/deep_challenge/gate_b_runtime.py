@@ -1037,6 +1037,13 @@ class TransformersNF4GenerationBackend:
                 "max_new_tokens": request.decoding_policy.max_new_tokens,
                 "repetition_penalty": request.decoding_policy.repetition_penalty,
                 "pad_token_id": self._tokenizer.eos_token_id,
+                "eos_token_id": self._tokenizer.eos_token_id,
+                # Gradient-checkpointed QLoRA training keeps use_cache=False,
+                # but this is an eval-only, one-prompt generation path.  The
+                # KV cache is therefore both safe and required for practical
+                # serial development inference.  The implementation is bound
+                # by the source-tree manifest before model selection.
+                "use_cache": True,
             }
             if request.decoding_policy.temperature is not None:
                 generation_kwargs["temperature"] = request.decoding_policy.temperature

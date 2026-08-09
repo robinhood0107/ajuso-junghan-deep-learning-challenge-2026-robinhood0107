@@ -2,11 +2,12 @@
 
 기준 시각: **2026-08-10 KST**
 대상 호스트: **WSL2 Ubuntu 24.04 + NVIDIA GeForce RTX 4070 SUPER 12GB**
-현재 판정: **CPU 준비 완료, GPU preflight와 final synthetic smoke green, B1 fold 0 base baseline 실행 가능**
+현재 판정: **CPU 준비 완료, 이전 source의 GPU preflight/final synthetic smoke green, eval KV-cache source의 새 B0 refresh 대기**
 
 이 문서는 현재 코드의 CLI와 정확히 일치하는 실행 순서다. GPU가 필요한 명령은 맨
-뒤의 별도 절에만 둔다. 2026-08-10 final smoke는 green artifact를 남겼다. 이후 실제
-모델 실행도 다른 프로세스를 종료하거나 threshold를 완화하지 않고, 새 run마다 physical
+뒤의 별도 절에만 둔다. 2026-08-10 이전 source final smoke는 green artifact를 남겼다.
+training cache-off와 eval KV-cache-on을 분리한 현재 source는 새 tagged smoke를 요구한다.
+이후 실제 모델 실행도 다른 프로세스를 종료하거나 threshold를 완화하지 않고, 새 run마다 physical
 VRAM을 다시 검사한다.
 
 ## 1. 변경할 수 없는 계약
@@ -162,9 +163,10 @@ submission allowance를 read-only 확인했다. 다음은 아직 확인하지 �
 
 ## 5. B0 GPU 승인 증거와 새 run 직전 재검사
 
-2026-08-10 target-host preflight와 local synthetic smoke는 이미 green이다. 이 evidence를
-재사용해 B1을 시작할 수 있지만, 다른 GPU 프로세스를 종료하거나 선점하지 않는다. 모든
-새 GPU run 직전에도 아래 두 조건을 다시 관측한다.
+2026-08-10 target-host preflight와 local synthetic smoke는 이전 source에서 green이다.
+현재 eval KV-cache source의 production B1에는 그 artifact를 재사용하지 않고, 이 절의
+새 `RUN_TAG` preflight와 smoke를 순서대로 다시 만든다. 다른 GPU 프로세스를 종료하거나
+선점하지 않으며, 모든 새 GPU run 직전에는 아래 두 조건을 다시 관측한다.
 
 ```bash
 nvidia-smi --query-gpu=name,memory.total,memory.used,memory.free,compute_cap,driver_version \
@@ -208,8 +210,8 @@ HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 "$GPU_CLI" gpu-smoke \
 
 preflight와 smoke가 모두 exit 0이고 smoke artifact `status=green`일 때만 다음 절로 간다.
 smoke는 로컬 synthetic `2+3`만 사용하여 pinned NF4 load, 실제
-`paged_adamw_8bit` backward/step, generation, parser exact match, peak VRAM과 latency를
-검증한다. organizer/leaderboard/test 문제는 smoke 입력으로 받지 않는다.
+`paged_adamw_8bit` backward/step, training cache-off/eval KV-cache-on generation, parser
+exact match, peak VRAM과 latency를 검증한다. organizer/leaderboard/test 문제는 smoke 입력으로 받지 않는다.
 
 smoke는 CUDA context를 만들기 **전** read-only `nvidia-smi`로 external used/free를 다시
 확인하고, context 생성 **후** CUDA free VRAM으로 실제 load 가능 여유를 확인한다. context
@@ -220,7 +222,7 @@ immutable threshold도 완화하지 않는다. 두 측정치는 green artifact�
 ## 6. Gate B1 — base direct-answer development 기준선
 
 GPU green 뒤 첫 모델 실행은 fold 0 base greedy 한 개뿐이다. 아래 `FOLD=0`을 그대로
-두고 먼저 실행한다. 2026-08-10에 attention mask 보강 전 시작한 동일 목적의 diagnostic
+두고 먼저 실행한다. 2026-08-10에 attention mask와 eval KV-cache 보강 전 시작한 동일 목적의 diagnostic
 run은 parser golden 관찰용으로만 취급한다. 그 run은 method selection, QLoRA authorization,
 OOF comparison에 재사용하지 않으며, 아래 명령은 보강된 source에서 새 `RUN_TAG`로 다시
 실행한다.

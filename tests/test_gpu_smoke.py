@@ -194,8 +194,9 @@ def test_config_locks_model_revision_and_synthetic_prompt() -> None:
     )
     assert DEFAULT_GPU_SMOKE_CONFIG.optimizer == DEFAULT_GATE_B_CONFIG.optimizer
     assert DEFAULT_GPU_SMOKE_CONFIG.learning_rate == DEFAULT_GATE_B_CONFIG.learning_rate
+    assert DEFAULT_GPU_SMOKE_CONFIG.generation_use_cache is True
     assert DEFAULT_GPU_SMOKE_CONFIG.sha256 == (
-        "64e8075825a18468b0b2d8c820e8f14e6f71ba099aec164c7d8195953a34632e"
+        "50e3090f45f6b459c0f8e97aca83a38c9ff93792e8670046b9c4495c9f601086"
     )
     assert DEFAULT_GPU_SMOKE_CONFIG.sha256 != (
         "1f6132e365c9bf944cb8fc674fbf65fb4fbf485c202a56da1940e05b0c842900"
@@ -209,6 +210,8 @@ def test_config_locks_model_revision_and_synthetic_prompt() -> None:
         GpuSmokeConfig(lora_dropout=0.0)
     with pytest.raises(GpuSmokeValidationError, match="optimizer is locked"):
         GpuSmokeConfig(optimizer="adamw_torch")
+    with pytest.raises(GpuSmokeValidationError, match="generation_use_cache is locked"):
+        GpuSmokeConfig(generation_use_cache=False)
 
 
 def test_config_rejects_equal_values_with_wrong_exact_types() -> None:

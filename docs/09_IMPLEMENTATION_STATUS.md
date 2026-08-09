@@ -19,9 +19,9 @@
 | Gate B0 모델 파일 | **READY** | pinned tokenizer, index, 두 shard의 exact size/SHA/commit 확인 |
 | Gate B0 runtime packages | **CPU-hidden READY** | ext4 전용 환경에서 Torch/Transformers/Accelerate/PEFT/bitsandbytes/Triton 격리 import 성공 |
 | Gate B0 CPU/code readiness | **READY** | sealed development shard, real tokenizer SFT preflight, GPU runtime/training/inference/OOF selection/one-shot holdout/submission 경로 구현·회귀검증 |
-| Gate B0 GPU preflight | **READY** | 2026-08-10 pinned revision, full weights, CUDA/BF16/NF4 runtime, physical preflight와 뒤이은 synthetic smoke 모두 green |
-| Gate B0 final GPU smoke | **READY** | `gpu-smoke-20260810T001500KST.json` green: local `2+3` only, pinned NF4 load, LoRA backward/`paged_adamw_8bit` 1 step, generation/parser exact 5; competition data 0행 |
-| Gate B1 base direct-answer | **진단 실행 중** | fold 0 organizer-only base generation을 실행 중이다. attention-mask 보강 전 시작한 run은 parser/latency/finish-reason 확인용이고, 모델 선택·QLoRA·OOF 근거로 사용하지 않는다. published artifact와 모델 점수는 아직 없다. |
+| Gate B0 GPU preflight | **이전 source READY / production refresh 대기** | 2026-08-10 pinned revision, full weights, CUDA/BF16/NF4 runtime, physical preflight와 synthetic smoke 모두 green. eval KV-cache source에는 새 tagged B0 artifact가 필요하다. |
+| Gate B0 final GPU smoke | **이전 source READY / production refresh 대기** | `gpu-smoke-20260810T001500KST.json` green: local `2+3` only, pinned NF4 load, LoRA backward/`paged_adamw_8bit` 1 step, generation/parser exact 5; competition data 0행. 새 smoke config는 cache-on eval을 명시 검증한다. |
+| Gate B1 base direct-answer | **진단 실행 중** | fold 0 organizer-only base generation을 실행 중이다. attention-mask/cache 보강 전 시작한 run은 parser/latency/finish-reason 확인용이고, 모델 선택·QLoRA·OOF 근거로 사용하지 않는다. published artifact와 모델 점수는 아직 없다. |
 | Gate B2 QLoRA SFT | **미실행** | 보강된 source의 production B1 base artifact와 실제-generation parser golden gate 전에는 학습 금지 |
 | leaderboard prediction/submission | **미실행** | 모델 prediction 0건; leaderboard를 학습/API 입력에 쓰지 않음 |
 
@@ -77,11 +77,11 @@ leaderboard/test 입력 또는 실제 development generation은 아직 사용하
 - `model_preflight.py`: exact pinned shard contract, isolated import/ABI probe, physical VRAM
   gate, prerequisite-ready와 execution-ready 분리
 - `gpu_smoke.py`: 고정 synthetic 2+3 prompt만 쓰는 lazy NF4 load + LoRA backward +
-  generation final gate. external occupancy는 CUDA context 전 read-only `nvidia-smi`로,
+  training cache-off/eval KV-cache-on generation final gate. external occupancy는 CUDA context 전 read-only `nvidia-smi`로,
   usable capacity는 context 후 CUDA free-VRAM으로 각각 검증·artifact화한다.
 - `gate_b_sft_preflight.py`: pinned tokenizer로 실제 fold payload를 response-only encode하고
   truncation/holdout·leaderboard 미사용을 증명
-- `gate_b_runtime.py`: base/adapter lazy NF4 generation, exact fold QLoRA training,
+- `gate_b_runtime.py`: base/adapter lazy NF4 generation (eval KV cache on), exact fold QLoRA training (cache off),
   adapter manifest와 36-layer×7-projection×A/B=504 safetensors shape/dtype 검증
 - `gate_b_selection.py`: single-fold probe와 complete 5-fold OOF union 비교, paired
   duplicate-cluster bootstrap, exact McNemar, 한 family Holm; final freeze는 complete OOF만
@@ -134,9 +134,9 @@ LoRA optimizer step으로 확증했다. smoke raw generation은 local prompt의
 development baseline을 허용하지만 leaderboard/test prediction을 허용하는 근거는 아니다.
 
 2026-08-10에 fold 0 base direct-answer의 첫 GPU generation을 시작했다. 이 run은
-`attention_mask` 보강 전 이미 시작된 source를 사용하므로, 완료해도 raw generation,
+`attention_mask`와 eval KV-cache 보강 전 이미 시작된 source를 사용하므로, 완료해도 raw generation,
 parser 상태, latency, finish reason을 확인하는 **진단 artifact**로만 보존한다. 동일한
-data/split/config 계약에서 보강된 source와 새 versioned output target으로 실행한
+data/split/config 계약에서 보강된 source, 새 B0 preflight/smoke, 새 versioned output target으로 실행한
 production baseline이 성공하기 전에는 QLoRA, OOF 비교, primary/fallback 선택을 시작하지
 않는다.
 

@@ -22,10 +22,11 @@
 - 공개·동등 접근 외부 데이터와 상용 API의 training-data/rationale 생성은 허용된다.
   leaderboard/test 입력은 금지다. Python/SymPy TIR과 same-base multi-adapter/checkpoint
   결합은 명시 답변 전 off다.
-- RTX 4070 SUPER 12GB의 B0 preflight와 local synthetic NF4 smoke는 green이다. 따라서
-  새 versioned B1 development run만 허용하며, 각 새 GPU run 직전에도 free VRAM 10GiB
-  이상과 pre-existing used VRAM 1GiB 이하를 다시 관측한다. leaderboard/test prediction은
-  여전히 freeze 이후에만 허용한다.
+- RTX 4070 SUPER 12GB의 이전 source B0 preflight와 local synthetic NF4 smoke는 green이다.
+  training cache-off와 eval KV-cache-on을 분리한 source는 새 tagged preflight/smoke를
+  다시 만든 뒤에만 production B1을 허용한다. 각 새 GPU run 직전에도 free VRAM 10GiB 이상과
+  pre-existing used VRAM 1GiB 이하를 다시 관측한다. leaderboard/test prediction은 여전히
+  freeze 이후에만 허용한다.
 - fold 0 base/direct-answer를 첫 probe로 실행하고 실제 generation parser golden을 고정한
   뒤, 같은 base→QLoRA 순서를 fold 1~4에 반복한다. `compare-development-oof`는 모든
   label×fold run을 강제하고 전체 OOF union에서 paired cluster bootstrap, exact McNemar,
@@ -612,7 +613,8 @@ WSL CUDA bridge는 존재한다. 2026-08-09 첫 smoke attempt는 model load 전 
 중단됐지만, external occupancy와 CUDA-context overhead를 분리하도록 guard를 보강했다.
 2026-08-10 새 target-host preflight와 local synthetic smoke는 pinned NF4 base load,
 LoRA backward/optimizer step, generation/parser까지 green으로 확인했다. 이 evidence는
-organizer-only B1을 허용할 뿐 leaderboard/test prediction을 허용하지 않으며, 실제
+그 source의 organizer-only B1을 허용했지만, 이후 발견한 training/eval cache 분리 보강은
+새 smoke가 필요하다. leaderboard/test prediction은 여전히 허용하지 않으며, 실제
 development score는 artifact가 atomic publish되기 전에는 기록하지 않는다.
 
 가능:
@@ -633,7 +635,7 @@ development score는 artifact가 atomic publish되기 전에는 기록하지 않
 
 - NF4 double quant, BF16 compute QLoRA
 - sequence 2,048, microbatch 1, gradient accumulation 16
-- all-linear rank 16/alpha 32, gradient checkpointing, `use_cache=false`
+- all-linear rank 16/alpha 32, gradient checkpointing, training `use_cache=false` / eval KV cache on
 - base direct-answer B01 → answer-only SFT S00 순서
 - self-consistency는 작은 순차 batch와 global token/time budget
 - rank 32, sequence 4K, BF16 LoRA는 각각 별도 VRAM smoke 없이는 실행 금지

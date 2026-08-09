@@ -117,6 +117,8 @@ class GateBConfig:
     logging_steps: int = 10
     gradient_checkpointing: bool = True
     gradient_checkpointing_use_reentrant: bool = False
+    # This is the training-mode setting.  Inference explicitly enables the
+    # KV cache from the pinned runtime source after model.eval().
     use_cache: bool = False
     generation_do_sample: bool = False
     generation_num_beams: int = 1

@@ -7,8 +7,9 @@
 > **현재 운영 계약:** 로컬 구현 루트는 `$PROJECT`, 데이터 루트는
 > `$PROJECT/deep-learning-challenge-2026`이다. 2026-08-03 14:00 정제본인
 > 831행 leaderboard와 627개 train exclusion ID를 사용한다. split v4는 재생성하지
-> 않고 hard-group exclusion overlay를 적용한다. B0 preflight와 local synthetic smoke는
-> green이며, 실제 GPU 모델 실행은 versioned B1 개발 artifact를 만들 때만 허용한다.
+> 않고 hard-group exclusion overlay를 적용한다. 이전 source의 B0 preflight와 local
+> synthetic smoke는 green이다. training cache-off와 eval KV-cache-on을 분리한 source로
+> production B1을 시작하기 전에는 새 tag의 B0 preflight/smoke를 다시 통과한다.
 > 아직 완료된 B1/QLoRA 점수는 없다. 정확한 실행 명령은
 > [Gate B CPU-ready 런북](docs/10_GATE_B_CPU_READY_RUNBOOK.md)에 있다.
 
@@ -47,13 +48,14 @@ flowchart LR
 | Kaggle authenticated API 재검증 | **완료** | 참가 중인 slug·Rules/Data/Evaluation·파일 목록·현재 제출 가능 횟수(5)를 읽기 전용 확인; 파일 목록에는 sample submission이 없음 |
 | 논문·방법론 조사 | 완료 | SFT, LoRA/QLoRA, self-training, preference, GRPO/RLVR, verifier, TIR, test-time compute, 오염 감사 |
 | model-free Gate A | **READY** | strict loader, filtered audit, split v4 overlay, parser, grouped evaluation, voting, uppercase-ID submission, provenance와 회귀 테스트 |
-| 모델·토크나이저 preflight | **READY** | pinned tokenizer와 2개 full weight shard/commit, CUDA/BF16/NF4 QLoRA runtime, physical VRAM preflight, local synthetic smoke를 모두 green으로 확인 |
+| 모델·토크나이저 preflight | **이전 source READY / production refresh 대기** | pinned tokenizer와 2개 full weight shard/commit, CUDA/BF16/NF4 QLoRA runtime, physical VRAM preflight, local synthetic smoke를 green으로 확인했다. eval KV-cache runtime 보강 뒤에는 새 B0 artifact를 만든다. |
 | 실제 QLoRA 학습·모델 추론 | **B1 진단 실행 중** | fold 0 base direct-answer generation을 실행 중이다. attention-mask 보강 전 시작한 run은 진단용이며, 결과를 모델 선택·QLoRA 승격에 쓰지 않는다. 수정 소스의 별도 versioned production baseline이 성공한 뒤에만 QLoRA를 시작한다. |
 
-따라서 **Gate A와 Gate B0 GPU gate는 READY**이며, 실제 모델 점수는 아직 없다. full
-pinned cache와 전용 QLoRA 환경은 준비됐고, local synthetic smoke가 최초의 실제 CUDA
-workload였다. 새 GPU workload는 직전 read-only VRAM 조건과 versioned artifact target을
-다시 확인한 뒤에만 실행한다. 구현·테스트의 최종 상태는
+따라서 **Gate A는 READY**이며, 이전 source의 Gate B0 GPU gate도 green이다. 실제 모델
+점수는 아직 없다. full pinned cache와 전용 QLoRA 환경은 준비됐고, local synthetic smoke가
+최초의 실제 CUDA workload였다. 새 eval KV-cache source의 production GPU workload는 새
+preflight/smoke, 직전 read-only VRAM 조건, versioned artifact target을 모두 확인한 뒤에만
+실행한다. 구현·테스트의 최종 상태는
 [선행 구현 및 검증 상태](docs/09_IMPLEMENTATION_STATUS.md)에 기록한다.
 
 ## 가장 중요한 데이터 발견
@@ -84,7 +86,7 @@ workload였다. 새 GPU workload는 직전 read-only VRAM 조건과 versioned ar
 
 ### 2. 주력 모델 경로
 
-- 현재 RTX 4070 SUPER 12GB의 첫 실행은 NF4 double-quant/BF16 compute, seq 2,048, microbatch 1, gradient accumulation 16, rank 16/alpha 32, gradient checkpointing on, `use_cache=false`로 시작한다.
+- 현재 RTX 4070 SUPER 12GB의 첫 실행은 NF4 double-quant/BF16 compute, seq 2,048, microbatch 1, gradient accumulation 16, rank 16/alpha 32, gradient checkpointing on으로 시작한다. training은 `use_cache=false`를 유지하고, `model.eval()`의 직렬 generation은 KV cache를 명시적으로 켠다.
 - rank 32나 4K sequence는 실제 free-VRAM smoke와 개발 성능 근거를 통과한 뒤에만 별도 config로 비교한다. full BF16 fine-tuning은 이 12GB 장비의 경로가 아니다.
 - 제공 train의 정답만 있는 예제를 그대로 장황한 풀이로 꾸미지 않는다. 같은 Qwen 베이스에서 여러 풀이를 생성하고 정답·계산을 검증해 간결한 풀이만 채택한다.
 - 절차적으로 생성한 integer-only 문제와 라이선스·출처가 명확한 공개 데이터만 단계적으로 추가한다.
@@ -142,7 +144,7 @@ workload였다. 새 GPU workload는 직전 read-only VRAM 조건과 versioned ar
 ## 구현 단계별 체크포인트
 
 - **A — model-free 기반:** strict loader, manifest, quality flags, 안전한 group split, parser, grouped evaluator, voting, submission writer/validator를 구현·테스트했다. **현재 완료 상태**다.
-- **B — organizer-only 단일 adapter:** base direct-answer 개발 기준선을 먼저 실행하고, 그 뒤 answer-only QLoRA와 독립 검증된 concise rationale를 분리 비교한다. B0 preflight/smoke는 green이고, 현재 fold 0 base의 pre-mask diagnostic generation이 진행 중이다. 이 진단 결과는 수집·검증만 하며, 수정된 source의 production baseline 전에는 승격 근거가 아니다.
+- **B — organizer-only 단일 adapter:** base direct-answer 개발 기준선을 먼저 실행하고, 그 뒤 answer-only QLoRA와 독립 검증된 concise rationale를 분리 비교한다. 이전 source의 B0 preflight/smoke는 green이고, 현재 fold 0 base의 pre-mask/cache-off diagnostic generation이 진행 중이다. 이 진단 결과는 수집·검증만 하며, eval KV-cache source의 새 B0와 production baseline 전에는 승격 근거가 아니다.
 - **C — 확장:** 규칙상 허용된 외부 공개 데이터와 training-only teacher rationale도 provenance/오염/품질 gate 뒤에만 쓴다. Python/SymPy TIR과 same-base 다중 adapter/checkpoint 결합은 서면 확인 전 비활성화한다.
 
 따라서 모든 질문의 답이 올 때까지 안전한 기반 구현을 멈추지는 않지만, 답이 없는 기능을 묵시적으로 허용하지도 않는다.

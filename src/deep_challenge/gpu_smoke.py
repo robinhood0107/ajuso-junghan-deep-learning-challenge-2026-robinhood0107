@@ -98,6 +98,7 @@ class GpuSmokeConfig:
     learning_rate: float = DEFAULT_GATE_B_CONFIG.learning_rate
     response_only_loss: bool = True
     max_new_tokens: int = 16
+    generation_use_cache: bool = True
     seed: int = 20_260_804
     minimum_free_vram_mib: int = DEFAULT_NF4_MIN_FREE_VRAM_MIB
     maximum_preexisting_used_vram_mib: int = 1_024
@@ -132,6 +133,7 @@ class GpuSmokeConfig:
             ("learning_rate", self.learning_rate, DEFAULT_GATE_B_CONFIG.learning_rate),
             ("response_only_loss", self.response_only_loss, True),
             ("max_new_tokens", self.max_new_tokens, 16),
+            ("generation_use_cache", self.generation_use_cache, True),
             ("seed", self.seed, 20_260_804),
             (
                 "minimum_free_vram_mib",
@@ -178,6 +180,7 @@ class GpuSmokeRequest:
     expected_answer: int
     seed: int
     max_new_tokens: int
+    generation_use_cache: bool
     minimum_free_vram_mib: int
     maximum_preexisting_used_vram_mib: int
     lora_rank: int
@@ -202,6 +205,7 @@ class GpuSmokeRequest:
             expected_answer=config.expected_answer,
             seed=config.seed,
             max_new_tokens=config.max_new_tokens,
+            generation_use_cache=config.generation_use_cache,
             minimum_free_vram_mib=config.minimum_free_vram_mib,
             maximum_preexisting_used_vram_mib=config.maximum_preexisting_used_vram_mib,
             lora_rank=config.lora_rank,
@@ -552,7 +556,7 @@ class TransformersNF4SmokeRuntime:
                     max_new_tokens=request.max_new_tokens,
                     pad_token_id=tokenizer.eos_token_id,
                     eos_token_id=tokenizer.eos_token_id,
-                    use_cache=False,
+                    use_cache=request.generation_use_cache,
                 )
             torch.cuda.synchronize(device_index)
             generation_latency_ms = (
