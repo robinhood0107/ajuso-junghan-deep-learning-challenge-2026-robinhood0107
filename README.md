@@ -10,7 +10,9 @@
 > 않고 hard-group exclusion overlay를 적용한다. 이전 source의 B0 preflight와 local
 > synthetic smoke는 green이다. training cache-off와 eval KV-cache-on을 분리한 source로
 > production B1을 시작하기 전에는 새 tag의 B0 preflight/smoke를 다시 통과한다.
-> 아직 완료된 B1/QLoRA 점수는 없다. 정확한 실행 명령은
+> selection-eligible B1/QLoRA 점수는 아직 없다. 보강 전 source의 fold 0 base diagnostic은
+> 2,942문항 중 1,210 exact match(41.1285%)를 기록했지만 parser/latency 관찰용일 뿐
+> 모델 선택에 쓰지 않는다. 정확한 실행 명령은
 > [Gate B CPU-ready 런북](docs/10_GATE_B_CPU_READY_RUNBOOK.md)에 있다.
 
 ## 한 줄 결론
@@ -49,7 +51,7 @@ flowchart LR
 | 논문·방법론 조사 | 완료 | SFT, LoRA/QLoRA, self-training, preference, GRPO/RLVR, verifier, TIR, test-time compute, 오염 감사 |
 | model-free Gate A | **READY** | strict loader, filtered audit, split v4 overlay, parser, grouped evaluation, voting, uppercase-ID submission, provenance와 회귀 테스트 |
 | 모델·토크나이저 preflight | **이전 source READY / production refresh 대기** | pinned tokenizer와 2개 full weight shard/commit, CUDA/BF16/NF4 QLoRA runtime, physical VRAM preflight, local synthetic smoke를 green으로 확인했다. eval KV-cache runtime 보강 뒤에는 새 B0 artifact를 만든다. |
-| 실제 QLoRA 학습·모델 추론 | **B1 진단 실행 중** | fold 0 base direct-answer generation을 실행 중이다. attention-mask 보강 전 시작한 run은 진단용이며, 결과를 모델 선택·QLoRA 승격에 쓰지 않는다. 수정 소스의 별도 versioned production baseline이 성공한 뒤에만 QLoRA를 시작한다. |
+| 실제 QLoRA 학습·모델 추론 | **B1 진단 완료 / production 재실행 대기** | old source fold 0 base diagnostic은 2,942문항·1,210 exact match(41.1285%)와 redacted parser audit을 남겼다. attention-mask/cache 보강 전 run이므로 모델 선택·QLoRA 승격에는 쓰지 않으며, 새 B0와 versioned production baseline 뒤에만 QLoRA를 시작한다. |
 
 따라서 **Gate A는 READY**이며, 이전 source의 Gate B0 GPU gate도 green이다. 실제 모델
 점수는 아직 없다. full pinned cache와 전용 QLoRA 환경은 준비됐고, local synthetic smoke가
@@ -144,7 +146,7 @@ preflight/smoke, 직전 read-only VRAM 조건, versioned artifact target을 모�
 ## 구현 단계별 체크포인트
 
 - **A — model-free 기반:** strict loader, manifest, quality flags, 안전한 group split, parser, grouped evaluator, voting, submission writer/validator를 구현·테스트했다. **현재 완료 상태**다.
-- **B — organizer-only 단일 adapter:** base direct-answer 개발 기준선을 먼저 실행하고, 그 뒤 answer-only QLoRA와 독립 검증된 concise rationale를 분리 비교한다. 이전 source의 B0 preflight/smoke는 green이고, 현재 fold 0 base의 pre-mask/cache-off diagnostic generation이 진행 중이다. 이 진단 결과는 수집·검증만 하며, eval KV-cache source의 새 B0와 production baseline 전에는 승격 근거가 아니다.
+- **B — organizer-only 단일 adapter:** base direct-answer 개발 기준선을 먼저 실행하고, 그 뒤 answer-only QLoRA와 독립 검증된 concise rationale를 분리 비교한다. pre-mask/cache-off fold 0 diagnostic은 완료되어 raw를 공개하지 않는 parser audit과 safe synthetic regression으로 전환했지만, 이 결과는 수집·검증용이다. eval KV-cache source의 새 B0와 production baseline 전에는 승격 근거가 아니다.
 - **C — 확장:** 규칙상 허용된 외부 공개 데이터와 training-only teacher rationale도 provenance/오염/품질 gate 뒤에만 쓴다. Python/SymPy TIR과 same-base 다중 adapter/checkpoint 결합은 서면 확인 전 비활성화한다.
 
 따라서 모든 질문의 답이 올 때까지 안전한 기반 구현을 멈추지는 않지만, 답이 없는 기능을 묵시적으로 허용하지도 않는다.

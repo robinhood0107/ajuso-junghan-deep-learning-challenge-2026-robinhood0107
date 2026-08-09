@@ -77,12 +77,11 @@ PYTHONPATH=src python3 -m deep_challenge.public_repo_guard --all
 | B4.2 | submission build/verify | B4.1 complete | writer + two independent validators + checksum | any missing/invalid ID |
 | B4.3 | Kaggle upload | explicit user request only | Kaggle submission receipt | no explicit authorization |
 
-### 3.1 현재 실행 중인 진단과 안전한 종료 처리
+### 3.1 완료된 진단과 안전한 종료 처리
 
 2026-08-10에 시작한 아래 fold 0 run은 **진단 전용**이다. attention mask와 eval
 KV-cache 보강 전 source에서 시작했으므로, 성공하더라도 model selection, QLoRA 시작,
-OOF 비교, primary/fallback freeze의 근거로 사용하지 않는다. 이 run을 중단하거나 GPU를
-선점하지 않는다.
+OOF 비교, primary/fallback freeze의 근거로 사용하지 않는다.
 
 | 항목 | 값 |
 |---|---|
@@ -90,7 +89,7 @@ OOF 비교, primary/fallback freeze의 근거로 사용하지 않는다. 이 run
 | 대상 | organizer train의 eligible fold 0 validation 2,942문항, greedy base direct-answer 1회 |
 | 출력 | `artifacts/gate_b/20260810T002000KST/fold-0/base-direct-predictions.jsonl`, `base-direct-manifest.json` |
 | 공개 경계 | 두 파일 모두 `artifacts/` 아래의 private evidence이며 Git에 올리지 않음 |
-| 정상 완료 | atomic JSONL/manifest 쌍이 함께 publish되고 manifest record count가 2,942이며 checksum이 일치 |
+| 상태 | 정상 완료: atomic JSONL/manifest 쌍과 checksum이 일치, 2,942 records / 1,210 exact match (41.1285%) |
 | 실패 처리 | atomic pair가 없거나 checksum/record count가 다르면 failure evidence만 남기고 재시도 조건을 기록; partial output을 승격하지 않음 |
 
 종료 뒤에는 raw question, answer, completion을 터미널이나 공개 문서에 출력하지 않는다.
@@ -111,7 +110,7 @@ stored parser mismatch 중 하나라도 있으면 output을 만들지 않는다.
 uv run deep-challenge audit-parser-golden \
   --records "$RUN_DIR/base-direct-predictions.jsonl" \
   --manifest "$RUN_DIR/base-direct-manifest.json" \
-  --output "artifacts/analysis/parser-golden-20260810T002000KST-fold0.json"
+  --output "artifacts/analysis/parser-golden-20260810T002000KST-fold0-v2.json"
 ```
 
 이 진단에서 실제 completion 구조를 관찰한 뒤에도 public test에는 question, ID,
@@ -119,16 +118,21 @@ reference answer, raw completion을 넣지 않는다. marker/source/status/reaso
 익명화한 구조적 regression case를 별도로 재현하고, parser conflict가 보이면 반드시
 `conflict` 그대로 검증한다.
 
+R1과 R2는 완료됐다. v2 audit은 19개 outcome class만 기록하고 raw completion/ID/answer를
+직렬화하지 않았으며, 그 class를 safe synthetic boxed/final/hash/fallback regression으로
+고정했다. 이 완료는 production model-score gate가 아니라 parser behavior gate다.
+
 ### 3.2 전체 백로그와 의존 관계
 
 아래 목록은 재개 시 순서를 바꾸지 않는 실행 단위다. `CPU`는 CUDA workload 없이 가능한
 작업이고, `GPU`는 직전 gate의 immutable evidence가 있을 때만 시작한다.
 
-1. **R1 (진행 중, GPU):** 진단 run의 atomic 종료를 기다리고 aggregate-only 검증을 한다.
-2. **R2 (CPU):** 실제 generation에서 새 parser 구조가 있는지 private artifact 안에서
-   점검하고, 익명 구조 regression test와 실패-보존 test를 추가한다.
-3. **R3 (CPU):** Ruff, full `pytest -s -q`, public-repo guard, canonical checksum을 다시
-   실행하고 docs 09/04/05/10/11을 현재 evidence로 갱신한다.
+1. **R1 (완료, GPU):** diagnostic run이 atomic 종료했고 aggregate-only checksum 검증을
+   통과했다. selection evidence로는 봉인한다.
+2. **R2 (완료, CPU):** private parser audit v2와 raw-free structural regression을 추가했다.
+   conflict는 여전히 fail-visible이다.
+3. **R3 (완료, CPU):** Ruff, full `pytest -s -q` (349 passed, 1 skipped), public-repo guard,
+   canonical checksum을 통과했고 docs 04/05/07/09/10/11을 현재 evidence로 갱신했다.
 4. **R4 (GPU):** GPU가 `used <= 1,024MiB`, `free >= 10,240MiB`인 새 관측값에서 current
    source preflight와 cache-on synthetic smoke를 새 run tag로 실행한다.
 5. **R5 (GPU):** R4에 bound된 current-source fold 0 base direct-answer baseline을 새

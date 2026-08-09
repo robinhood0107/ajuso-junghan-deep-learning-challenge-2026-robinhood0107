@@ -227,6 +227,12 @@ run은 parser golden 관찰용으로만 취급한다. 그 run은 method selectio
 OOF comparison에 재사용하지 않으며, 아래 명령은 보강된 source에서 새 `RUN_TAG`로 다시
 실행한다.
 
+이 diagnostic은 이후 정상 종료되어 2,942행 중 1,210 exact match(41.1285%)와 redacted
+parser audit 19개 outcome class를 남겼다. public regression은 safe synthetic structural
+case만 추가했고 raw output은 private artifact에 남겼다. 하지만 run source가
+attention-mask/eval-cache 보강 전이므로 위 aggregate는 production score도 selection evidence도
+아니다. 아래 current-source 명령의 새 B0 binding과 output target을 대체하지 않는다.
+
 ```bash
 FOLD=0
 RUN_ROOT="$PROJECT/artifacts/gate_b/$RUN_TAG"

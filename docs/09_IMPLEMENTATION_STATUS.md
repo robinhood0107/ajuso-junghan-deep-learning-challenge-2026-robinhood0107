@@ -21,7 +21,7 @@
 | Gate B0 CPU/code readiness | **READY** | sealed development shard, real tokenizer SFT preflight, GPU runtime/training/inference/OOF selection/one-shot holdout/submission 경로 구현·회귀검증 |
 | Gate B0 GPU preflight | **이전 source READY / production refresh 대기** | 2026-08-10 pinned revision, full weights, CUDA/BF16/NF4 runtime, physical preflight와 synthetic smoke 모두 green. eval KV-cache source에는 새 tagged B0 artifact가 필요하다. |
 | Gate B0 final GPU smoke | **이전 source READY / production refresh 대기** | `gpu-smoke-20260810T001500KST.json` green: local `2+3` only, pinned NF4 load, LoRA backward/`paged_adamw_8bit` 1 step, generation/parser exact 5; competition data 0행. 새 smoke config는 cache-on eval을 명시 검증한다. |
-| Gate B1 base direct-answer | **진단 실행 중** | fold 0 organizer-only base generation을 실행 중이다. attention-mask/cache 보강 전 시작한 run은 parser/latency/finish-reason 확인용이고, 모델 선택·QLoRA·OOF 근거로 사용하지 않는다. published artifact와 모델 점수는 아직 없다. |
+| Gate B1 base direct-answer | **진단 완료 / production 재실행 대기** | old source fold 0 organizer-only base generation은 2,942행 중 1,210 exact match(41.1285%), parser `ok/conflict/invalid=2143/3/796`, finish `stop/length=2134/808`를 기록했다. attention-mask/cache 보강 전 run은 parser/latency/finish-reason 확인용이며 모델 선택·QLoRA·OOF 근거로 사용하지 않는다. |
 | Gate B2 QLoRA SFT | **미실행** | 보강된 source의 production B1 base artifact와 실제-generation parser golden gate 전에는 학습 금지 |
 | leaderboard prediction/submission | **미실행** | 모델 prediction 0건; leaderboard를 학습/API 입력에 쓰지 않음 |
 
@@ -42,8 +42,9 @@
 weights/checkpoint/전용 venv는 C:가 아니라 WSL ext4에 둔다. GPU 전용 환경 설치와
 import 검사는 `CUDA_VISIBLE_DEVICES=''`에서 수행했다. 2026-08-09 첫 smoke attempt는
 CUDA context 뒤 model load 전에 fail-closed로 중단됐지만, guard 보강 뒤 2026-08-10
-새 preflight와 local synthetic smoke는 green이다. 이 smoke 이외에 organizer train,
-leaderboard/test 입력 또는 실제 development generation은 아직 사용하지 않았다.
+새 preflight와 local synthetic smoke는 green이다. 그 뒤 organizer train의 fold 0 validation
+2,942행에 한해 old-source diagnostic generation을 한 번 실행했다. leaderboard/test 입력은
+학습·self-training·외부 API·모델 inference에 사용하지 않았다.
 
 ### 최신 데이터와 split overlay
 
@@ -119,11 +120,17 @@ semantic config SHA는 `4530c14a4782c439ea3a8325b90d997793eda368b0371d765cb81069
 - `artifacts/analysis/kaggle-b0-20260804/rules-decision-manifest-v1.json`
 - `artifacts/analysis/kaggle-b0-20260809/browser-access-evidence-v2.json`
 - `artifacts/analysis/kaggle-b0-20260810/authenticated-api-snapshot-v1.json`
+- `artifacts/analysis/kaggle-b0-20260810/authenticated-api-recheck-v2.json`
 - `artifacts/analysis/model-preflight-gpu-current-20260810T001500KST.json`
 - `artifacts/analysis/gpu-smoke-20260810T001500KST.json`
+- `artifacts/analysis/parser-golden-20260810T002000KST-fold0.json` (initial redacted audit)
+- `artifacts/analysis/parser-golden-20260810T002000KST-fold0-v2.json` (reason-code allowlist
+  correction 후 canonical redacted audit)
 - `artifacts/analysis/source-manifest-final-v4.json` (2026-08-09 source edits 뒤 재생성 예정)
 - `artifacts/analysis/source-manifest-parser-golden-v1-20260810.json` (parser golden audit
   implementation·docs·tests를 포함한 current source tree, 64 files)
+- `artifacts/analysis/source-manifest-diagnostic-golden-v2-20260810.json` (diagnostic result,
+  parser golden regression, Kaggle recheck documentation을 포함한 source tree, 64 files)
 - `artifacts/analysis/CHECKSUMS.sha256`
 
 `model-preflight-current.json`은 기본 개발 환경의 의도적 package 부재까지 기록한다.
@@ -138,20 +145,22 @@ LoRA optimizer step으로 확증했다. smoke raw generation은 local prompt의
 `Final answer: 5`이며 parser exact match가 통과했다. 이 결과는 B1의 organizer-only
 development baseline을 허용하지만 leaderboard/test prediction을 허용하는 근거는 아니다.
 
-2026-08-10에 fold 0 base direct-answer의 첫 GPU generation을 시작했다. 이 run은
-`attention_mask`와 eval KV-cache 보강 전 이미 시작된 source를 사용하므로, 완료해도 raw generation,
-parser 상태, latency, finish reason을 확인하는 **진단 artifact**로만 보존한다. 동일한
-data/split/config 계약에서 보강된 source, 새 B0 preflight/smoke, 새 versioned output target으로 실행한
-production baseline이 성공하기 전에는 QLoRA, OOF 비교, primary/fallback 선택을 시작하지
-않는다.
+2026-08-10에 시작한 fold 0 base direct-answer GPU generation은 atomic JSONL/manifest pair로
+정상 완료됐다. old source는 `attention_mask`와 eval KV-cache 보강 전 이미 import됐으므로,
+1,210/2,942 exact match(41.1285%), 989,549 output token, max allocated VRAM
+2,193,992,192 bytes라는 aggregate는 raw generation, parser 상태, latency, finish reason을
+확인하는 **진단 artifact**로만 보존한다. 동일 data/split/config 계약에서 보강된 source,
+새 B0 preflight/smoke, 새 versioned output target으로 실행한 production baseline이 성공하기
+전에는 QLoRA, OOF 비교, primary/fallback 선택을 시작하지 않는다.
 
 실제 JSONL/manifest 쌍이 atomic publish된 뒤에는 CUDA를 쓰지 않는
 `audit-parser-golden`으로 bundle checksum, fold-validation/cross-validation partition,
 각 stored parser result를 다시 확인한다. 이 명령은 raw completion, completion hash, ID,
 question, reference answer, parsed integer를 새 artifact에 쓰지 않고 status/source/reason
-code별 count만 남긴다. 현재 도구와 synthetic privacy/negative regression tests는 구현됐지만
-실제 diagnostic artifact가 아직 없으므로 실제 golden observation과 그에 근거한 public
-structural parser fixture는 **미실행**이다.
+code별 count만 남긴다. diagnostic bundle의 v2 audit은 19개 outcome class를 검증했고,
+raw를 쓰지 않는 safe synthetic boxed/final/hash/fallback regression case를 public tests에
+추가했다. parser conflict 3건은 `conflict`로 보존되며 hidden fallback이나 0으로 바뀌지
+않는다.
 
 CPU-only SFT preflight v3는 fold 0 training 11,794행, validation 2,942행, union
 14,736행을 실제 pinned tokenizer로 encode했다. 최대 sequence는 1,127/2,048,
@@ -162,7 +171,8 @@ CPU-only SFT preflight v3는 fold 0 training 11,794행, validation 2,942행, uni
 ### 최신 전체 회귀
 
 - `uv run ruff check .`: **pass**
-- `CUDA_VISIBLE_DEVICES='' ... uv run pytest -s -q`: **334 passed, 1 skipped** (2026-08-10 재실행)
+- `CUDA_VISIBLE_DEVICES='' ... uv run pytest -s -q`: **349 passed, 1 skipped** (2026-08-10
+  actual-output-derived parser golden regression 포함 재실행)
 - branch coverage: **79%** (6,518 statements, 2,284 branches)
 - skip 1건은 기본 CPU `.venv`에 PyTorch가 없어 실제 PEFT 0.20 serialization
   compatibility test를 건너뛴 것이다. 같은 구조의 real safetensors 파일에 대한

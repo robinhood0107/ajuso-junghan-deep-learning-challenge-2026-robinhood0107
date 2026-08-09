@@ -95,6 +95,7 @@ def test_parser_golden_audit_is_redacted_and_reparses_every_completion(tmp_path:
             "Final answer: 5",
             "Final answer: 7391\nFinal answer: 8842",
             r"work \boxed{42}",
+            "Final answer: 42.5",
         ],
     )
     output = tmp_path / "parser-golden.json"
@@ -103,7 +104,7 @@ def test_parser_golden_audit_is_redacted_and_reparses_every_completion(tmp_path:
 
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert result.path == str(output.resolve())
-    assert result.case_count == 3
+    assert result.case_count == 4
     assert payload["schema_version"] == PARSER_GOLDEN_AUDIT_SCHEMA
     assert payload["observed_parser_outcomes"] == [
         {
@@ -111,6 +112,12 @@ def test_parser_golden_audit_is_redacted_and_reparses_every_completion(tmp_path:
             "reason_code": "conflicting_marker_values",
             "source": "final_answer",
             "status": "conflict",
+        },
+        {
+            "count": 1,
+            "reason_code": "marker:non_integral_decimal",
+            "source": "final_answer",
+            "status": "invalid",
         },
         {
             "count": 1,
@@ -190,3 +197,34 @@ def test_parser_golden_cli_reports_only_safe_summary(tmp_path: Path, capsys) -> 
     assert report["raw_completion_serialized"] is False
     assert report["locked_holdout_accessed"] is False
     assert report["leaderboard_or_test_used"] is False
+
+
+@pytest.mark.parametrize(
+    ("completion", "status", "source", "reason_fragment"),
+    [
+        ("\\boxed{41}\n\\boxed{42}", "conflict", "boxed", "conflicting_marker_values"),
+        (r"\boxed{7/2}", "invalid", "boxed", "non_integral_fraction"),
+        (r"\boxed{a/2}", "invalid", "boxed", "fraction_must_contain_two_plain"),
+        (r"\boxed{42", "invalid", "boxed", "unbalanced_braces"),
+        ("Final answer: 2 or 3", "invalid", "final_answer", "multiple_values"),
+        ("Final answer: 42.5", "invalid", "final_answer", "non_integral_decimal"),
+        ("Final answer: the result is 42", "invalid", "final_answer", "unsupported_numeric"),
+        ("#### 2 or 3", "invalid", "hashes", "multiple_values"),
+        ("#### result is 42", "invalid", "hashes", "unsupported_numeric"),
+        ("Result: 7/2", "invalid", "fallback", "non_integral_fraction"),
+        ("Result: 42.5", "invalid", "fallback", "non_integral_decimal"),
+    ],
+)
+def test_observed_generation_parser_golden_cases_are_safe_synthetic_structures(
+    completion: str,
+    status: str,
+    source: str,
+    reason_fragment: str,
+) -> None:
+    """Regression forms selected from redacted fold-0 outcome categories only."""
+
+    result = parse_answer(completion)
+
+    assert result.status == status
+    assert result.source == source
+    assert reason_fragment in result.reason

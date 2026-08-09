@@ -39,6 +39,7 @@ _SAFE_REASON_CODES = frozenset(
         "fraction_must_contain_two_plain_integers",
         "zero_denominator",
         "non_integral_fraction",
+        "non_integral_decimal",
         "invalid_comma_grouping",
         "integer_outside_runtime_safety_limit",
         "multiple_values_in_payload",

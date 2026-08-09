@@ -27,6 +27,12 @@
   다시 만든 뒤에만 production B1을 허용한다. 각 새 GPU run 직전에도 free VRAM 10GiB 이상과
   pre-existing used VRAM 1GiB 이하를 다시 관측한다. leaderboard/test prediction은 여전히
   freeze 이후에만 허용한다.
+- 보강 전 source의 fold 0 fixed-base diagnostic은 2,942 validation generation 중
+  1,210 exact match(41.1285%)를 기록하고 redacted parser audit 19개 outcome class를
+  만들었다. 이 run은 attention-mask/cache 보강 전의 parser·latency 관찰용이라 QLoRA,
+  OOF, method selection, holdout으로 승격하지 않는다. 실제 output에서 고른 safe
+  structural parser regression만 public code에 추가했고 production baseline은 새 B0 뒤에
+  별도 tag로 다시 실행한다.
 - fold 0 base/direct-answer를 첫 probe로 실행하고 실제 generation parser golden을 고정한
   뒤, 같은 base→QLoRA 순서를 fold 1~4에 반복한다. `compare-development-oof`는 모든
   label×fold run을 강제하고 전체 OOF union에서 paired cluster bootstrap, exact McNemar,

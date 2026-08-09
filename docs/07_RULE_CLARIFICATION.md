@@ -19,6 +19,12 @@
 `artifacts/analysis/kaggle-b0-20260810/authenticated-api-snapshot-v1.json`에 고정했다.
 이 artifact는 data-derived evidence이므로 공개 Git 저장소에 넣지 않는다.
 
+같은 날 06:15 KST에 ignored local environment의 token으로 files와 submissions endpoint를
+read-only 재확인했다. 두 endpoint는 200이었고 submissions는 0건이었다. legacy view
+endpoint는 404라 Rules 본문을 새로 얻지 못했으므로 feature flag는 v1 Rules snapshot을
+그대로 유지했다. 이 partial recheck의 status/hash만
+`artifacts/analysis/kaggle-b0-20260810/authenticated-api-recheck-v2.json`에 기록했다.
+
 ## 1. 확인된 규칙
 
 | 항목 | 현재 결정 |
@@ -134,6 +140,8 @@ affected_configs:
 - [x] authenticated Rules/Data/Evaluation/Submission contract snapshot (API hash 보존)
 - [x] current file listing에서 sample submission 부재 확인
 - [x] current submission allowance `numAllowedNow=5`, submissions 0
+- [x] 06:15 KST authenticated files/submissions recheck (200/200, submissions 0); Rules는
+  legacy endpoint 404로 변경하지 않음
 - [ ] sample row order/SHA 및 daily/total limit/final timezone
 - [ ] Python/SymPy와 same-base multi-checkpoint 서면 답변
 - [ ] team size/merge deadline

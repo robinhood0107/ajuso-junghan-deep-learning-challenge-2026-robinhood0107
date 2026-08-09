@@ -158,11 +158,14 @@ NaN
 
 정답 reference 없이 parser가 반환하는 값만 먼저 테스트하는 fixture suite는 구현했다.
 실제 base/SFT 모델을 실행한 뒤에는 raw generation과 사람이 확정한 기대 parse를
-익명화해 golden regression corpus로 추가한다. 현재 fold 0 base diagnostic generation은
-실행 중이지만 atomic artifact가 아직 publish되지 않았으므로 golden corpus는 의도적으로
-비어 있다. 완료 후에는 실제 completion을 공개 저장소에 넣지 않고, 관찰된 structural
-pattern을 익명화한 regression fixture만 추가한다. 이 gate를 통과하기 전에는 다음 GPU
-단계로 넘어가지 않는다.
+익명화해 golden regression corpus로 추가한다. 2026-08-10 old-source fold 0 diagnostic은
+atomic publish된 2,942행 bundle을 남겼고, private v2 audit은 19개
+status/source/reason-code outcome class를 확인했다. 여기서 선택한 boxed/final/hash/fallback
+구조만 안전한 synthetic fixture로 재현했으며 실제 completion, ID, question, reference
+answer, parsed value는 public code에 넣지 않았다. full CPU regression은 이 fixture를 포함해
+349 passed, 1 skipped였다. 이 diagnostic은 parser gate를 닫지만 attention-mask/cache 보강 전
+source이므로 다음 GPU 단계의 model selection 또는 QLoRA authorization은 여전히 허용하지
+않는다.
 
 `audit-parser-golden`은 이 작업의 private CPU-only 입력 검증 단계다. manifest checksum과
 JSONL line count, fold-validation/cross-validation partition, 각 row의 completion hash와
@@ -180,8 +183,8 @@ uv run deep-challenge audit-parser-golden \
 ```
 
 이 명령이 holdout/non-development partition, stale checksum, parser mismatch를 발견하면
-output을 publish하지 않는다. 현재 command와 synthetic privacy/negative tests는 구현됐고,
-실제 모델 output을 관찰해 추가한 fixture는 아직 없다.
+output을 publish하지 않는다. actual-output-derived regression은 structural synthetic form만
+public code에 고정했고, raw evidence는 `artifacts/`에만 남는다.
 
 ## 4. 문제 본문의 답 누출과 parser 분리
 
@@ -448,7 +451,7 @@ Fallback도 사전에 full rehearsal해야 한다.
 - [ ] 실제 sample submission artifact와 SHA 확보
 - [ ] test와 model artifact checksum
 - [ ] network-off full run 2회
-- [ ] parser golden tests
+- [x] parser golden tests (actual fold-0 diagnostic의 redacted outcome class 기반)
 - [x] production validator와 독립 최소 CSV validator 교차검증 구현
 - [ ] 모든 ID의 raw generation과 selected answer provenance
 - [ ] runtime이 window의 50% 이하인 여유 계획
