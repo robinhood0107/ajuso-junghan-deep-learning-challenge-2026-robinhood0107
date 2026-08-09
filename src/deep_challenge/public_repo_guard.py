@@ -21,8 +21,12 @@ _FORBIDDEN_TOP_LEVEL = frozenset(
         ".kaggle",
         ".venv",
         "artifacts",
+        "cache",
         "checkpoints",
+        "data",
+        "datasets",
         "deep-learning-challenge-2026",
+        "downloads",
         "env",
         "mlruns",
         "models",
@@ -45,11 +49,20 @@ _FORBIDDEN_BASENAMES = frozenset(
 )
 _FORBIDDEN_SUFFIXES = frozenset(
     {
+        ".bin",
         ".ckpt",
         ".csv",
+        ".jsonl",
+        ".npy",
+        ".npz",
+        ".onnx",
+        ".parquet",
+        ".pickle",
+        ".pkl",
         ".pth",
         ".pt",
         ".safetensors",
+        ".tsv",
         ".zip",
     }
 )
@@ -83,6 +96,7 @@ def find_forbidden_paths(paths: Iterable[str]) -> tuple[str, ...]:
         basename = parts[-1]
         if (
             any(part in _FORBIDDEN_TOP_LEVEL for part in parts)
+            or parts[:2] == ("reports", "generated")
             or basename in _FORBIDDEN_BASENAMES
             or basename.startswith(".env")
             or PurePosixPath(basename).suffix.lower() in _FORBIDDEN_SUFFIXES

@@ -8,12 +8,14 @@ def test_forbidden_paths_cover_competition_data_credentials_and_model_outputs() 
         (
             "artifacts/run.json",
             "archive/artifacts/run.json",
+            "datasets/external.parquet",
             "deep-learning-challenge-2026/deep_chal_math_train.csv",
             "env",
             ".env.production",
             ".kaggle/kaggle.json",
             "NU_",
             "models/adapter_model.safetensors",
+            "reports/generated/model.bin",
             "notes/result.zip",
             "submission.csv",
         )
@@ -25,10 +27,12 @@ def test_forbidden_paths_cover_competition_data_credentials_and_model_outputs() 
         "NU_",
         "archive/artifacts/run.json",
         "artifacts/run.json",
+        "datasets/external.parquet",
         "deep-learning-challenge-2026/deep_chal_math_train.csv",
         "env",
         "models/adapter_model.safetensors",
         "notes/result.zip",
+        "reports/generated/model.bin",
         "submission.csv",
     )
 

@@ -19,6 +19,8 @@
 - Kaggle 원본 CSV·ZIP와 그 복사본
 - `artifacts/` 전체: development shard, split ID, raw generation, adapter manifest,
   screenshot, submission, checksum은 대회 데이터 또는 그 파생물일 수 있다.
+- `data/`, `datasets/`, `downloads/`, `cache/`, generated report 및 raw
+  CSV/Parquet/JSONL/weight 파일처럼 별도 전달해야 하는 데이터·model 산출물
 - `env`, `.env*`, `.kaggle/`, access token, Hugging Face token 등 모든 인증 정보
 - local model weight·adapter·checkpoint·prediction·submission과 experiment tracker
 - 기존 사용자 파일 `NU_`, 개인 작업 프롬프트, local browser/tool cache

@@ -12,6 +12,10 @@ htmlcov/
 # code and reproducibility instructions only; obtain competition files from Kaggle.
 deep-learning-challenge-2026/
 artifacts/
+data/
+datasets/
+downloads/
+cache/
 reports/generated/
 submissions/
 predictions/
@@ -35,9 +39,18 @@ runs/
 wandb/
 mlruns/
 *.safetensors
+*.bin
 *.ckpt
 *.pt
 *.pth
+*.onnx
+*.npy
+*.npz
+*.parquet
+*.pkl
+*.pickle
+*.jsonl
+*.tsv
 adapter_model.bin
 submission.csv
 
