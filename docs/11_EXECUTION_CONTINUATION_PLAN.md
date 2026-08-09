@@ -14,6 +14,11 @@
 - 재현 명령, 규칙 해석, SHA-256 값, 모델·데이터를 다시 받는 방법
 - GNU GPL v3.0 라이선스 전문
 
+현재 canonical public origin은
+`https://github.com/robinhood0107/ajuso-junghan-deep-learning-challenge-2026-robinhood0107`이다.
+요청한 한글 대회명은 repository description에 보존하고, URL slug는 GitHub API가 허용한
+ASCII 표기로 사용한다.
+
 다음은 절대로 stage하거나 push하지 않는다.
 
 - Kaggle 원본 CSV·ZIP와 그 복사본
