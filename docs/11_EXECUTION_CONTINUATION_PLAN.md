@@ -30,9 +30,11 @@
 
 현재 checkout은 `.githooks/pre-commit`을 `core.hooksPath=.githooks`로 연결한다.
 이 hook은 staged Git blob만 읽어 `.gitignore`를 우회하는 force-add와 recognizable token
-pattern을 fail-closed로 막는다. 전체 tracked tree는 다음으로 별도 점검한다.
+pattern을 fail-closed로 막는다. 새 clone에서도 다음을 먼저 실행하고, 전체 tracked tree는
+그 아래 명령으로 별도 점검한다.
 
 ```bash
+git config core.hooksPath .githooks
 PYTHONPATH=src python3 -m deep_challenge.public_repo_guard --all
 ```
 

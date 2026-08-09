@@ -7,8 +7,9 @@
 > **현재 운영 계약:** 로컬 구현 루트는 `$PROJECT`, 데이터 루트는
 > `$PROJECT/deep-learning-challenge-2026`이다. 2026-08-03 14:00 정제본인
 > 831행 leaderboard와 627개 train exclusion ID를 사용한다. split v4는 재생성하지
-> 않고 hard-group exclusion overlay를 적용하며, GPU를 쓰는 모델 load·학습·추론은
-> 마지막 gate 전까지 실행하지 않는다. 정확한 실행 명령은
+> 않고 hard-group exclusion overlay를 적용한다. B0 preflight와 local synthetic smoke는
+> green이며, 실제 GPU 모델 실행은 versioned B1 개발 artifact를 만들 때만 허용한다.
+> 아직 완료된 B1/QLoRA 점수는 없다. 정확한 실행 명령은
 > [Gate B CPU-ready 런북](docs/10_GATE_B_CPU_READY_RUNBOOK.md)에 있다.
 
 ## 한 줄 결론

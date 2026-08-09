@@ -147,7 +147,8 @@ validation 2,942행이다.
 - Majority Voting, Self-Consistency 등 test-time 기법 허용
 - 제출 논리 schema `ID,answer`, 정수 Exact Match
 
-다음은 authenticated Kaggle 원문/sample artifact로 아직 확인하지 못했다.
+authenticated Kaggle API로 Rules/Data/Evaluation/Submission contract와 현재 file listing,
+submission allowance를 read-only 확인했다. 다음은 아직 확인하지 못했다.
 
 - 실제 sample submission 파일의 row order와 SHA-256
 - 일일·전체 제출 횟수
@@ -159,11 +160,11 @@ validation 2,942행이다.
 단일 base와 단일 direct-answer adapter만 비교한다. teacher rationale의 규칙은 허용으로
 읽히지만 품질 검증 corpus가 아직 없으므로 첫 baseline에는 넣지 않는다.
 
-## 5. GPU 실행 직전의 유일한 green 절차
+## 5. B0 GPU 승인 증거와 새 run 직전 재검사
 
-이 절부터는 실제 GPU 작업이다. **현재는 실행하지 않는다.** 다른 GPU 프로세스를
-종료하거나 선점하지 않는다. 사용자가 GPU를 비운 뒤에도 아래 두 조건을 모두 만족해야
-한다.
+2026-08-10 target-host preflight와 local synthetic smoke는 이미 green이다. 이 evidence를
+재사용해 B1을 시작할 수 있지만, 다른 GPU 프로세스를 종료하거나 선점하지 않는다. 모든
+새 GPU run 직전에도 아래 두 조건을 다시 관측한다.
 
 ```bash
 nvidia-smi --query-gpu=name,memory.total,memory.used,memory.free,compute_cap,driver_version \
@@ -173,11 +174,11 @@ nvidia-smi --query-gpu=name,memory.total,memory.used,memory.free,compute_cap,dri
 - free VRAM이 10,240MiB 이상
 - pre-existing used VRAM이 1,024MiB 이하
 
-`artifacts/analysis/model-preflight-gpu-current-20260809.json`의 2026-08-09 preflight
-snapshot은 total 12,282MiB, used 1,001MiB, free 10,997MiB로 두 조건을 통과했다.
-그러나 그 뒤 read-only snapshot은 used 1,115–1,130MiB로 ceiling을 넘었다. GPU 값은 계속
-변하므로 실제 실행 여부는 위 `nvidia-smi`의 직전 관측으로 다시 판정하며, snapshot 수치를
-현재 실시간 값이라고 주장하지 않는다.
+2026-08-10 evidence는
+`artifacts/analysis/model-preflight-gpu-current-20260810T001500KST.json`와
+`artifacts/analysis/gpu-smoke-20260810T001500KST.json`에 있다. GPU 값은 계속 변하므로
+snapshot 수치를 현재 실시간 값이라고 주장하지 않고, 실제 실행 여부는 위 `nvidia-smi`의
+직전 관측으로 다시 판정한다.
 
 GPU 전용 환경은 WSL ext4에 둔다. 재동기화가 필요할 때만 다음을 실행한다.
 
@@ -219,7 +220,10 @@ immutable threshold도 완화하지 않는다. 두 측정치는 green artifact�
 ## 6. Gate B1 — base direct-answer development 기준선
 
 GPU green 뒤 첫 모델 실행은 fold 0 base greedy 한 개뿐이다. 아래 `FOLD=0`을 그대로
-두고 먼저 실행한다.
+두고 먼저 실행한다. 2026-08-10에 attention mask 보강 전 시작한 동일 목적의 diagnostic
+run은 parser golden 관찰용으로만 취급한다. 그 run은 method selection, QLoRA authorization,
+OOF comparison에 재사용하지 않으며, 아래 명령은 보강된 source에서 새 `RUN_TAG`로 다시
+실행한다.
 
 ```bash
 FOLD=0

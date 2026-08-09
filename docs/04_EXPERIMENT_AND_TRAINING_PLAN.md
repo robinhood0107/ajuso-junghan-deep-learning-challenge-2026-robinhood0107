@@ -2,7 +2,7 @@
 
 이 문서는 구현자가 순서대로 실행할 수 있는 대회 운영 계획이다. 각 단계는 산출물, 측정값, 승격 조건, 중단 조건을 갖는다. 이전 단계의 gate를 통과하지 않고 다음 고비용 단계로 넘어가지 않는다.
 
-## 0. 2026-08-04 실행 잠금
+## 0. 2026-08-10 실행 잠금
 
 - 현재 데이터는 filtered leaderboard 831행과 `train_filtered_ids.csv` 627 ID를
   사용한다. raw 1,000행 leaderboard는 현재 제출/추론 입력이 아니다.
@@ -22,9 +22,10 @@
 - 공개·동등 접근 외부 데이터와 상용 API의 training-data/rationale 생성은 허용된다.
   leaderboard/test 입력은 금지다. Python/SymPy TIR과 same-base multi-adapter/checkpoint
   결합은 명시 답변 전 off다.
-- 현재 RTX 4070 SUPER 12GB의 모델 load·학습·추론은 마지막 gate다. CPU 단계가 끝나고
-  free VRAM 10GiB 이상, runtime import, NF4 kernel/model-load smoke가 모두 green일 때만
-  B01을 실행한다.
+- RTX 4070 SUPER 12GB의 B0 preflight와 local synthetic NF4 smoke는 green이다. 따라서
+  새 versioned B1 development run만 허용하며, 각 새 GPU run 직전에도 free VRAM 10GiB
+  이상과 pre-existing used VRAM 1GiB 이하를 다시 관측한다. leaderboard/test prediction은
+  여전히 freeze 이후에만 허용한다.
 - fold 0 base/direct-answer를 첫 probe로 실행하고 실제 generation parser golden을 고정한
   뒤, 같은 base→QLoRA 순서를 fold 1~4에 반복한다. `compare-development-oof`는 모든
   label×fold run을 강제하고 전체 OOF union에서 paired cluster bootstrap, exact McNemar,
@@ -163,7 +164,10 @@ decision_reason:
 
 W&B/TensorBoard를 사용해도 로컬 JSONL/CSV 원장이 권위 원본이어야 한다. 최종 재현은 외부 서비스 없이 가능해야 한다.
 
-현재 workspace는 Git 저장소가 아니므로 임의로 `git init`했다고 가정하지 않는다. 구현 시작점에서는 tracked source file의 상대경로·크기·SHA-256을 정렬한 `source_tree_manifest.json`과 그 전체 해시를 `git_sha` 대체 증거로 쓴다. 향후 사용자가 Git을 초기화하면 둘 다 기록한다.
+현재 workspace는 공개 Git 저장소이며, run에는 Git commit SHA와 content-addressed
+`source_tree_manifest.json`을 함께 기록한다. 전자는 공개 코드 revision을, 후자는
+uncommitted 상태까지 포함한 source/config/test/document tree를 식별한다. raw data,
+artifact, credential, model/checkpoint는 어느 쪽에도 포함하지 않는다.
 
 ## 5. Phase 0 — 규칙·데이터·평가 잠금
 
@@ -604,11 +608,12 @@ development 전체를 다시 학습하는 `F-evidence` refit과 former holdout�
 ### 현재 WSL/RTX 4070 SUPER 12GB
 
 WSL RAM은 약 17.56GiB, swap은 8GiB다. NVIDIA RTX 4070 SUPER 12,282MiB와
-WSL CUDA bridge는 존재한다. 2026-08-09 pinned preflight는 used 1,001MiB/free
-10,997MiB로 green이었으나, final synthetic smoke의 첫 시도는 model load 전 guard에서
-중단됐다. 이후 external occupancy와 CUDA-context overhead를 분리해 검증하도록 guard를
-보강했고, 최신 read-only usage가 immutable ceiling을 넘어 재시도하지 않았다. 다른
-프로세스를 중단하지 않았으며 실제 3B model load·학습·문제 generation은 여전히 0건이다.
+WSL CUDA bridge는 존재한다. 2026-08-09 첫 smoke attempt는 model load 전 guard에서
+중단됐지만, external occupancy와 CUDA-context overhead를 분리하도록 guard를 보강했다.
+2026-08-10 새 target-host preflight와 local synthetic smoke는 pinned NF4 base load,
+LoRA backward/optimizer step, generation/parser까지 green으로 확인했다. 이 evidence는
+organizer-only B1을 허용할 뿐 leaderboard/test prediction을 허용하지 않으며, 실제
+development score는 artifact가 atomic publish되기 전에는 기록하지 않는다.
 
 가능:
 
