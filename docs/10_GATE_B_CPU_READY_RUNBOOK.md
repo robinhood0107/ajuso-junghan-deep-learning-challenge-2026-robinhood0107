@@ -256,6 +256,11 @@ mkdir -p "$RUN_DIR" "$CHECKPOINT_DIR"
 token 수, latency, peak VRAM, fold/group이 들어간다. 실제 generation을 얻은 직후 parser
 golden regression corpus를 추가하고 전체 Ruff/pytest를 다시 통과시킨다.
 
+새 source의 CLI는 25 generation마다 question/answer/raw completion을 출력하지 않는
+`gate_b_development_progress` JSON status line도 보낸다. 이 status는 장시간 run의 liveness
+확인용일 뿐 selection evidence가 아니며, 최종 JSONL과 manifest가 함께 atomic publish되기
+전에는 run을 완료로 판정하지 않는다.
+
 ## 7. Gate B2 — organizer-only direct-answer QLoRA
 
 같은 fold의 base manifest가 성공하기 전에는 학습 명령이 거부된다. fold 0 학습은

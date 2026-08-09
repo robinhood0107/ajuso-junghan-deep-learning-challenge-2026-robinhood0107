@@ -1224,6 +1224,22 @@ def _command_gate_b_development(args: argparse.Namespace) -> int:
         )
         run_kind = "verified_adapter"
     try:
+        def report_progress(completed: int, total: int) -> None:
+            if completed == 1 or completed == total or completed % 25 == 0:
+                print(
+                    json.dumps(
+                        {
+                            "event": "gate_b_development_progress",
+                            "completed_generations": completed,
+                            "total_generations": total,
+                            "fold": args.fold,
+                            "run_kind": run_kind,
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+
         records = run_development_baseline(
             validation_records,
             split_manifest=manifest,
@@ -1233,6 +1249,7 @@ def _command_gate_b_development(args: argparse.Namespace) -> int:
             checkpoint_sha256=backend.checkpoint_sha256,
             config=config,
             samples_per_problem=1,
+            progress_callback=report_progress,
         )
         result = write_development_artifacts(
             records,

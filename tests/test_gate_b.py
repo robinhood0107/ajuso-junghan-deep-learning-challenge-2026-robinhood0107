@@ -415,6 +415,32 @@ def test_development_baseline_rejects_full_train_and_locked_holdout() -> None:
             )
 
 
+def test_development_baseline_reports_data_free_progress_counts() -> None:
+    manifest = _split_manifest()
+    validation_ids = eligible_validation_ids(manifest, 0, ())
+    outputs = {
+        (problem_id, sample_index): f"Final answer: {int(problem_id.removeprefix('train-'))}"
+        for problem_id in validation_ids
+        for sample_index in range(2)
+    }
+    observed: list[tuple[int, int]] = []
+
+    result = run_development_baseline(
+        _records_for_ids(validation_ids),
+        split_manifest=manifest,
+        fold=0,
+        excluded_ids=(),
+        backend=_FakeBackend(outputs),
+        checkpoint_sha256="a" * 64,
+        samples_per_problem=2,
+        clock_ns=lambda: 0,
+        progress_callback=lambda completed, total: observed.append((completed, total)),
+    )
+
+    assert observed == [(index, len(result)) for index in range(1, len(result) + 1)]
+    assert all(total == len(result) for _, total in observed)
+
+
 def test_generation_result_and_backend_contract_fail_closed() -> None:
     with pytest.raises(GateBValidationError, match="output_token_count"):
         GenerationResult("text", "stop", 1, -1)

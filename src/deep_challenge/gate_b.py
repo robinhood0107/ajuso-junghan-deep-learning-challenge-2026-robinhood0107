@@ -561,6 +561,7 @@ def run_development_baseline(
     config: GateBConfig = DEFAULT_GATE_B_CONFIG,
     samples_per_problem: int = 1,
     clock_ns: Callable[[], int] = time.perf_counter_ns,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> tuple[DevelopmentBaselineRecord, ...]:
     """Generate from exactly one eligible development-validation fold.
 
@@ -580,8 +581,12 @@ def run_development_baseline(
         or samples_per_problem <= 0
     ):
         raise GateBValidationError("samples_per_problem must be a positive integer")
+    if progress_callback is not None and not callable(progress_callback):
+        raise TypeError("progress_callback must be callable or None")
 
     output: list[DevelopmentBaselineRecord] = []
+    total_generations = len(ordered_ids) * samples_per_problem
+    completed_generations = 0
     decoding_policy = config.decoding_policy
     for problem_id in ordered_ids:
         record = records_by_id[problem_id]
@@ -653,6 +658,9 @@ def run_development_baseline(
                     **provenance.common,
                 )
             )
+            completed_generations += 1
+            if progress_callback is not None:
+                progress_callback(completed_generations, total_generations)
     return tuple(output)
 
 
