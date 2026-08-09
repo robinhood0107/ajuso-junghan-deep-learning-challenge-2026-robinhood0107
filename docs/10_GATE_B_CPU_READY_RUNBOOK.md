@@ -2,11 +2,12 @@
 
 기준 시각: **2026-08-10 KST**
 대상 호스트: **WSL2 Ubuntu 24.04 + NVIDIA GeForce RTX 4070 SUPER 12GB**
-현재 판정: **CPU 준비 완료, 이전 source의 GPU preflight/final synthetic smoke green, eval KV-cache source의 새 B0 refresh 대기**
+현재 판정: **CPU 준비 완료, current-source GPU preflight/final synthetic smoke green, B1 production 실행 대기**
 
 이 문서는 현재 코드의 CLI와 정확히 일치하는 실행 순서다. GPU가 필요한 명령은 맨
-뒤의 별도 절에만 둔다. 2026-08-10 이전 source final smoke는 green artifact를 남겼다.
-training cache-off와 eval KV-cache-on을 분리한 현재 source는 새 tagged smoke를 요구한다.
+뒤의 별도 절에만 둔다. 2026-08-10 이전 source final smoke와 별도로, training cache-off와
+eval KV-cache-on을 분리한 current source는 run tag `20260810T062500KST`에서 새 tagged smoke를
+green으로 닫았다.
 이후 실제 모델 실행도 다른 프로세스를 종료하거나 threshold를 완화하지 않고, 새 run마다 physical
 VRAM을 다시 검사한다.
 
@@ -163,10 +164,11 @@ submission allowance를 read-only 확인했다. 다음은 아직 확인하지 �
 
 ## 5. B0 GPU 승인 증거와 새 run 직전 재검사
 
-2026-08-10 target-host preflight와 local synthetic smoke는 이전 source에서 green이다.
-현재 eval KV-cache source의 production B1에는 그 artifact를 재사용하지 않고, 이 절의
-새 `RUN_TAG` preflight와 smoke를 순서대로 다시 만든다. 다른 GPU 프로세스를 종료하거나
-선점하지 않으며, 모든 새 GPU run 직전에는 아래 두 조건을 다시 관측한다.
+2026-08-10 target-host preflight와 local synthetic smoke는 current source에서 run tag
+`20260810T062500KST`로 green이다. 이 pair는 같은 tag의 production B1에만 bind하며, 다른
+run tag에는 재사용하지 않고 이 절의 새 `RUN_TAG` preflight와 smoke를 순서대로 다시 만든다.
+다른 GPU 프로세스를 종료하거나 선점하지 않으며, 모든 새 GPU run 직전에는 아래 두 조건을
+다시 관측한다.
 
 ```bash
 nvidia-smi --query-gpu=name,memory.total,memory.used,memory.free,compute_cap,driver_version \
@@ -176,11 +178,13 @@ nvidia-smi --query-gpu=name,memory.total,memory.used,memory.free,compute_cap,dri
 - free VRAM이 10,240MiB 이상
 - pre-existing used VRAM이 1,024MiB 이하
 
-2026-08-10 evidence는
+이전-source 비교 evidence는
 `artifacts/analysis/model-preflight-gpu-current-20260810T001500KST.json`와
-`artifacts/analysis/gpu-smoke-20260810T001500KST.json`에 있다. GPU 값은 계속 변하므로
-snapshot 수치를 현재 실시간 값이라고 주장하지 않고, 실제 실행 여부는 위 `nvidia-smi`의
-직전 관측으로 다시 판정한다.
+`artifacts/analysis/gpu-smoke-20260810T001500KST.json`에 있다. current-source production
+binding은 `model-preflight-gpu-ready-20260810T062500KST.json`(physical 912/11,086MiB,
+`training_ready=true`)와 `gpu-smoke-20260810T062500KST.json`(`status=green`)이다. GPU 값은
+계속 변하므로 snapshot 수치를 현재 실시간 값이라고 주장하지 않고, 실제 실행 여부는 위
+`nvidia-smi`의 직전 관측으로 다시 판정한다.
 
 GPU 전용 환경은 WSL ext4에 둔다. 재동기화가 필요할 때만 다음을 실행한다.
 

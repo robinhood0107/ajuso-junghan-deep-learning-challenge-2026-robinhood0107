@@ -22,11 +22,11 @@
 - 공개·동등 접근 외부 데이터와 상용 API의 training-data/rationale 생성은 허용된다.
   leaderboard/test 입력은 금지다. Python/SymPy TIR과 same-base multi-adapter/checkpoint
   결합은 명시 답변 전 off다.
-- RTX 4070 SUPER 12GB의 이전 source B0 preflight와 local synthetic NF4 smoke는 green이다.
-  training cache-off와 eval KV-cache-on을 분리한 source는 새 tagged preflight/smoke를
-  다시 만든 뒤에만 production B1을 허용한다. 각 새 GPU run 직전에도 free VRAM 10GiB 이상과
-  pre-existing used VRAM 1GiB 이하를 다시 관측한다. leaderboard/test prediction은 여전히
-  freeze 이후에만 허용한다.
+- RTX 4070 SUPER 12GB의 current-source B0 preflight와 local synthetic NF4 smoke는 run tag
+  `20260810T062500KST`에서 green이다. preflight는 `training_ready=true`이고 smoke가 final
+  kernel/NF4/cache-on gate를 닫았다. 같은 tag의 production B1 직전과 각 후속 GPU run 직전에도
+  free VRAM 10GiB 이상과 pre-existing used VRAM 1GiB 이하를 다시 관측한다. leaderboard/test
+  prediction은 여전히 freeze 이후에만 허용한다.
 - 보강 전 source의 fold 0 fixed-base diagnostic은 2,942 validation generation 중
   1,210 exact match(41.1285%)를 기록하고 redacted parser audit 19개 outcome class를
   만들었다. 이 run은 attention-mask/cache 보강 전의 parser·latency 관찰용이라 QLoRA,
@@ -617,11 +617,11 @@ development 전체를 다시 학습하는 `F-evidence` refit과 former holdout�
 WSL RAM은 약 17.56GiB, swap은 8GiB다. NVIDIA RTX 4070 SUPER 12,282MiB와
 WSL CUDA bridge는 존재한다. 2026-08-09 첫 smoke attempt는 model load 전 guard에서
 중단됐지만, external occupancy와 CUDA-context overhead를 분리하도록 guard를 보강했다.
-2026-08-10 새 target-host preflight와 local synthetic smoke는 pinned NF4 base load,
-LoRA backward/optimizer step, generation/parser까지 green으로 확인했다. 이 evidence는
-그 source의 organizer-only B1을 허용했지만, 이후 발견한 training/eval cache 분리 보강은
-새 smoke가 필요하다. leaderboard/test prediction은 여전히 허용하지 않으며, 실제
-development score는 artifact가 atomic publish되기 전에는 기록하지 않는다.
+2026-08-10 current-source target-host preflight와 local synthetic smoke는 run tag
+`20260810T062500KST`에서 pinned NF4 base load, LoRA backward/optimizer step,
+training cache-off/eval KV-cache-on generation/parser까지 green으로 확인했다. 이 evidence는
+같은 tag의 organizer-only B1을 허용하지만 leaderboard/test prediction은 여전히 허용하지 않으며,
+실제 development score는 artifact가 atomic publish되기 전에는 기록하지 않는다.
 
 가능:
 

@@ -7,9 +7,10 @@
 > **현재 운영 계약:** 로컬 구현 루트는 `$PROJECT`, 데이터 루트는
 > `$PROJECT/deep-learning-challenge-2026`이다. 2026-08-03 14:00 정제본인
 > 831행 leaderboard와 627개 train exclusion ID를 사용한다. split v4는 재생성하지
-> 않고 hard-group exclusion overlay를 적용한다. 이전 source의 B0 preflight와 local
-> synthetic smoke는 green이다. training cache-off와 eval KV-cache-on을 분리한 source로
-> production B1을 시작하기 전에는 새 tag의 B0 preflight/smoke를 다시 통과한다.
+> 않고 hard-group exclusion overlay를 적용한다. training cache-off와 eval KV-cache-on을
+> 분리한 current source의 B0 preflight와 local synthetic smoke는 run tag
+> `20260810T062500KST`에서 green이다. 이 tag에 bound된 production B1을 시작하기 전에는
+> 직전 read-only VRAM threshold를 다시 통과한다.
 > selection-eligible B1/QLoRA 점수는 아직 없다. 보강 전 source의 fold 0 base diagnostic은
 > 2,942문항 중 1,210 exact match(41.1285%)를 기록했지만 parser/latency 관찰용일 뿐
 > 모델 선택에 쓰지 않는다. 정확한 실행 명령은
@@ -50,12 +51,12 @@ flowchart LR
 | Kaggle authenticated API 재검증 | **완료** | 참가 중인 slug·Rules/Data/Evaluation·파일 목록·현재 제출 가능 횟수(5)를 읽기 전용 확인; 파일 목록에는 sample submission이 없음 |
 | 논문·방법론 조사 | 완료 | SFT, LoRA/QLoRA, self-training, preference, GRPO/RLVR, verifier, TIR, test-time compute, 오염 감사 |
 | model-free Gate A | **READY** | strict loader, filtered audit, split v4 overlay, parser, grouped evaluation, voting, uppercase-ID submission, provenance와 회귀 테스트 |
-| 모델·토크나이저 preflight | **이전 source READY / production refresh 대기** | pinned tokenizer와 2개 full weight shard/commit, CUDA/BF16/NF4 QLoRA runtime, physical VRAM preflight, local synthetic smoke를 green으로 확인했다. eval KV-cache runtime 보강 뒤에는 새 B0 artifact를 만든다. |
-| 실제 QLoRA 학습·모델 추론 | **B1 진단 완료 / production 재실행 대기** | old source fold 0 base diagnostic은 2,942문항·1,210 exact match(41.1285%)와 redacted parser audit을 남겼다. attention-mask/cache 보강 전 run이므로 모델 선택·QLoRA 승격에는 쓰지 않으며, 새 B0와 versioned production baseline 뒤에만 QLoRA를 시작한다. |
+| 모델·토크나이저 preflight | **current-source B0 READY** | run tag `20260810T062500KST`에서 pinned tokenizer와 2개 full weight shard/commit, CUDA/BF16/NF4 QLoRA runtime, physical VRAM preflight, cache-on local synthetic smoke를 green으로 확인했다. |
+| 실제 QLoRA 학습·모델 추론 | **B1 production 실행 대기** | old source fold 0 base diagnostic은 2,942문항·1,210 exact match(41.1285%)와 redacted parser audit을 남겼다. attention-mask/cache 보강 전 run이므로 모델 선택·QLoRA 승격에는 쓰지 않으며, current-source B0 tag와 versioned production baseline 뒤에만 QLoRA를 시작한다. |
 
-따라서 **Gate A는 READY**이며, 이전 source의 Gate B0 GPU gate도 green이다. 실제 모델
-점수는 아직 없다. full pinned cache와 전용 QLoRA 환경은 준비됐고, local synthetic smoke가
-최초의 실제 CUDA workload였다. 새 eval KV-cache source의 production GPU workload는 새
+따라서 **Gate A는 READY**이며, current-source Gate B0 GPU gate도 green이다. selection-eligible
+실제 모델 점수는 아직 없다. full pinned cache와 전용 QLoRA 환경은 준비됐고, local synthetic
+smoke가 최초의 실제 CUDA workload였다. current-source production GPU workload는 같은 tag의
 preflight/smoke, 직전 read-only VRAM 조건, versioned artifact target을 모두 확인한 뒤에만
 실행한다. 구현·테스트의 최종 상태는
 [선행 구현 및 검증 상태](docs/09_IMPLEMENTATION_STATUS.md)에 기록한다.

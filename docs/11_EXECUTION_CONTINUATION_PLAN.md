@@ -122,6 +122,14 @@ R1과 R2는 완료됐다. v2 audit은 19개 outcome class만 기록하고 raw co
 직렬화하지 않았으며, 그 class를 safe synthetic boxed/final/hash/fallback regression으로
 고정했다. 이 완료는 production model-score gate가 아니라 parser behavior gate다.
 
+R4도 완료됐다. current-source B0 pair는 run tag `20260810T062500KST`의
+`model-preflight-gpu-ready-20260810T062500KST.json` (SHA-256
+`1c88007e3c714c036907a4dc4c0592b31d0f52d931cd1e412e212f814bc5f603`)와
+`gpu-smoke-20260810T062500KST.json` (SHA-256
+`98b35fe8a471cab16438b20ac9055d7835f641cd9d8923f4f901916bec2613f0`)이다. preflight의
+`training_ready=true`와 smoke의 `status=green`은 같은 tag의 R5를 허용하지만, 다른 tag나
+leaderboard/test prediction에는 재사용하지 않는다.
+
 ### 3.2 전체 백로그와 의존 관계
 
 아래 목록은 재개 시 순서를 바꾸지 않는 실행 단위다. `CPU`는 CUDA workload 없이 가능한
@@ -133,9 +141,9 @@ R1과 R2는 완료됐다. v2 audit은 19개 outcome class만 기록하고 raw co
    conflict는 여전히 fail-visible이다.
 3. **R3 (완료, CPU):** Ruff, full `pytest -s -q` (349 passed, 1 skipped), public-repo guard,
    canonical checksum을 통과했고 docs 04/05/07/09/10/11을 현재 evidence로 갱신했다.
-4. **R4 (GPU):** GPU가 `used <= 1,024MiB`, `free >= 10,240MiB`인 새 관측값에서 current
-   source preflight와 cache-on synthetic smoke를 새 run tag로 실행한다.
-5. **R5 (GPU):** R4에 bound된 current-source fold 0 base direct-answer baseline을 새
+4. **R4 (완료, GPU):** GPU `used/free=912/11,086MiB`의 새 관측값에서 current-source
+   preflight와 cache-on synthetic smoke를 `20260810T062500KST`로 실행했고 green pair를 만들었다.
+5. **R5 (진행 중, GPU):** R4에 bound된 current-source fold 0 base direct-answer baseline을 새
    no-overwrite output으로 실행하고, parser golden gate와 R3가 성공했는지 확인한다.
 6. **R6 (GPU):** 같은 fold 0 base manifest에 bound된 organizer-only answer-only QLoRA를
    학습하고 adapter bundle, shard completeness, tokenizer/config/data provenance를 검증한다.

@@ -19,9 +19,9 @@
 | Gate B0 모델 파일 | **READY** | pinned tokenizer, index, 두 shard의 exact size/SHA/commit 확인 |
 | Gate B0 runtime packages | **CPU-hidden READY** | ext4 전용 환경에서 Torch/Transformers/Accelerate/PEFT/bitsandbytes/Triton 격리 import 성공 |
 | Gate B0 CPU/code readiness | **READY** | sealed development shard, real tokenizer SFT preflight, GPU runtime/training/inference/OOF selection/one-shot holdout/submission 경로 구현·회귀검증 |
-| Gate B0 GPU preflight | **이전 source READY / production refresh 대기** | 2026-08-10 pinned revision, full weights, CUDA/BF16/NF4 runtime, physical preflight와 synthetic smoke 모두 green. eval KV-cache source에는 새 tagged B0 artifact가 필요하다. |
-| Gate B0 final GPU smoke | **이전 source READY / production refresh 대기** | `gpu-smoke-20260810T001500KST.json` green: local `2+3` only, pinned NF4 load, LoRA backward/`paged_adamw_8bit` 1 step, generation/parser exact 5; competition data 0행. 새 smoke config는 cache-on eval을 명시 검증한다. |
-| Gate B1 base direct-answer | **진단 완료 / production 재실행 대기** | old source fold 0 organizer-only base generation은 2,942행 중 1,210 exact match(41.1285%), parser `ok/conflict/invalid=2143/3/796`, finish `stop/length=2134/808`를 기록했다. attention-mask/cache 보강 전 run은 parser/latency/finish-reason 확인용이며 모델 선택·QLoRA·OOF 근거로 사용하지 않는다. |
+| Gate B0 GPU preflight | **READY (current source)** | `model-preflight-gpu-ready-20260810T062500KST.json`: pinned revision, full weights, CUDA/BF16/NF4 runtime, physical used/free 912/11,086MiB, `training_ready=true`, runtime blocker 없음. final smoke 전이라 preflight 자체의 `execution_ready=false`는 의도된 값이다. |
+| Gate B0 final GPU smoke | **READY (current source)** | `gpu-smoke-20260810T062500KST.json` green: local `2+3` only, pinned NF4 load, LoRA backward/`paged_adamw_8bit` 1 step, training cache-off/eval KV-cache-on generation/parser exact 5; competition data 0행. |
+| Gate B1 base direct-answer | **진단 완료 / current-source production 실행 대기** | old source fold 0 organizer-only base generation은 2,942행 중 1,210 exact match(41.1285%), parser `ok/conflict/invalid=2143/3/796`, finish `stop/length=2134/808`를 기록했다. attention-mask/cache 보강 전 run은 parser/latency/finish-reason 확인용이며 모델 선택·QLoRA·OOF 근거로 사용하지 않는다. |
 | Gate B2 QLoRA SFT | **미실행** | 보강된 source의 production B1 base artifact와 실제-generation parser golden gate 전에는 학습 금지 |
 | leaderboard prediction/submission | **미실행** | 모델 prediction 0건; leaderboard를 학습/API 입력에 쓰지 않음 |
 
@@ -34,16 +34,16 @@
 | GPU 전용 환경 | local ext4 `$GPU_ENV` (public repository에서 경로 제외) |
 | GPU runtime | Torch 2.13.0, Transformers 4.57.6, Accelerate 1.14.0, PEFT 0.20.0, bitsandbytes 0.50.0, Triton 3.7.1 |
 | GPU | NVIDIA GeForce RTX 4070 SUPER, 12,282MiB, compute capability 8.9 |
-| current GPU evidence | smoke 직전 physical used 864MiB/free 11,134MiB; smoke peak reserved 4,661,968,896 bytes, cleanup 후 physical free 8,305,770,496 bytes. 값은 변동 가능하며 다른 프로세스는 중단하지 않음 |
+| current GPU evidence | current-source B0 preflight 직전 physical used 912MiB/free 11,086MiB; smoke peak reserved 4,661,968,896 bytes, cleanup 후 physical used/free 908/11,090MiB. 값은 변동 가능하며 다른 프로세스는 중단하지 않음 |
 | WSL memory | RAM 18,857,226,240 bytes, available 15,645,212,672; swap free 6,354,501,632 bytes |
 | 저장공간 | Windows C: 58,220,236,800 bytes free, WSL ext4 972,765,863,936 bytes free |
 | model cache | local `$MODEL_CACHE/snapshots/aa8e72537993ba99e69dfaafa59ed015b17504d1` (Git 제외) |
 
 weights/checkpoint/전용 venv는 C:가 아니라 WSL ext4에 둔다. GPU 전용 환경 설치와
 import 검사는 `CUDA_VISIBLE_DEVICES=''`에서 수행했다. 2026-08-09 첫 smoke attempt는
-CUDA context 뒤 model load 전에 fail-closed로 중단됐지만, guard 보강 뒤 2026-08-10
-새 preflight와 local synthetic smoke는 green이다. 그 뒤 organizer train의 fold 0 validation
-2,942행에 한해 old-source diagnostic generation을 한 번 실행했다. leaderboard/test 입력은
+CUDA context 뒤 model load 전에 fail-closed로 중단됐지만, guard 보강 뒤 2026-08-10 current-source
+preflight와 local synthetic smoke는 run tag `20260810T062500KST`에서 green이다. 그 이전
+source로 organizer train의 fold 0 validation 2,942행에 한해 diagnostic generation을 한 번 실행했다. leaderboard/test 입력은
 학습·self-training·외부 API·모델 inference에 사용하지 않았다.
 
 ### 최신 데이터와 split overlay
@@ -123,6 +123,8 @@ semantic config SHA는 `4530c14a4782c439ea3a8325b90d997793eda368b0371d765cb81069
 - `artifacts/analysis/kaggle-b0-20260810/authenticated-api-recheck-v2.json`
 - `artifacts/analysis/model-preflight-gpu-current-20260810T001500KST.json`
 - `artifacts/analysis/gpu-smoke-20260810T001500KST.json`
+- `artifacts/analysis/model-preflight-gpu-ready-20260810T062500KST.json`
+- `artifacts/analysis/gpu-smoke-20260810T062500KST.json`
 - `artifacts/analysis/parser-golden-20260810T002000KST-fold0.json` (initial redacted audit)
 - `artifacts/analysis/parser-golden-20260810T002000KST-fold0-v2.json` (reason-code allowlist
   correction 후 canonical redacted audit)
@@ -131,6 +133,8 @@ semantic config SHA는 `4530c14a4782c439ea3a8325b90d997793eda368b0371d765cb81069
   implementation·docs·tests를 포함한 current source tree, 64 files)
 - `artifacts/analysis/source-manifest-diagnostic-golden-v2-20260810.json` (diagnostic result,
   parser golden regression, Kaggle recheck documentation을 포함한 source tree, 64 files)
+- `artifacts/analysis/source-manifest-b0-green-v3-20260810.json` (current-source B0 green
+  documentation을 포함한 source tree)
 - `artifacts/analysis/CHECKSUMS.sha256`
 
 `model-preflight-current.json`은 기본 개발 환경의 의도적 package 부재까지 기록한다.
@@ -145,13 +149,21 @@ LoRA optimizer step으로 확증했다. smoke raw generation은 local prompt의
 `Final answer: 5`이며 parser exact match가 통과했다. 이 결과는 B1의 organizer-only
 development baseline을 허용하지만 leaderboard/test prediction을 허용하는 근거는 아니다.
 
+`model-preflight-gpu-ready-20260810T062500KST.json`과
+`gpu-smoke-20260810T062500KST.json`은 training cache-off/eval KV-cache-on current source에
+bound된 B0 pair다. 전자는 `training_ready=true`, runtime blocker 없음이며 final smoke가 아직
+필요하므로 preflight 단독 `execution_ready=false`가 의도된 값이다. 후자는 local synthetic
+`2+3`만으로 그 final gate를 green으로 닫았다. 이 pair는 같은 tag의 organizer-only production
+B1을 허용하지만 leaderboard/test prediction, QLoRA 승격, method selection을 단독으로 허용하지
+않는다.
+
 2026-08-10에 시작한 fold 0 base direct-answer GPU generation은 atomic JSONL/manifest pair로
 정상 완료됐다. old source는 `attention_mask`와 eval KV-cache 보강 전 이미 import됐으므로,
 1,210/2,942 exact match(41.1285%), 989,549 output token, max allocated VRAM
 2,193,992,192 bytes라는 aggregate는 raw generation, parser 상태, latency, finish reason을
-확인하는 **진단 artifact**로만 보존한다. 동일 data/split/config 계약에서 보강된 source,
-새 B0 preflight/smoke, 새 versioned output target으로 실행한 production baseline이 성공하기
-전에는 QLoRA, OOF 비교, primary/fallback 선택을 시작하지 않는다.
+확인하는 **진단 artifact**로만 보존한다. 동일 data/split/config 계약에서 보강된 source와
+`20260810T062500KST` B0 pair에 bound된 새 versioned output target으로 production baseline이
+성공하기 전에는 QLoRA, OOF 비교, primary/fallback 선택을 시작하지 않는다.
 
 실제 JSONL/manifest 쌍이 atomic publish된 뒤에는 CUDA를 쓰지 않는
 `audit-parser-golden`으로 bundle checksum, fold-validation/cross-validation partition,
