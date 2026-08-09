@@ -1,0 +1,45 @@
+# Python environments, bytecode, and test/lint caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Competition data and any data-derived evidence.  The public repository ships
+# code and reproducibility instructions only; obtain competition files from Kaggle.
+deep-learning-challenge-2026/
+artifacts/
+reports/generated/
+submissions/
+predictions/
+
+# Local auth, credentials, and private working notes
+env
+.env
+.env.*
+!.env.example
+.kaggle/
+kaggle.json
+access_token
+NU_
+이어서 하기 프롬프트.txt
+
+# Model/checkpoint outputs and experiment trackers
+checkpoints/
+models/
+outputs/
+runs/
+wandb/
+mlruns/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+adapter_model.bin
+submission.csv
+
+# Local tool state
+.gstack/

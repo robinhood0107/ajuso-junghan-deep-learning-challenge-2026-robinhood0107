@@ -1,0 +1,53 @@
+[project]
+name = "deep-challenge-toolkit"
+version = "0.1.0"
+description = "Offline-first data, evaluation, and submission toolkit for Deep Learning Challenge 2026"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "numpy>=1.26,<3",
+]
+
+[project.optional-dependencies]
+model = [
+  "jinja2>=3.1,<4",
+  "transformers>=4.45,<5",
+]
+gpu = [
+  "accelerate>=1,<2",
+  "bitsandbytes>=0.45,<1",
+  "peft>=0.14,<1",
+  "torch>=2.7,<3",
+]
+
+[project.scripts]
+deep-challenge = "deep_challenge.cli:main"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-cov>=6,<8",
+  "ruff>=0.9,<1",
+]
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/deep_challenge"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["deep_challenge"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
