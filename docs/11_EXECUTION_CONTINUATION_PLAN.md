@@ -77,6 +77,76 @@ PYTHONPATH=src python3 -m deep_challenge.public_repo_guard --all
 | B4.2 | submission build/verify | B4.1 complete | writer + two independent validators + checksum | any missing/invalid ID |
 | B4.3 | Kaggle upload | explicit user request only | Kaggle submission receipt | no explicit authorization |
 
+### 3.1 현재 실행 중인 진단과 안전한 종료 처리
+
+2026-08-10에 시작한 아래 fold 0 run은 **진단 전용**이다. attention mask와 eval
+KV-cache 보강 전 source에서 시작했으므로, 성공하더라도 model selection, QLoRA 시작,
+OOF 비교, primary/fallback freeze의 근거로 사용하지 않는다. 이 run을 중단하거나 GPU를
+선점하지 않는다.
+
+| 항목 | 값 |
+|---|---|
+| run tag | `20260810T002000KST` |
+| 대상 | organizer train의 eligible fold 0 validation 2,942문항, greedy base direct-answer 1회 |
+| 출력 | `artifacts/gate_b/20260810T002000KST/fold-0/base-direct-predictions.jsonl`, `base-direct-manifest.json` |
+| 공개 경계 | 두 파일 모두 `artifacts/` 아래의 private evidence이며 Git에 올리지 않음 |
+| 정상 완료 | atomic JSONL/manifest 쌍이 함께 publish되고 manifest record count가 2,942이며 checksum이 일치 |
+| 실패 처리 | atomic pair가 없거나 checksum/record count가 다르면 failure evidence만 남기고 재시도 조건을 기록; partial output을 승격하지 않음 |
+
+종료 뒤에는 raw question, answer, completion을 터미널이나 공개 문서에 출력하지 않는다.
+아래처럼 aggregate와 checksum만 확인한다.
+
+```bash
+RUN_DIR=artifacts/gate_b/20260810T002000KST/fold-0
+jq '{schema_version,record_count,problem_count,samples_per_problem,model_id,revision,route,checkpoint_sha256,config_sha256,fold,parser_status_counts,finish_reason_counts,exact_match_count,exact_match_accuracy,input_token_count_total,output_token_count_total,peak_vram_allocated_bytes_max}' \
+  "$RUN_DIR/base-direct-manifest.json"
+wc -l "$RUN_DIR/base-direct-predictions.jsonl"
+sha256sum "$RUN_DIR/base-direct-predictions.jsonl" "$RUN_DIR/base-direct-manifest.json"
+```
+
+이 진단에서 실제 completion 구조를 관찰한 뒤에도 public test에는 question, ID,
+reference answer, raw completion을 넣지 않는다. marker/source/status/reason만
+익명화한 구조적 regression case를 별도로 재현하고, parser conflict가 보이면 반드시
+`conflict` 그대로 검증한다.
+
+### 3.2 전체 백로그와 의존 관계
+
+아래 목록은 재개 시 순서를 바꾸지 않는 실행 단위다. `CPU`는 CUDA workload 없이 가능한
+작업이고, `GPU`는 직전 gate의 immutable evidence가 있을 때만 시작한다.
+
+1. **R1 (진행 중, GPU):** 진단 run의 atomic 종료를 기다리고 aggregate-only 검증을 한다.
+2. **R2 (CPU):** 실제 generation에서 새 parser 구조가 있는지 private artifact 안에서
+   점검하고, 익명 구조 regression test와 실패-보존 test를 추가한다.
+3. **R3 (CPU):** Ruff, full `pytest -s -q`, public-repo guard, canonical checksum을 다시
+   실행하고 docs 09/04/05/10/11을 현재 evidence로 갱신한다.
+4. **R4 (GPU):** GPU가 `used <= 1,024MiB`, `free >= 10,240MiB`인 새 관측값에서 current
+   source preflight와 cache-on synthetic smoke를 새 run tag로 실행한다.
+5. **R5 (GPU):** R4에 bound된 current-source fold 0 base direct-answer baseline을 새
+   no-overwrite output으로 실행하고, parser golden gate와 R3가 성공했는지 확인한다.
+6. **R6 (GPU):** 같은 fold 0 base manifest에 bound된 organizer-only answer-only QLoRA를
+   학습하고 adapter bundle, shard completeness, tokenizer/config/data provenance를 검증한다.
+7. **R7 (GPU):** fold 0 adapter generation을 실행해 동일 validation partition에서 base와
+   비교 가능한 pair를 만든다.
+8. **R8 (GPU):** R5--R7을 fold 1, 2, 3, 4에 순차 반복한다. GPU run은 병렬화하지 않는다.
+9. **R9 (CPU):** 다섯 fold가 모두 완결된 뒤 grouped paired bootstrap, exact McNemar,
+   Holm correction으로 complete OOF comparison을 작성한다. leaderboard 점수로 선택하지 않는다.
+10. **R10 (CPU):** development evidence만으로 primary/fallback을 freeze하고 one-shot
+    holdout claim 전의 immutable method/route/config checkpoint binding을 검증한다.
+11. **R11 (GPU):** R10 이후에만 locked holdout을 정확히 한 번 평가한다. claim을 만든 뒤
+    실패해도 접근권은 소비되므로 재시도 판단은 별도 기록한다.
+12. **R12 (GPU):** holdout 후 고정된 policy로 filtered leaderboard만 예측한다. 이 데이터는
+    학습, self-training seed, prompt 개선, 외부 API 입력에 절대 쓰지 않는다.
+13. **R13 (CPU):** strict submission writer와 independent validator를 모두 통과시키고
+    `ID,answer`, row order, checksum, invalid/missing=0인지 확인한다.
+14. **R14 (외부 권한):** Kaggle upload는 사용자의 명시 요청이 있을 때만 수행한다. upload
+    전에는 final run manifest와 local submission checksum을 다시 대조한다.
+15. **R15 (CPU):** 각 완료 phase마다 source manifest와 canonical `CHECKSUMS.sha256`를
+    갱신하고, raw artifact 없이 public code/docs만 guard 검증·commit·push한다.
+
+R4--R8은 R3의 parser/test gate를 우회할 수 없고, R11--R14는 R9--R10의 complete OOF
+freeze를 우회할 수 없다. 외부 규칙 확인이 아직 없는 Python/SymPy, teacher rationale,
+multi-adapter/checkpoint combination은 위 첫 pass에 포함하지 않는다.
+
 ## 4. Immediate exact commands
 
 Set local paths without committing them:
