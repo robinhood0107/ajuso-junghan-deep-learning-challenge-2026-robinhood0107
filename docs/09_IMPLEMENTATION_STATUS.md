@@ -149,7 +149,7 @@ CPU-only SFT preflight v3는 fold 0 training 11,794행, validation 2,942행, uni
 ### 최신 전체 회귀
 
 - `uv run ruff check .`: **pass**
-- `CUDA_VISIBLE_DEVICES='' ... uv run pytest -s -q`: **330 passed, 1 skipped**
+- `CUDA_VISIBLE_DEVICES='' ... uv run pytest -s -q`: **334 passed, 1 skipped** (2026-08-10 재실행)
 - branch coverage: **79%** (6,518 statements, 2,284 branches)
 - skip 1건은 기본 CPU `.venv`에 PyTorch가 없어 실제 PEFT 0.20 serialization
   compatibility test를 건너뛴 것이다. 같은 구조의 real safetensors 파일에 대한
