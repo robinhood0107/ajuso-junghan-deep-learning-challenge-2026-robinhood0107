@@ -7,6 +7,7 @@ def test_forbidden_paths_cover_competition_data_credentials_and_model_outputs() 
     violations = find_forbidden_paths(
         (
             "artifacts/run.json",
+            "archive/artifacts/run.json",
             "deep-learning-challenge-2026/deep_chal_math_train.csv",
             "env",
             ".env.production",
@@ -22,6 +23,7 @@ def test_forbidden_paths_cover_competition_data_credentials_and_model_outputs() 
         ".env.production",
         ".kaggle/kaggle.json",
         "NU_",
+        "archive/artifacts/run.json",
         "artifacts/run.json",
         "deep-learning-challenge-2026/deep_chal_math_train.csv",
         "env",

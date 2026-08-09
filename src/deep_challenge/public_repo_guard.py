@@ -80,10 +80,9 @@ def find_forbidden_paths(paths: Iterable[str]) -> tuple[str, ...]:
         if path.is_absolute() or ".." in parts or not parts:
             violations.append(raw_path)
             continue
-        first = parts[0]
         basename = parts[-1]
         if (
-            first in _FORBIDDEN_TOP_LEVEL
+            any(part in _FORBIDDEN_TOP_LEVEL for part in parts)
             or basename in _FORBIDDEN_BASENAMES
             or basename.startswith(".env")
             or PurePosixPath(basename).suffix.lower() in _FORBIDDEN_SUFFIXES
@@ -101,11 +100,11 @@ def find_secret_markers(payload: bytes) -> tuple[str, ...]:
 
 
 def _git_paths(*, staged: bool) -> tuple[str, ...]:
-    command = ["git", "diff", "--cached", "--name-only", "-z"] if staged else [
-        "git",
-        "ls-files",
-        "-z",
-    ]
+    command = (
+        ["git", "diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRT"]
+        if staged
+        else ["git", "ls-files", "-z"]
+    )
     result = subprocess.run(command, check=True, capture_output=True)
     return tuple(
         entry.decode("utf-8", "surrogateescape")
