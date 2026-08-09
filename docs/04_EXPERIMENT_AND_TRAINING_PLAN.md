@@ -737,18 +737,18 @@ workspace에는 source와 작은 분석 artifact만 둔다.
 
 ## 17. 권장 최종 주 경로
 
-가장 현실적인 순서는:
+현재 first-pass의 현실적인 순서는 다음으로 고정한다.
 
-1. G0 데이터/평가 잠금
-2. B02 concise-CoT base baseline
-3. S01/S02 QLoRA
-4. S06 BF16 LoRA 가능 시 대조
-5. R01/R02 verified balanced self-training
-6. KTO 또는 DPO 한 가지
-7. G04 uncertain-problem GRPO, gate 통과할 때만
-8. deterministic verifier
-9. 규칙 허용 시 CoT/TIR mix
-10. adaptive N=4~32 self-consistency
-11. F-accuracy/F-efficient/F-simple offline freeze
+1. G0 데이터/평가·규칙 잠금
+2. B01 base direct-answer greedy를 모든 development fold에서 실행
+3. 실제 raw completion으로 parser golden regression을 추가
+4. S00 answer-only QLoRA를 동일 fold·동일 direct-answer 계약에서 실행
+5. complete OOF paired cluster bootstrap, exact McNemar, Holm으로 primary/fallback freeze
+6. frozen policy만 locked holdout에서 정확히 한 번 평가
+7. strict offline prediction과 두 validator로 submission을 만들되, Kaggle upload는 사용자 명시 요청 때만 수행
 
-이 주 경로가 완성된 뒤에만 PRM, MCTS, full FT, model soup를 검토한다.
+concise rationale, 외부 공개 데이터, self-training, preference/RL, deterministic tool,
+same-base multi-checkpoint fallback, adaptive self-consistency, full-development refit은 이
+first-pass 이후의 **별도 versioned 실험**이다. rationale 품질·도구/결합 규칙·오염
+provenance·개발 OOF 근거가 모두 green이 되기 전에는 이 경로에 섞지 않는다. PRM, MCTS,
+full FT, model soup는 현재 고정 계약 밖이다.

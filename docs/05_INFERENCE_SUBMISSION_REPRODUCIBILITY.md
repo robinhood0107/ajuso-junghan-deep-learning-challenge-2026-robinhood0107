@@ -158,9 +158,11 @@ NaN
 
 정답 reference 없이 parser가 반환하는 값만 먼저 테스트하는 fixture suite는 구현했다.
 실제 base/SFT 모델을 실행한 뒤에는 raw generation과 사람이 확정한 기대 parse를
-익명화해 golden regression corpus로 추가한다. 현재 실제 generation이 0건이므로 이
-corpus는 의도적으로 비어 있으며, fold 0 base run 뒤 다음 GPU 단계로 넘어가기 전의
-필수 pause gate다.
+익명화해 golden regression corpus로 추가한다. 현재 fold 0 base diagnostic generation은
+실행 중이지만 atomic artifact가 아직 publish되지 않았으므로 golden corpus는 의도적으로
+비어 있다. 완료 후에는 실제 completion을 공개 저장소에 넣지 않고, 관찰된 structural
+pattern을 익명화한 regression fixture만 추가한다. 이 gate를 통과하기 전에는 다음 GPU
+단계로 넘어가지 않는다.
 
 ## 4. 문제 본문의 답 누출과 parser 분리
 

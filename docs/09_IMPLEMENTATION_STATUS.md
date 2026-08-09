@@ -19,10 +19,10 @@
 | Gate B0 모델 파일 | **READY** | pinned tokenizer, index, 두 shard의 exact size/SHA/commit 확인 |
 | Gate B0 runtime packages | **CPU-hidden READY** | ext4 전용 환경에서 Torch/Transformers/Accelerate/PEFT/bitsandbytes/Triton 격리 import 성공 |
 | Gate B0 CPU/code readiness | **READY** | sealed development shard, real tokenizer SFT preflight, GPU runtime/training/inference/OOF selection/one-shot holdout/submission 경로 구현·회귀검증 |
-| Gate B0 GPU preflight | **READY (pre-smoke)** | 2026-08-09 pinned revision, full weights, CUDA/BF16/NF4 runtime, physical snapshot `used 1,001MiB/free 10,997MiB` 모두 green |
+| Gate B0 GPU preflight | **READY** | 2026-08-10 pinned revision, full weights, CUDA/BF16/NF4 runtime, physical preflight와 뒤이은 synthetic smoke 모두 green |
 | Gate B0 final GPU smoke | **READY** | `gpu-smoke-20260810T001500KST.json` green: local `2+3` only, pinned NF4 load, LoRA backward/`paged_adamw_8bit` 1 step, generation/parser exact 5; competition data 0행 |
-| Gate B1 base direct-answer | **미실행** | 실제 GPU generation 0건, 모델 점수 없음 |
-| Gate B2 QLoRA SFT | **미실행** | GPU smoke green 전 학습 금지 |
+| Gate B1 base direct-answer | **진단 실행 중** | fold 0 organizer-only base generation을 실행 중이다. attention-mask 보강 전 시작한 run은 parser/latency/finish-reason 확인용이고, 모델 선택·QLoRA·OOF 근거로 사용하지 않는다. published artifact와 모델 점수는 아직 없다. |
+| Gate B2 QLoRA SFT | **미실행** | 보강된 source의 production B1 base artifact와 실제-generation parser golden gate 전에는 학습 금지 |
 | leaderboard prediction/submission | **미실행** | 모델 prediction 0건; leaderboard를 학습/API 입력에 쓰지 않음 |
 
 ### 실제 환경
@@ -132,6 +132,13 @@ green이지만 CUDA를 숨겼고 물리 free VRAM이 부족해 `training_ready=f
 LoRA optimizer step으로 확증했다. smoke raw generation은 local prompt의
 `Final answer: 5`이며 parser exact match가 통과했다. 이 결과는 B1의 organizer-only
 development baseline을 허용하지만 leaderboard/test prediction을 허용하는 근거는 아니다.
+
+2026-08-10에 fold 0 base direct-answer의 첫 GPU generation을 시작했다. 이 run은
+`attention_mask` 보강 전 이미 시작된 source를 사용하므로, 완료해도 raw generation,
+parser 상태, latency, finish reason을 확인하는 **진단 artifact**로만 보존한다. 동일한
+data/split/config 계약에서 보강된 source와 새 versioned output target으로 실행한
+production baseline이 성공하기 전에는 QLoRA, OOF 비교, primary/fallback 선택을 시작하지
+않는다.
 
 CPU-only SFT preflight v3는 fold 0 training 11,794행, validation 2,942행, union
 14,736행을 실제 pinned tokenizer로 encode했다. 최대 sequence는 1,127/2,048,
