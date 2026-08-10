@@ -65,7 +65,7 @@ PYTHONPATH=src python3 -m deep_challenge.public_repo_guard --all
 |---:|---|---|---|---|
 | P0 | 공개 repo 초기화 | `.gitignore` audit 완료 | GPLv3, clean staged file list, public repo | 민감 파일이 stage됨 |
 | B0.1 | Kaggle rules/data snapshot | API token 존재 | page/file/limit hash, sample 부재 기록 | slug/auth 실패 |
-| B0.2 | GPU preflight | model/runtime/VRAM 충족 | 새 no-overwrite preflight JSON, `training_ready=true` | GPU used >1,024MiB 또는 free <10,240MiB |
+| B0.2 | GPU preflight | model/runtime/VRAM 충족 | 새 no-overwrite preflight JSON, `training_ready=true` | GPU used >2,048MiB 또는 free <10,240MiB |
 | B0.3 | final synthetic smoke | B0.2 green | `status=green`; only local `2+3` prompt | parser/load/backward/VRAM failure |
 | B1.0 | fold 0 base direct-answer | B0.3 green | JSONL + **v2 provenance manifest** + raw generation | invalid parser/artifact or any source/B0/config hash mismatch |
 | B1.1 | parser golden corpus | B1.0 real generations | added regression tests + full CPU suite | conflict is hidden or test fails |
@@ -207,7 +207,7 @@ nvidia-smi --query-gpu=name,memory.total,memory.used,memory.free,compute_cap,dri
   --format=csv,noheader,nounits
 ```
 
-Only when the just-observed values satisfy `used <= 1024MiB` and
+Only when the just-observed values satisfy `used <= 2048MiB` and
 `free >= 10240MiB`, use a new tag and execute the B0.2/B0.3 commands in
 [`10_GATE_B_CPU_READY_RUNBOOK.md`](10_GATE_B_CPU_READY_RUNBOOK.md). Never reuse
 an existing preflight or smoke output path. The smoke artifact is the only

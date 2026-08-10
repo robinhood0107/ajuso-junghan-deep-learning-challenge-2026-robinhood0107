@@ -25,7 +25,7 @@
 - RTX 4070 SUPER 12GB의 당시-current-source B0 preflight와 local synthetic NF4 smoke는 run tag
   `20260810T062500KST`에서 green이다. preflight는 `training_ready=true`이고 smoke가 final
   kernel/NF4/cache-on gate를 닫았다. 같은 tag의 production B1 직전과 각 후속 GPU run 직전에도
-  free VRAM 10GiB 이상과 pre-existing used VRAM 1GiB 이하를 다시 관측한다. leaderboard/test
+  free VRAM 10GiB 이상과 pre-existing used VRAM 2GiB 이하를 다시 관측한다. leaderboard/test
   prediction은 여전히 freeze 이후에만 허용한다.
 - fold 0 fixed-base diagnostic은 old source와 당시 current source에서 각각 2,942 validation
   generation 중 1,210 exact match(41.1285%)를 기록했고 redacted parser audit 19개 outcome

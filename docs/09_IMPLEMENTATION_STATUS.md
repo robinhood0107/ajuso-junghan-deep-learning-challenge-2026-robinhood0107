@@ -35,6 +35,7 @@
 | GPU runtime | Torch 2.13.0, Transformers 4.57.6, Accelerate 1.14.0, PEFT 0.20.0, bitsandbytes 0.50.0, Triton 3.7.1 |
 | GPU | NVIDIA GeForce RTX 4070 SUPER, 12,282MiB, compute capability 8.9 |
 | latest GPU evidence | 당시 B0 preflight 직전 physical used 912MiB/free 11,086MiB; smoke peak reserved 4,661,968,896 bytes, cleanup 후 physical used/free 908/11,090MiB. 값은 변동 가능하며 새 run 직전에 재측정하고 다른 프로세스는 중단하지 않음 |
+| current WDDM baseline | 2026-08-10 재측정 used 1,401~1,446MiB/free 10,552~10,597MiB; `nvidia-smi` CUDA compute process 0개. 새 versioned smoke는 used 2,048MiB 상한과 free 10,240MiB 하한을 동시에 적용 |
 | WSL memory | RAM 18,857,226,240 bytes, available 15,645,212,672; swap free 6,354,501,632 bytes |
 | 저장공간 | Windows C: 58,220,236,800 bytes free, WSL ext4 972,765,863,936 bytes free |
 | model cache | local `$MODEL_CACHE/snapshots/aa8e72537993ba99e69dfaafa59ed015b17504d1` (Git 제외) |

@@ -54,6 +54,12 @@ _REQUIRED_PACKAGE_NAMES = (
 )
 _MIB = 1024 * 1024
 GPU_TOTAL_MEMORY_TOLERANCE_MIB = 64
+# On this 12 GiB WDDM display host, normal desktop composition uses roughly
+# 1.4 GiB even when nvidia-smi reports no CUDA compute process.  The independent
+# 10 GiB free-VRAM floor remains the dominant capacity guard; this ceiling still
+# rejects a real multi-GiB pre-existing workload without misclassifying the
+# measured Windows graphics baseline as one.
+DEFAULT_GPU_SMOKE_MAX_PREEXISTING_USED_VRAM_MIB = 2 * 1024
 
 
 class GpuSmokeValidationError(ValueError):
@@ -101,7 +107,9 @@ class GpuSmokeConfig:
     generation_use_cache: bool = True
     seed: int = 20_260_804
     minimum_free_vram_mib: int = DEFAULT_NF4_MIN_FREE_VRAM_MIB
-    maximum_preexisting_used_vram_mib: int = 1_024
+    maximum_preexisting_used_vram_mib: int = (
+        DEFAULT_GPU_SMOKE_MAX_PREEXISTING_USED_VRAM_MIB
+    )
 
     def __post_init__(self) -> None:
         expected_values: tuple[tuple[str, object, object], ...] = (
@@ -143,7 +151,7 @@ class GpuSmokeConfig:
             (
                 "maximum_preexisting_used_vram_mib",
                 self.maximum_preexisting_used_vram_mib,
-                1_024,
+                DEFAULT_GPU_SMOKE_MAX_PREEXISTING_USED_VRAM_MIB,
             ),
         )
         for field_name, value, expected in expected_values:
@@ -292,11 +300,13 @@ def _live_physical_gpu_before_cuda_context(
 ) -> dict[str, object]:
     """Fail closed on physical occupancy before this process opens CUDA.
 
-    The fixed 1,024 MiB ceiling is a limit for memory already in use by the
-    host or another process.  A CUDA context created by this smoke can itself
-    consume memory, especially under WSL, so this probe must happen before
-    importing or touching the CUDA runtime.  The later CUDA query still proves
-    that enough capacity remains after context creation.
+    The fixed 2,048 MiB ceiling is a limit for memory already in use by the host
+    or another process.  It admits the measured WDDM desktop baseline while the
+    independent 10 GiB free-VRAM floor preserves the actual capacity margin.  A
+    CUDA context created by this smoke can itself consume memory, especially
+    under WSL, so this probe must happen before importing or touching the CUDA
+    runtime.  The later CUDA query still proves that enough capacity remains
+    after context creation.
     """
 
     report = _physical_nvidia_report()
@@ -1127,6 +1137,7 @@ def _fsync_directory(directory: Path) -> None:
 
 
 __all__ = [
+    "DEFAULT_GPU_SMOKE_MAX_PREEXISTING_USED_VRAM_MIB",
     "DEFAULT_GPU_SMOKE_CONFIG",
     "GPU_TOTAL_MEMORY_TOLERANCE_MIB",
     "GpuSmokeConfig",

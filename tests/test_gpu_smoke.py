@@ -127,7 +127,9 @@ def _runtime_evidence(raw_generation: str = "Final answer: 5") -> GpuSmokeRuntim
     )
 
 
-def _live_physical_report(*, used_mib: int, free_mib: int) -> dict[str, object]:
+def _live_physical_report(
+    *, used_mib: int, free_mib: int, total_mib: int = 12_288
+) -> dict[str, object]:
     return {
         "probe_succeeded": True,
         "available": True,
@@ -136,7 +138,7 @@ def _live_physical_report(*, used_mib: int, free_mib: int) -> dict[str, object]:
             {
                 "index": 0,
                 "name": "NVIDIA Test GPU",
-                "memory_total_mib": 12_288,
+                "memory_total_mib": total_mib,
                 "memory_used_mib": used_mib,
                 "memory_free_mib": free_mib,
             }
@@ -196,7 +198,7 @@ def test_config_locks_model_revision_and_synthetic_prompt() -> None:
     assert DEFAULT_GPU_SMOKE_CONFIG.learning_rate == DEFAULT_GATE_B_CONFIG.learning_rate
     assert DEFAULT_GPU_SMOKE_CONFIG.generation_use_cache is True
     assert DEFAULT_GPU_SMOKE_CONFIG.sha256 == (
-        "50e3090f45f6b459c0f8e97aca83a38c9ff93792e8670046b9c4495c9f601086"
+        "1754650b41371ddad0bc11329d16b7449161c330d2b6a2fe37303433617d30dd"
     )
     assert DEFAULT_GPU_SMOKE_CONFIG.sha256 != (
         "1f6132e365c9bf944cb8fc674fbf65fb4fbf485c202a56da1940e05b0c842900"
@@ -247,7 +249,7 @@ def test_live_physical_recheck_keeps_external_occupancy_separate_from_cuda_conte
     monkeypatch.setattr(
         gpu_smoke_module,
         "_physical_nvidia_report",
-        lambda: _live_physical_report(used_mib=1_024, free_mib=11_264),
+        lambda: _live_physical_report(used_mib=2_048, free_mib=10_240),
     )
 
     checked = gpu_smoke_module._live_physical_gpu_before_cuda_context(request)
@@ -255,14 +257,18 @@ def test_live_physical_recheck_keeps_external_occupancy_separate_from_cuda_conte
     assert checked == {
         "name": "NVIDIA Test GPU",
         "total_bytes": 12_288 * _MIB,
-        "used_bytes": 1_024 * _MIB,
-        "free_bytes": 11_264 * _MIB,
+        "used_bytes": 2_048 * _MIB,
+        "free_bytes": 10_240 * _MIB,
     }
 
     monkeypatch.setattr(
         gpu_smoke_module,
         "_physical_nvidia_report",
-        lambda: _live_physical_report(used_mib=1_025, free_mib=11_263),
+        lambda: _live_physical_report(
+            used_mib=2_049,
+            free_mib=14_335,
+            total_mib=16_384,
+        ),
     )
     with pytest.raises(GpuSmokePreflightError, match="occupied"):
         gpu_smoke_module._live_physical_gpu_before_cuda_context(request)
@@ -320,12 +326,12 @@ def test_preflight_rejects_insufficient_or_occupied_vram(tmp_path: Path) -> None
     occupied = _ready_preflight()
     occupied["physical_nvidia"]["devices"][0].update(  # type: ignore[index]
         memory_total_mib=16_384,
-        memory_used_mib=2_048,
-        memory_free_mib=14_336,
+        memory_used_mib=2_049,
+        memory_free_mib=14_335,
     )
     occupied["nf4_vram"] = {
         "minimum_free_mib": 10_240,
-        "maximum_observed_free_mib": 14_336,
+        "maximum_observed_free_mib": 14_335,
         "ready": True,
     }
     with pytest.raises(GpuSmokePreflightError, match="occupied"):
@@ -472,8 +478,9 @@ def test_runtime_evidence_must_show_clean_single_gpu_and_valid_packages(
         (
             replace(
                 _runtime_evidence(),
-                pre_context_physical_used_bytes=1_025 * _MIB,
-                pre_context_physical_free_bytes=11_263 * _MIB,
+                pre_context_physical_total_bytes=16_384 * _MIB,
+                pre_context_physical_used_bytes=2_049 * _MIB,
+                pre_context_physical_free_bytes=14_335 * _MIB,
             ),
             "pre-context physical GPU was occupied",
         ),

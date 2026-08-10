@@ -177,7 +177,7 @@ nvidia-smi --query-gpu=name,memory.total,memory.used,memory.free,compute_cap,dri
 ```
 
 - free VRAM이 10,240MiB 이상
-- pre-existing used VRAM이 1,024MiB 이하
+- pre-existing used VRAM이 2,048MiB 이하
 
 이전-source 비교 evidence는
 `artifacts/analysis/model-preflight-gpu-current-20260810T001500KST.json`와
@@ -219,10 +219,12 @@ smoke는 로컬 synthetic `2+3`만 사용하여 pinned NF4 load, 실제
 exact match, peak VRAM과 latency를 검증한다. organizer/leaderboard/test 문제는 smoke 입력으로 받지 않는다.
 
 smoke는 CUDA context를 만들기 **전** read-only `nvidia-smi`로 external used/free를 다시
-확인하고, context 생성 **후** CUDA free VRAM으로 실제 load 가능 여유를 확인한다. context
-자체의 driver/WSL overhead를 external occupancy로 바꾸어 해석하지 않지만, 어느 쪽의
-immutable threshold도 완화하지 않는다. 두 측정치는 green artifact의 runtime evidence에
-함께 남으며, 이후 training/inference gate도 이를 요구한다.
+확인하고, context 생성 **후** CUDA free VRAM으로 실제 load 가능 여유를 확인한다. 현재
+12GiB WDDM display host의 정상 desktop baseline은 CUDA compute process 없이 약 1.4GiB로
+측정됐다. 따라서 versioned smoke contract는 used 2,048MiB 상한과 free 10,240MiB 하한을
+동시에 요구한다. free 하한이 실제 capacity gate이고, context 자체의 driver/WSL overhead를
+external occupancy로 바꾸어 해석하지 않는다. 두 측정치는 green artifact의 runtime
+evidence에 함께 남으며, 이후 training/inference gate도 이를 요구한다.
 
 새 B0 pair를 만들기 직전 source/config/tests/docs tree를 snapshot한다. 이 단계는 GPU를
 사용하지 않으며, 이후 B1 v2 manifest와 QLoRA adapter manifest가 이 file byte와 tree SHA를
@@ -612,7 +614,7 @@ final test가 공개되면 `FILTERED_LB`, `FILTERED_LB_SHA`, `--dataset-role lea
 ## 11. 즉시 중단 조건
 
 - 모델/revision/config/data/split/development-shard SHA 불일치
-- GPU free VRAM 10,240MiB 미만 또는 pre-existing used VRAM 1,024MiB 초과
+- GPU free VRAM 10,240MiB 미만 또는 pre-existing used VRAM 2,048MiB 초과
 - preflight/smoke가 green이 아님
 - tokenizer/model shard/adapter shard가 하나라도 누락되거나 checksum 불일치
 - fold training/validation ID 또는 response-only label digest 불일치
