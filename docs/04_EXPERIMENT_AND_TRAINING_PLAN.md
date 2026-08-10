@@ -2,7 +2,7 @@
 
 이 문서는 구현자가 순서대로 실행할 수 있는 대회 운영 계획이다. 각 단계는 산출물, 측정값, 승격 조건, 중단 조건을 갖는다. 이전 단계의 gate를 통과하지 않고 다음 고비용 단계로 넘어가지 않는다.
 
-## 0. 2026-08-10 실행 잠금
+## 0. 2026-08-11 실행 잠금
 
 - 현재 데이터는 filtered leaderboard 831행과 `train_filtered_ids.csv` 627 ID를
   사용한다. raw 1,000행 leaderboard는 현재 제출/추론 입력이 아니다.
@@ -22,9 +22,9 @@
 - 공개·동등 접근 외부 데이터와 상용 API의 training-data/rationale 생성은 허용된다.
   leaderboard/test 입력은 금지다. Python/SymPy TIR과 same-base multi-adapter/checkpoint
   결합은 명시 답변 전 off다.
-- RTX 4070 SUPER 12GB의 production v2 B0 preflight와 local synthetic NF4 smoke는 run tag
-  `20260810T131821KST`에서 green이다. preflight는 `training_ready=true`이고 smoke가 final
-  kernel/NF4/cache-on gate를 닫았다. 같은 tag의 fold 0 B1 v2는 atomic 완료됐으며 각 후속 GPU run 직전에도
+- RTX 4070 SUPER 12GB의 parser v2 production B0 preflight와 local synthetic NF4 smoke는
+  run tag `20260810T234907KST`에서 green이다. preflight는 `training_ready=true`이고 smoke가
+  final kernel/NF4/cache-on gate를 닫았다. 같은 tag의 fold 0 B1 v2는 atomic 완료됐으며 각 후속 GPU run 직전에도
   free VRAM 10GiB 이상과 pre-existing used VRAM 2GiB 이하를 다시 관측한다. leaderboard/test
   prediction은 여전히 freeze 이후에만 허용한다.
 - fold 0 fixed-base diagnostic은 old source와 당시 current source에서 각각 2,942 validation
@@ -32,20 +32,23 @@
   class를 만들었다. 당시-current-source `20260810T062500KST` output도 manifest schema v1이라
   B0/source/config-file byte binding과 run-level seed/prompt/latency digest가 없다. 따라서
   둘 다 QLoRA, OOF, method selection, holdout으로 승격하지 않는다. 실제 output에서 고른 safe
-  structural parser regression만 public code에 추가했다. production baseline은 새 B0와 v2
-  provenance manifest로 `20260810T131821KST`에 다시 실행해 1,210/2,942 exact match
-  (41.1285%)를 기록했다. source/B0/config byte와 seed/prompt/latency digest를 결속한 이 v2
-  artifact와 raw-free parser audit v4는 QLoRA authorization에 사용할 수 있다.
+  structural parser regression만 public code에 추가했다. parser v2 production baseline은 새
+  B0와 v2 provenance manifest로 `20260810T234907KST`에 다시 실행해 1,653/2,942 exact match
+  (56.1863%)를 기록했다. source/B0/config byte와 seed/prompt/latency digest를 결속한 이 v2
+  artifact와 raw-free parser audit v6는 현재 fold 0 selection evidence다.
 - fold 0 answer-only QLoRA는 738/738 step으로 완료됐지만 627/2,942(21.3120%)로 base
   1,210/2,942(41.1285%)보다 `-0.1981645` 낮았다. 95% cluster-bootstrap CI 전체가 0 아래이고
   Holm-adjusted exact McNemar가 기각했으므로 `single_fold_significant_harm_screen_v1`이 이
   exact candidate의 fold 1~4 GPU 반복을 중단했다. 이 cost-control 판단은 단일 fold를 최종
   선택 근거로 승격하지 않으며 base freeze·holdout도 허용하지 않는다.
 - parser v2는 `Final answer is:`와 중첩된 동일 marker, 균형 잡힌 Markdown/LaTeX label만
-  추가로 허용하고 conflict를 그대로 보존한다. 기존 base raw의 CPU-only rescore는
-  1,653/2,942(56.1863%), `ok/conflict/invalid=2705/3/234`였지만 selection-ineligible이다.
-  새 source/B0에서 stored/current parse가 일치하는 base bundle을 다시 만든 뒤 다음 candidate를
-  결정한다.
+  추가로 허용하고 conflict를 그대로 보존한다. 기존 base raw의 CPU-only rescore 자체는
+  selection-ineligible이지만, 새 source/B0 generation이 1,653/2,942(56.1863%),
+  `ok/conflict/invalid=2705/3/234`를 별도 atomic bundle로 재현했다.
+- 다음 candidate `qlora-concise-rationale-v1`는 CPU-only exact fold-training corpus,
+  raw-free audit, SFT preflight v4와 adapter provenance 경로까지 구현했다. teacher prompt에는
+  organizer reference answer를 제공하지 않고(`reference_answer_in_prompt=false`), 생성 후
+  organizer answer/parser exact match로 rejection한다. production corpus와 모델 점수는 아직 없다.
 - 승격 가능한 새 candidate가 생기면 `compare-development-oof`는 모든 label×fold run을
   강제하고 전체 OOF union에서 paired cluster bootstrap, exact McNemar, Holm 보정을 다시
   계산한다. base run은 pinned base checkpoint, adapter run은 실제 adapter bundle의
@@ -306,10 +309,13 @@ Clean SFT의 우선 입력:
 
 - Tier A problem-only
 - 독립 검증한 기존 풀이
-- 같은 Qwen base가 answer를 보지 않고 생성하고 정답·계산 검증을 통과한 concise rationale
+- rules상 허용된 training-only teacher가 organizer answer를 보지 않고 생성하고, 이후
+  organizer reference와 current parser exact match 검증을 통과한 concise rationale
 - answer-only completion
 
-Gold answer를 prompt에 보여 준 뒤 생성한 rationale는 별도 ablation 데이터로만 쓴다.
+Gold answer를 prompt에 보여 준 rationale는 v1 candidate에 섞지 않는다. 사용하려면
+`reference_answer_in_prompt=true`인 별도 config/ablation으로 정의해야 하며 현재 v1 loader는
+이를 fail-closed로 거부한다.
 
 ### 7.2 QLoRA 초기 config
 
@@ -771,15 +777,18 @@ workspace에는 source와 작은 분석 artifact만 둔다.
 1. G0 데이터/평가·규칙 잠금
 2. fold 0 base direct-answer greedy와 parser golden을 실행
 3. fold 0 answer-only QLoRA harm screen을 실행하고, 열세면 해당 candidate를 조기중단
-4. current parser/source로 base fold 0를 재확인한 뒤 verified concise-rationale 등 새
-   versioned candidate만 별도 probe
-5. harm screen을 통과한 method만 모든 development fold에서 complete OOF 실행
-6. complete OOF paired cluster bootstrap, exact McNemar, Holm으로 primary/fallback freeze
-7. frozen policy만 locked holdout에서 정확히 한 번 평가
-8. strict offline prediction과 두 validator로 submission을 만들되, Kaggle upload는 사용자 명시 요청 때만 수행
+4. current parser/source base fold 0의 1,653/2,942 재확인 완료
+5. question-only teacher output을 exact fold-training corpus로 canonicalize하고 raw-free audit와
+   pinned-tokenizer SFT preflight v4를 먼저 통과
+6. 새 source/B0에서 concise-rationale fold 0 QLoRA를 실행하고 base 대비 harm screen
+7. harm screen을 통과한 method만 모든 development fold에서 complete OOF 실행
+8. complete OOF paired cluster bootstrap, exact McNemar, Holm으로 primary/fallback freeze
+9. frozen policy만 locked holdout에서 정확히 한 번 평가
+10. strict offline prediction과 두 validator로 submission을 만들되, Kaggle upload는 사용자 명시 요청 때만 수행
 
-concise rationale, 외부 공개 데이터, self-training, preference/RL, deterministic tool,
-same-base multi-checkpoint fallback, adaptive self-consistency, full-development refit은 이
-first-pass 이후의 **별도 versioned 실험**이다. rationale 품질·도구/결합 규칙·오염
+concise-rationale v1은 answer-only 실패 뒤의 현재 별도 candidate다. 외부 공개 데이터,
+self-training, preference/RL, deterministic tool, same-base multi-checkpoint fallback,
+adaptive self-consistency, full-development refit은 이 candidate 이후의 **별도 versioned
+실험**이다. rationale 품질·도구/결합 규칙·오염
 provenance·개발 OOF 근거가 모두 green이 되기 전에는 이 경로에 섞지 않는다. PRM, MCTS,
 full FT, model soup는 현재 고정 계약 밖이다.

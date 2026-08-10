@@ -24,6 +24,10 @@ Accuracy가 높아도 정수 추출·CSV schema·offline cache 중 하나가 틀
 - development v2 manifest는 source manifest/tree SHA, config-file byte SHA, B0 preflight/smoke
   byte SHA, GPU device name, seed/prompt sequence digest, latency summary까지 결속한다. adapter
   training은 이 private evidence를 재-hash한 fixed-base v2 manifest만 입력으로 받는다.
+- direct-answer adapter는 schema v3, concise-rationale adapter는 schema v4로 분리한다.
+  rationale v4는 `reference_answer_in_prompt=false`인 exact fold-training corpus의 candidate
+  config byte/semantic SHA, records/manifest/audit SHA를 adapter와 OOF evidence가 다시
+  검증한다. inference route는 둘 다 고정 direct-answer parser다.
 - production validator와 별개로 `verify-submission-independent`가 primary data/submission
   모듈을 import하지 않는 최소 CSV parser로 header·ID·순서·정수를 교차검증한다.
 
@@ -180,6 +184,20 @@ class의 모든 값을 계속 비교하므로 기존 conflict 3건을 숨기지 
 adapter 변경 0건이다. 이 artifact는 `selection_eligible=false`와
 `requires_current_source_run_before_freeze=true`를 명시하므로 current-source bundle 전에는
 freeze/holdout/submission 근거가 아니다.
+
+이 조건은 parser v2 source/B0 tag `20260810T234907KST`의 새 generation으로 충족했다.
+새 records/manifest SHA는
+`d26196283ef0a9f350d252703f40797eb9cc1eafffa676e6b5a961404a1126b4`와
+`5a7c97f070fc7f9861a5c7bd92739c43cad0761714c373c046f485e4d300ea92`이고 stored parser가
+1,653/2,942, `ok/conflict/invalid=2705/3/234`로 current parser와 일치했다. raw-free audit
+v6 SHA는 `ba4e50772a6404b25468f25f31e67787f6819f832e76c34c947bef78aba74da0`다. 따라서
+freeze 입력 후보는 이 새 v2 bundle이지 과거 rescore artifact가 아니다.
+
+concise-rationale corpus는 submission/inference artifact와 별도의 private training input이다.
+canonicalizer는 exact `eligible_training_ids(fold)`만 허용하고 leaderboard/test/holdout/tool,
+answer-visible teacher prompt, wrong final answer, parser conflict를 모두 거부한다. raw-free audit는
+corpus/config/teacher aggregate와 checksum만 직렬화한다. production teacher corpus와 adapter가
+아직 없으므로 이 경로의 모델 점수·holdout/leaderboard prediction은 미실행이다.
 
 `audit-parser-golden`은 이 작업의 private CPU-only 입력 검증 단계다. manifest checksum과
 JSONL line count, fold-validation/cross-validation partition, 각 row의 completion hash와

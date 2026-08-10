@@ -1,6 +1,6 @@
 # Deep Learning Challenge 2026 — 조사·실행 계획 및 선행 구현
 
-기준 시각: **2026-08-10 KST**
+기준 시각: **2026-08-11 KST**
 대상 대회: Kaggle [Deep Learning Challenge 2026](https://www.kaggle.com/competitions/deep-learning-challenge-2026)
 고정 베이스: [Qwen/Qwen2.5-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct)
 
@@ -8,13 +8,13 @@
 > `$PROJECT/deep-learning-challenge-2026`이다. 2026-08-03 14:00 정제본인
 > 831행 leaderboard와 627개 train exclusion ID를 사용한다. split v4는 재생성하지
 > 않고 hard-group exclusion overlay를 적용한다. training cache-off와 eval KV-cache-on을
-> 분리한 source/B0 pair를 매 GPU run에 결속한다. production fold 0 base와 answer-only
-> QLoRA를 실제 실행했고, base 1,210/2,942(41.1285%) 대비 adapter
-> 627/2,942(21.3120%)로 유의하게 열세여서 이 QLoRA 설정은 fold 1--4 전에 중단했다.
-> 이후 보수적 parser가 `Final answer is:`와 중첩된 동일 marker를 놓치던 결함을 고쳐,
-> 기존 base raw generation의 CPU-only 재채점 진단은 1,653/2,942(56.1863%)가 됐다.
-> 이 재채점은 selection-ineligible이며 새 source/B0의 current-source run 전에는 freeze에
-> 쓰지 않는다. 정확한 실행 명령은
+> 분리한 source/B0 pair를 매 GPU run에 결속한다. answer-only QLoRA는 같은 fold의 당시
+> base 1,210/2,942(41.1285%) 대비 627/2,942(21.3120%)로 유의하게 열세여서 fold 1--4
+> 전에 중단했다. parser v2를 포함한 새 source/B0 tag `20260810T234907KST`에서 base를
+> 다시 생성해 1,653/2,942(56.1863%), parser `ok/conflict/invalid=2705/3/234`를
+> selection-eligible v2 bundle로 확정했다. 다음 candidate인 verified concise rationale는
+> CPU-only corpus/audit/SFT-preflight와 adapter provenance 경로까지 구현했지만 실제 private
+> corpus 생성·QLoRA·모델 점수는 아직 실행하지 않았다. 정확한 실행 명령은
 > [Gate B CPU-ready 런북](docs/10_GATE_B_CPU_READY_RUNBOOK.md)에 있다.
 
 ## 한 줄 결론
@@ -53,13 +53,14 @@ flowchart LR
 | 논문·방법론 조사 | 완료 | SFT, LoRA/QLoRA, self-training, preference, GRPO/RLVR, verifier, TIR, test-time compute, 오염 감사 |
 | model-free Gate A | **READY** | strict loader, filtered audit, split v4 overlay, parser, grouped evaluation, voting, uppercase-ID submission, provenance와 회귀 테스트 |
 | 모델·토크나이저 preflight | **Gate B0 READY** | pinned tokenizer와 2개 full weight shard/commit, CUDA/BF16/NF4 QLoRA runtime, physical VRAM preflight와 cache-on local synthetic smoke를 실제 target GPU에서 green으로 확인했다. source가 바뀌면 새 pair를 요구한다. |
-| 실제 QLoRA 학습·모델 추론 | **fold 0 완료 / answer-only QLoRA 중단** | base는 1,210/2,942(41.1285%), QLoRA는 627/2,942(21.3120%)였다. paired delta -19.8165%p, 95% cluster-bootstrap CI [-21.9240, -17.7831]%p, Holm-adjusted exact McNemar p=3.31e-72로 이 candidate의 나머지 fold를 중단했다. current parser 재채점 base 56.1863%는 진단이며 새 run 전에는 selection evidence가 아니다. |
+| 실제 QLoRA 학습·모델 추론 | **base current-source 완료 / answer-only QLoRA 중단 / rationale 미실행** | answer-only QLoRA는 627/2,942(21.3120%)로 탈락했다. parser v2 current-source base는 `20260810T234907KST`에서 1,653/2,942(56.1863%)로 재현되어 selection evidence가 됐다. concise-rationale 경로는 CPU 구현·테스트만 완료했고 실제 corpus·학습·점수는 없다. |
 
-따라서 **Gate A는 READY**이고 Gate B0 환경도 실제 green이다. Gate B1/B2 fold 0까지 실행했지만
-answer-only QLoRA candidate는 비용 게이트에서 탈락했다. 새 parser의 CPU-only 진단 이득은
-확인했으나 현재 source로 다시 생성한 bundle이 아니므로 selection/freeze/holdout은 계속 잠겨
-있다. 다음 GPU workload도 새 source manifest와 preflight/smoke, 직전 read-only VRAM 조건,
-versioned no-overwrite target을 모두 확인한 뒤에만 실행한다. 구현·테스트의 최종 상태는
+따라서 **Gate A는 READY**이고 Gate B0 환경도 실제 green이다. answer-only QLoRA candidate는
+비용 게이트에서 탈락했고, parser v2 current-source base는 새 generation으로 재현됐다.
+selection/freeze/holdout은 concise-rationale 같은 새 candidate가 fold 0 harm screen과 complete
+OOF를 통과하기 전까지 계속 잠겨 있다. 다음 GPU workload도 현재 코드·문서를 반영한 새 source
+manifest와 preflight/smoke, 직전 read-only VRAM 조건, versioned no-overwrite target을 모두
+확인한 뒤에만 실행한다. 구현·테스트의 최종 상태는
 [선행 구현 및 검증 상태](docs/09_IMPLEMENTATION_STATUS.md)에 기록한다.
 
 ## 가장 중요한 데이터 발견
@@ -148,7 +149,7 @@ versioned no-overwrite target을 모두 확인한 뒤에만 실행한다. 구현
 ## 구현 단계별 체크포인트
 
 - **A — model-free 기반:** strict loader, manifest, quality flags, 안전한 group split, parser, grouped evaluator, voting, submission writer/validator를 구현·테스트했다. **현재 완료 상태**다.
-- **B — organizer-only 단일 adapter:** fold 0 base와 answer-only QLoRA를 완료했다. answer-only target은 출력을 7-token 수준으로 축약했지만 추론 성능을 훼손해 21.3120%로 탈락했다. base raw를 이용한 parser v2 진단은 56.1863%이나 selection-ineligible이므로 current-source base를 먼저 재실행한다. 그 뒤에만 독립 검증된 concise rationale candidate를 별도 버전으로 검토한다.
+- **B — organizer-only 단일 adapter:** fold 0 base와 answer-only QLoRA를 완료했다. answer-only target은 출력을 7-token 수준으로 축약했지만 추론 성능을 훼손해 21.3120%로 탈락했다. parser v2 current-source base는 56.1863%로 재실행·검증했다. 다음은 training-only teacher provenance, exact fold-training coverage, reference-answer 검증, raw-free audit가 모두 통과한 concise-rationale candidate만 별도 버전으로 probe한다.
 - **C — 확장:** 규칙상 허용된 외부 공개 데이터와 training-only teacher rationale도 provenance/오염/품질 gate 뒤에만 쓴다. Python/SymPy TIR과 same-base 다중 adapter/checkpoint 결합은 서면 확인 전 비활성화한다.
 
 따라서 모든 질문의 답이 올 때까지 안전한 기반 구현을 멈추지는 않지만, 답이 없는 기능을 묵시적으로 허용하지도 않는다.

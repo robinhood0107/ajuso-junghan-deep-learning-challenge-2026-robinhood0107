@@ -1,6 +1,6 @@
 # 11. 지속 실행 체크리스트와 공개 저장소 경계
 
-기준 시각: **2026-08-10 KST**
+기준 시각: **2026-08-11 KST**
 
 이 문서는 작업을 중단했다가 다시 시작하더라도 같은 순서·동일한 안전 조건으로
 이어가기 위한 실행 원장이다. 상태 값이 바뀌는 GPU 사용량이나 Kaggle 제출 한도는 이
@@ -28,7 +28,7 @@ ASCII 표기로 사용한다.
   CSV/Parquet/JSONL/weight 파일처럼 별도 전달해야 하는 데이터·model 산출물
 - `env`, `.env*`, `.kaggle/`, access token, Hugging Face token 등 모든 인증 정보
 - local model weight·adapter·checkpoint·prediction·submission과 experiment tracker
-- 기존 사용자 파일 `NU_`, 개인 작업 프롬프트, local browser/tool cache
+- 기존 사용자 파일 `NUL`/`NU_`, 개인 작업 프롬프트, local browser/tool cache
 
 `.gitignore`은 위 경계를 강제한다. 공개 저장소의 문서는 데이터 내용을 포함하지 않고,
 로컬 artifact는 수상 검증이 필요한 경우 별도 비공개 전달물로만 사용한다.
@@ -67,11 +67,13 @@ PYTHONPATH=src python3 -m deep_challenge.public_repo_guard --all
 | B0.1 | Kaggle rules/data snapshot | API token 존재 | page/file/limit hash, sample 부재 기록 | slug/auth 실패 |
 | B0.2 | GPU preflight | model/runtime/VRAM 충족 | 새 no-overwrite preflight JSON, `training_ready=true` | GPU used >2,048MiB 또는 free <10,240MiB |
 | B0.3 | final synthetic smoke | B0.2 green | `status=green`; only local `2+3` prompt | parser/load/backward/VRAM failure |
-| B1.0 | fold 0 base direct-answer | B0.3 green | JSONL + **v2 provenance manifest** + raw generation | invalid parser/artifact or any source/B0/config hash mismatch |
+| B1.0 | fold 0 base direct-answer | B0.3 green | `20260810T234907KST` JSONL + **v2 provenance manifest**, 1,653/2,942 | invalid parser/artifact or any source/B0/config hash mismatch |
 | B1.1 | parser golden corpus | B1.0 real generations | added regression tests + full CPU suite | conflict is hidden or test fails |
-| B2.0 | fold 0 answer-only QLoRA | same-fold base manifest | exact adapter bundle/checksum/manifest | train IDs or provenance mismatch |
-| B1/B2.1 | folds 1–4 repeat | fold 0 harm screen authorizes exact candidate | five base + five candidate OOF runs | significant fold 0 regression or any fold incomplete |
-| B2.2 | complete OOF comparison | all five folds | grouped paired bootstrap, exact McNemar, Holm | single fold/reused run/mixed method |
+| B2.0 | fold 0 answer-only QLoRA | same-fold base manifest | 627/2,942; significant harm로 candidate 중단 | train IDs or provenance mismatch |
+| B2.1 | concise-rationale CPU gate | training-only private teacher rows | canonical corpus+manifest, raw-free audit, SFT preflight v4 | any coverage/reference/provenance/policy mismatch |
+| B2.2 | fold 0 rationale QLoRA probe | B2.1와 새 source/B0 green | adapter v4 + generation + paired harm screen | corpus/adapter binding mismatch 또는 significant harm |
+| B1/B2.3 | folds 1–4 repeat | fold 0 harm screen authorizes exact candidate | five base + five candidate OOF runs | any fold incomplete or method fingerprint drift |
+| B2.4 | complete OOF comparison | all five folds | grouped paired bootstrap, exact McNemar, Holm | single fold/reused run/mixed method |
 | B3 | freeze and locked holdout | B2.2 evidence, primary decided | durable claim + one receipt | no freeze, already-consumed claim |
 | B4.1 | filtered leaderboard prediction | frozen policy, B3 complete | strict prediction manifest, no invalid answers | data SHA/schema/adapter mismatch |
 | B4.2 | submission build/verify | B4.1 complete | writer + two independent validators + checksum | any missing/invalid ID |
@@ -215,6 +217,45 @@ McNemar p가 3.31e-72이므로 cost-control gate는 fold 1--4를 중단했다. �
 immutable rescore는 base만 1,653/2,942(56.1863%)로 개선했고 adapter는 변하지 않았다.
 rescore는 selection-ineligible이며 다음 source-bound B1 전에는 freeze할 수 없다.
 
+### 3.1.5 R8-C parser v2 current-source B1 완료
+
+`20260810T234907KST`의 source manifest/B0 pair로 fold 0 base를 새로 생성했다. source
+manifest file/tree SHA는
+`eb5d2e175e26af488040aded858fcf70d2273336aee105f81c3f2613c308b727`와
+`ab266cd353b8e87ec2719630723949fe76ab7dce14e0103879b8f38b3d1814dc`, preflight/smoke SHA는
+`c1b29c10ad76f3eb2e94781c4dc271951a5b638af8cdcc2d291d3062b55a349f`와
+`70689026618f45e468565742a0afb10472a8373329d35c5da840786ead12e30b`다.
+
+records/manifest SHA는
+`d26196283ef0a9f350d252703f40797eb9cc1eafffa676e6b5a961404a1126b4`와
+`5a7c97f070fc7f9861a5c7bd92739c43cad0761714c373c046f485e4d300ea92`다. 실제 결과는
+1,653/2,942(56.1863%), parser `ok/conflict/invalid=2705/3/234`, finish
+`stop/length=2134/808`이며 raw-free parser audit v6 SHA는
+`ba4e50772a6404b25468f25f31e67787f6819f832e76c34c947bef78aba74da0`다. 이는 과거 raw
+rescore를 승격한 것이 아니라 parser v2 source에서 별도로 얻은 selection-eligible v2
+bundle이다. holdout/leaderboard/test는 접근하지 않았다.
+
+### 3.1.6 R9-A concise-rationale CPU 계약 완료
+
+새 candidate config
+`configs/gate_b/rtx4070-super-12gb-concise-rationale-v1.json`의 semantic/file SHA는
+`75a315b638481a0c8213c413aa3a1253d269776d08bd2252b68654fb38c3f053`와
+`66a4c5c145881c92cb4b260ef000bd89bd62119b644f6bd1e49e9894c431064f`다. 구현은 exact
+fold-training coverage, organizer question/reference, parser result, canonical final marker,
+teacher/prompt/generation/raw SHA, `reference_answer_in_prompt=false`,
+training-only/no-tool/no-test/no-holdout를 검증하고 canonical
+corpus+manifest를 atomic no-overwrite로 publish한다. 별도 audit는 raw rationale, ID,
+question, answer, parsed value, teacher prompt를 포함하지 않고
+`reference_answer_in_prompt_true_count=0`을 다시 계산한다. pair publish 중 두 번째 파일의
+I/O 실패는 첫 번째 파일까지 rollback하고, 기존 direct-answer OOF fingerprint v1은 그대로
+보존하면서 rationale에만 fingerprint v2 provenance를 추가했다.
+
+SFT preflight와 QLoRA runtime은 이 corpus/audit/config SHA를 target provenance로 묶는 v4
+schema를 사용한다. synthetic training-only fixtures로 corpus→audit→pinned tokenizer
+preflight→fake-runtime adapter publish 회귀를 통과했지만, production teacher JSONL, 실제
+rationale adapter, GPU generation과 모델 점수는 아직 없다. 다음 GPU workload 전에는 현재
+변경을 포함한 새 source manifest/preflight/smoke가 다시 필요하다.
+
 ### 3.2 전체 백로그와 의존 관계
 
 아래 목록은 재개 시 순서를 바꾸지 않는 실행 단위다. `CPU`는 CUDA workload 없이 가능한
@@ -224,7 +265,7 @@ rescore는 selection-ineligible이며 다음 source-bound B1 전에는 freeze할
    통과했다. selection evidence로는 봉인한다.
 2. **R2 (완료, CPU):** private parser audit v2와 raw-free structural regression을 추가했다.
    conflict는 여전히 fail-visible이다.
-3. **R3 (완료, CPU):** Ruff, full `pytest -s -q` (372 passed, 1 skipped), branch coverage 78%, public-repo guard,
+3. **R3 (완료, CPU):** Ruff, full `pytest -s -q` (398 passed, 1 skipped), branch coverage 79%, public-repo guard,
    canonical checksum을 통과했고 docs 04/05/07/09/10/11을 현재 evidence로 갱신했다.
 4. **R4 (완료, GPU):** GPU `used/free=912/11,086MiB`의 새 관측값에서 당시 source
    preflight와 cache-on synthetic smoke를 `20260810T062500KST`로 실행했고 green pair를 만들었다.
@@ -247,28 +288,39 @@ rescore는 selection-ineligible이며 다음 source-bound B1 전에는 freeze할
    parser를 보강했고 conflict 3건은 유지했다. immutable base raw rescore는
    1,653/2,942(56.1863%), adapter는 627/2,942 그대로다. 둘 다 rescore 자체는
    selection-ineligible이다.
-10. **R8-C (다음, CPU→GPU):** 전체 회귀·Git 기록 뒤 새 source manifest/B0 pair를 만들고
-    fold 0 current-source base를 다시 atomic publish한다. stored/current parser가 일치한
-    selection evidence를 얻기 전에는 새 candidate, freeze, holdout으로 가지 않는다.
-11. **R9 (대기):** current-source base 뒤 verified concise rationale 또는 별도 versioned
-    candidate를 정의하고 fold 0 harm screen을 먼저 통과시킨다. 통과한 method만 folds 1--4와
-    complete OOF grouped paired bootstrap, exact McNemar, Holm을 수행한다.
-12. **R10 (CPU):** development evidence만으로 primary/fallback을 freeze하고 one-shot
+10. **R8-C (완료, CPU→GPU):** `20260810T234907KST` source/B0 pair와 fold 0 current-source
+    base를 atomic publish했다. stored/current parser가 일치한 1,653/2,942 selection
+    evidence와 raw-free audit v6를 확보했다.
+11. **R9-A (완료, CPU):** concise-rationale v1 config, exact fold-training corpus
+    canonicalizer, raw-free audit, pinned-tokenizer SFT preflight v4, adapter v4 provenance와
+    selection/freeze compatibility를 구현·회귀검증했다.
+12. **R9-B (대기, 외부 입력→CPU):** rules상 허용된 training-only teacher로 fold 0의
+    private JSONL을 만들되 leaderboard/test/holdout/tool을 사용하지 않는다. 전체 11,794
+    eligible training ID가 organizer reference/parser/provenance gate를 통과하도록
+    `build-rationale-corpus`→`audit-rationale-corpus`→SFT preflight v4를 실행한다.
+13. **R9-C (대기, GPU):** R9-B green, 전체 회귀, Git 기록 뒤 새 source manifest/B0 pair를
+    만들고 fold 0 rationale QLoRA→adapter generation→paired harm screen을 실행한다. 실제
+    corpus가 없으면 시작하지 않는다.
+14. **R9-D (조건부 GPU):** R9-C가 `candidate_full_oof_authorized=true`일 때만 folds 1--4의
+    fold별 corpus/adapter/base/generation을 완성하고 complete OOF grouped paired bootstrap,
+    exact McNemar, Holm을 수행한다.
+15. **R10 (CPU):** development evidence만으로 primary/fallback을 freeze하고 one-shot
     holdout claim 전의 immutable method/route/config checkpoint binding을 검증한다.
-13. **R11 (GPU):** R10 이후에만 locked holdout을 정확히 한 번 평가한다. claim을 만든 뒤
+16. **R11 (GPU):** R10 이후에만 locked holdout을 정확히 한 번 평가한다. claim을 만든 뒤
     실패해도 접근권은 소비되므로 재시도 판단은 별도 기록한다.
-14. **R12 (GPU):** holdout 후 고정된 policy로 filtered leaderboard만 예측한다. 이 데이터는
+17. **R12 (GPU):** holdout 후 고정된 policy로 filtered leaderboard만 예측한다. 이 데이터는
     학습, self-training seed, prompt 개선, 외부 API 입력에 절대 쓰지 않는다.
-15. **R13 (CPU):** strict submission writer와 independent validator를 모두 통과시키고
+18. **R13 (CPU):** strict submission writer와 independent validator를 모두 통과시키고
     `ID,answer`, row order, checksum, invalid/missing=0인지 확인한다.
-16. **R14 (외부 권한):** Kaggle upload는 사용자의 명시 요청이 있을 때만 수행한다. upload
+19. **R14 (외부 권한):** Kaggle upload는 사용자의 명시 요청이 있을 때만 수행한다. upload
     전에는 final run manifest와 local submission checksum을 다시 대조한다.
-17. **R15 (CPU):** 각 완료 phase마다 source manifest와 canonical `CHECKSUMS.sha256`를
+20. **R15 (CPU):** 각 완료 phase마다 source manifest와 canonical `CHECKSUMS.sha256`를
     갱신하고, raw artifact 없이 public code/docs만 guard 검증·commit·push한다.
 
-R4--R8은 R3의 parser/test gate를 우회할 수 없고, R11--R14는 R9--R10의 complete OOF
-freeze를 우회할 수 없다. 외부 규칙 확인이 아직 없는 Python/SymPy, teacher rationale,
-multi-adapter/checkpoint combination은 위 첫 pass에 포함하지 않는다.
+R4--R9는 R3의 parser/test gate를 우회할 수 없고, R11--R14는 R9-D--R10의 complete OOF
+freeze를 우회할 수 없다. Python/SymPy와 multi-adapter/checkpoint combination은 운영진
+서면 답변 전 포함하지 않는다. teacher rationale는 training-only로 허용되지만 R9-B의
+private corpus와 품질/provenance gate 없이 학습에 넣지 않는다.
 
 ## 4. Immediate exact commands
 
@@ -283,6 +335,20 @@ RUN_TAG=replace-with-new-unique-tag
 SOURCE_MANIFEST="artifacts/analysis/source-manifest-gate-b-$RUN_TAG.json"
 
 cd "$PROJECT"
+uv sync --extra model --group dev
+uv run ruff check .
+CUDA_VISIBLE_DEVICES='' uv run pytest -s -q
+cd artifacts/analysis && sha256sum -c CHECKSUMS.sha256 && cd "$PROJECT"
+```
+
+다음 실제 작업은 production teacher JSONL이 준비된 뒤
+[`10_GATE_B_CPU_READY_RUNBOOK.md`](10_GATE_B_CPU_READY_RUNBOOK.md)의 3.1절 세 명령을 실행하는
+것이다. 이 단계는 CUDA를 쓰지 않으며 corpus/audit/preflight v4 중 하나라도 green이 아니면
+여기서 중단한다. Kaggle token은 대회 metadata 확인용이지 teacher credential이 아니다.
+
+R9-B가 green이고 rationale QLoRA를 실제 시작할 때만 먼저 다음 read-only 관측을 한다.
+
+```bash
 nvidia-smi --query-gpu=name,memory.total,memory.used,memory.free,compute_cap,driver_version \
   --format=csv,noheader,nounits
 ```
@@ -319,9 +385,10 @@ is intentionally outside automatic execution.
 
 ## 6. Deferred experiments
 
-The first pass ends after single-adapter direct-answer OOF comparison and the
-one permitted holdout evaluation. Concise rationale, public external data,
-self-training, preference/RL, local tool use, multi-checkpoint voting, and
-full-development refit are separate versioned experiments. They may begin only
-after their rule, license, contamination, compute, and development-evidence
-gates are recorded; none is silently folded into the first-pass result.
+The answer-only candidate ended at its fold 0 harm screen. The next single-adapter
+experiment is the separately versioned concise-rationale v1 path; only its CPU
+contract is complete. Public external data, self-training, preference/RL, local
+tool use, multi-checkpoint voting, and full-development refit remain deferred.
+They may begin only after their rule, license, contamination, compute, and
+development-evidence gates are recorded; none is silently folded into the
+concise-rationale result.

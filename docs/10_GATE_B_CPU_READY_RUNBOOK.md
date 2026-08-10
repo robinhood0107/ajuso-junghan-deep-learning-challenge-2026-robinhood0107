@@ -1,8 +1,8 @@
 # 10. Gate B CPU-ready 실행 런북
 
-기준 시각: **2026-08-10 KST**
+기준 시각: **2026-08-11 KST**
 대상 호스트: **WSL2 Ubuntu 24.04 + NVIDIA GeForce RTX 4070 SUPER 12GB**
-현재 판정: **fold 0 base·answer-only QLoRA 완료, QLoRA candidate 중단, parser v2 current-source B1 재실행 대기**
+현재 판정: **parser v2 current-source base 완료, answer-only QLoRA 중단, concise-rationale CPU 경로 READY·실제 학습 미실행**
 
 이 문서는 현재 코드의 CLI와 정확히 일치하는 실행 순서다. GPU가 필요한 명령은 맨
 뒤의 별도 절에만 둔다. 2026-08-10 이전 source final smoke와 별도로, training cache-off와
@@ -48,6 +48,7 @@ FILTERED_LB="$DATA_DIR/deep_chal_math_leaderboard_filtered.csv"
 SPLIT="$PROJECT/artifacts/analysis/splits-v4.json"
 DEV_SHARD="$PROJECT/artifacts/analysis/development-cv-v4"
 CONFIG="$PROJECT/configs/gate_b/rtx4070-super-12gb-direct-answer-v1.json"
+RATIONALE_CONFIG="$PROJECT/configs/gate_b/rtx4070-super-12gb-concise-rationale-v1.json"
 RUN_TAG=replace-with-new-unique-tag
 SOURCE_MANIFEST="$PROJECT/artifacts/analysis/source-manifest-gate-b-$RUN_TAG.json"
 ```
@@ -62,6 +63,9 @@ config JSON 파일 SHA는
 `703926d84ec6c7a95f7ce50de384fb5dcb1bb35d98cd52cbb6ab846f980d83c3`이다. CLI의
 `--expected-split-sha256`와 `--expected-development-shard-sha256`에는 각각 위의 논리
 split SHA와 bundle SHA만 넣는다.
+`RATIONALE_CONFIG`의 semantic/file SHA는 각각
+`75a315b638481a0c8213c413aa3a1253d269776d08bd2252b68654fb38c3f053`와
+`66a4c5c145881c92cb4b260ef000bd89bd62119b644f6bd1e49e9894c431064f`다.
 
 현재 canonical 사실은 다음과 같다.
 
@@ -139,6 +143,83 @@ green 기준은 `torch_or_cuda_used=false`, `model_weights_loaded=false`,
 결과는 max sequence 1,127/2,048, response label 최소 7 token, training 11,794행,
 validation 2,942행이다.
 
+### 3.1 verified concise-rationale CPU gate
+
+이 단계는 GPU를 쓰지 않는다. `PRIVATE_TEACHER_JSONL`은 Git에서 제외한 training-only
+입력이어야 하며 leaderboard/test/locked holdout에서 만든 행을 한 개라도 포함하면 안 된다.
+현재 production 파일은 아직 생성하지 않았다. 각 row는 exact fold-training ID, organizer
+question SHA, canonical `Final answer: <integer>`로 끝나는 concise rationale, target SHA,
+teacher provider/model/revision, prompt/generation/raw SHA, seed/sample index,
+`reference_answer_in_prompt=false`, `network_scope=training_only`, reference-answer 검증
+상태를 갖는다. Python/SymPy tool 사용은 현재 config에서 금지다.
+
+```bash
+FOLD=0
+PRIVATE_TEACHER_JSONL=/private/path/fold-0-teacher-rationales.jsonl
+RATIONALE_ROOT="$PROJECT/artifacts/gate_b/rationale-$RUN_TAG/fold-$FOLD"
+mkdir -p "$RATIONALE_ROOT"
+
+uv run deep-challenge build-rationale-corpus \
+  --train "$TRAIN" \
+  --train-exclusions "$EXCLUSIONS" \
+  --split-artifact "$SPLIT" \
+  --fold "$FOLD" \
+  --expected-train-sha256 "$TRAIN_SHA" \
+  --expected-exclusions-sha256 "$EXCLUSIONS_SHA" \
+  --expected-exclusion-count 627 \
+  --expected-split-sha256 "$SPLIT_SHA" \
+  --development-shard "$DEV_SHARD" \
+  --expected-development-shard-sha256 "$DEV_SHARD_SHA" \
+  --source-jsonl "$PRIVATE_TEACHER_JSONL" \
+  --rationale-config "$RATIONALE_CONFIG" \
+  --output-jsonl "$RATIONALE_ROOT/rationales.jsonl" \
+  --output-manifest "$RATIONALE_ROOT/manifest.json"
+
+uv run deep-challenge audit-rationale-corpus \
+  --train "$TRAIN" \
+  --train-exclusions "$EXCLUSIONS" \
+  --split-artifact "$SPLIT" \
+  --fold "$FOLD" \
+  --expected-train-sha256 "$TRAIN_SHA" \
+  --expected-exclusions-sha256 "$EXCLUSIONS_SHA" \
+  --expected-exclusion-count 627 \
+  --expected-split-sha256 "$SPLIT_SHA" \
+  --development-shard "$DEV_SHARD" \
+  --expected-development-shard-sha256 "$DEV_SHARD_SHA" \
+  --rationale-corpus "$RATIONALE_ROOT/rationales.jsonl" \
+  --rationale-manifest "$RATIONALE_ROOT/manifest.json" \
+  --rationale-config "$RATIONALE_CONFIG" \
+  --output "$RATIONALE_ROOT/audit.json"
+
+CUDA_VISIBLE_DEVICES='' HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+  uv run deep-challenge gate-b-sft-preflight \
+  --train "$TRAIN" \
+  --train-exclusions "$EXCLUSIONS" \
+  --split-artifact "$SPLIT" \
+  --fold "$FOLD" \
+  --expected-train-sha256 "$TRAIN_SHA" \
+  --expected-exclusions-sha256 "$EXCLUSIONS_SHA" \
+  --expected-exclusion-count 627 \
+  --expected-split-sha256 "$SPLIT_SHA" \
+  --development-shard "$DEV_SHARD" \
+  --expected-development-shard-sha256 "$DEV_SHARD_SHA" \
+  --revision "$REVISION" \
+  --config "$CONFIG" \
+  --rationale-corpus "$RATIONALE_ROOT/rationales.jsonl" \
+  --rationale-manifest "$RATIONALE_ROOT/manifest.json" \
+  --rationale-audit "$RATIONALE_ROOT/audit.json" \
+  --rationale-config "$RATIONALE_CONFIG" \
+  --output "$RATIONALE_ROOT/sft-encoding-preflight-v4.json"
+```
+
+세 명령은 모두 exact fold-training coverage와 모든 checksum을 다시 계산하고 기존 출력을
+덮어쓰지 않는다. audit에는 raw rationale/ID/question/reference answer/parsed integer/teacher
+prompt가 직렬화되지 않으며 `reference_answer_in_prompt_true_count=0`을 aggregate로 남긴다.
+마지막 artifact가 schema v4, `status=green`, truncation 0,
+`torch_or_cuda_used=false`이고 corpus records/manifest/audit SHA를 모두 결속할 때만 이후
+rationale QLoRA의 입력 후보가 된다. production corpus가 없으므로 이 절의 실제 완료 점수는
+아직 없다.
+
 ## 4. 규칙 상태와 보수적 feature gate
 
 사용자가 제공한 규칙 원문으로 다음은 확인했다.
@@ -159,15 +240,16 @@ submission allowance를 read-only 확인했다. 다음은 아직 확인하지 �
 - 로컬 Python/SymPy tool inference의 명시 허용 범위
 - same-base multi-adapter/checkpoint voting·weight soup·selector 허용 범위
 
-따라서 Python/SymPy TIR과 same-base multi-adapter 결합은 off다. 첫 실행은 organizer-only,
-단일 base와 단일 direct-answer adapter만 비교한다. teacher rationale의 규칙은 허용으로
-읽히지만 품질 검증 corpus가 아직 없으므로 첫 baseline에는 넣지 않는다.
+따라서 Python/SymPy TIR과 same-base multi-adapter 결합은 off다. organizer-only direct-answer
+candidate는 이미 중단했고, 다음 모델 실험도 단일 base와 단일 rationale adapter만 비교한다.
+teacher rationale는 training-only로 허용되지만 3.1절 품질 검증 corpus가 없으면 시작하지 않는다.
 
 ## 5. B0 GPU 승인 증거와 새 run 직전 재검사
 
-2026-08-10 target-host preflight와 local synthetic smoke는 production source에서 run tag
-`20260810T131821KST`로 green이고 같은 tag의 B1 v2까지 완료했다. 이 pair는 그 source의
-production B1에만 bind한다. 다른 run tag에는 재사용하지 않고 이 절의 새 `RUN_TAG`
+2026-08-10 target-host preflight와 local synthetic smoke는 parser v2 production source의
+run tag `20260810T234907KST`로 green이고 같은 tag의 B1 v2까지 완료했다. 이 pair는 그
+source의 production B1에만 bind한다. rationale 구현 이후의 다른 run에는 재사용하지 않고
+이 절의 새 `RUN_TAG`
 preflight와 smoke를 순서대로 다시 만든다.
 다른 GPU 프로세스를 종료하거나 선점하지 않으며, 모든 새 GPU run 직전에는 아래 두 조건을
 다시 관측한다.
@@ -187,6 +269,13 @@ binding은 `model-preflight-gpu-ready-20260810T062500KST.json`(physical 912/11,0
 `training_ready=true`)와 `gpu-smoke-20260810T062500KST.json`(`status=green`)이다. GPU 값은
 계속 변하므로 snapshot 수치를 현재 실시간 값이라고 주장하지 않고, 실제 실행 여부는 위
 `nvidia-smi`의 직전 관측으로 다시 판정한다.
+
+현재 parser v2 production binding은
+`model-preflight-gpu-ready-20260810T234907KST.json` (SHA
+`c1b29c10ad76f3eb2e94781c4dc271951a5b638af8cdcc2d291d3062b55a349f`)과
+`gpu-smoke-20260810T234907KST.json` (SHA
+`70689026618f45e468565742a0afb10472a8373329d35c5da840786ead12e30b`)이다. 이 pair는
+완료된 base evidence에만 결속돼 있으며 새 rationale 학습을 승인하지 않는다.
 
 GPU 전용 환경은 WSL ext4에 둔다. 재동기화가 필요할 때만 다음을 실행한다.
 
@@ -239,14 +328,15 @@ evidence에 함께 남으며, 이후 training/inference gate도 이를 요구한
 
 ## 6. Gate B1 — base direct-answer development 기준선
 
-production tag `20260810T131821KST`는 이 절을 완료했다. records 2,942행과 v2 manifest가
-atomic publish됐고 records/manifest SHA-256은 각각
-`e25f9468fe4bb3fd2851c4cd69bb340619c2962b851e10f707bb998e18b022e7`와
-`e52cc656ff3a17f6b0794fdd39b81190005a43d6c92b8ac6b8c83ecd67771fa6`다. exact match는
-1,210/2,942(41.1285%), parser `ok/conflict/invalid=2143/3/796`, finish
+parser v2 production tag `20260810T234907KST`는 이 절을 완료했다. records 2,942행과 v2
+manifest가 atomic publish됐고 records/manifest SHA-256은 각각
+`d26196283ef0a9f350d252703f40797eb9cc1eafffa676e6b5a961404a1126b4`와
+`5a7c97f070fc7f9861a5c7bd92739c43cad0761714c373c046f485e4d300ea92`다. exact match는
+1,653/2,942(56.1863%), parser `ok/conflict/invalid=2705/3/234`, finish
 `stop/length=2134/808`이었다. parser audit
-`parser-golden-20260810T131821KST-fold0-v4.json`도 raw-free 19 classes로 통과했다. 이후
-문서·테스트가 source tree를 바꾸므로 7절 학습 전에는 새 tag/source manifest/B0 pair를 만든다.
+`parser-golden-20260810T234907KST-fold0-v6.json`도 raw-free 20 classes로 통과했다. 이
+bundle은 stored/current parser가 일치하는 selection evidence다. 이후 rationale 코드·문서·
+테스트가 source tree를 바꾸므로 새 학습 전에는 새 tag/source manifest/B0 pair를 만든다.
 
 GPU green 뒤 첫 모델 실행은 fold 0 base greedy 한 개뿐이다. 아래 `FOLD=0`을 그대로
 두고 먼저 실행한다. 2026-08-10에 attention mask와 eval KV-cache 보강 전 시작한 동일 목적의 diagnostic
@@ -320,9 +410,10 @@ uv run deep-challenge audit-parser-rescore \
   --output "artifacts/analysis/parser-rescore-$RUN_TAG-fold$FOLD-base-v1.json"
 ```
 
-현재 parser v2의 기존 base rescore는 1,653/2,942(56.1863%), invalid 234, conflict 3이다.
-이는 GPU generation을 재사용한 구현 진단이고 freeze 근거가 아니므로 새 source/B0의 B1을
-반드시 다시 atomic publish한다.
+parser v2의 기존 base rescore 1,653/2,942(56.1863%), invalid 234, conflict 3 자체는
+GPU generation을 재사용한 구현 진단이다. 다만 위 `20260810T234907KST` 새 generation이
+같은 aggregate를 별도 atomic bundle로 재현했으므로 current base 재실행 조건은 완료됐다.
+selection에는 rescore 파일이 아니라 새 v2 bundle만 사용한다.
 
 aggregate의 source/status/reason code에 새 구조가 있으면 공개 test에는 그 구조를
 재현하는 안전한 synthetic completion만 추가한다. 실제 question, ID, answer, raw completion,
@@ -412,10 +503,97 @@ contract, split/fold/exclusion/training·validation payload SHA, preflight/smoke
 manifest/tree SHA를 검증한 뒤 directory rename으로 publish한다. 불완전 shard나 다른 tokenizer는
 거부한다.
 
-concise rationale는 별도 검증 corpus와 별도 immutable config를 만든 뒤 direct-answer와
-독립 실험으로만 추가한다. 현재 direct-answer artifact를 rationale 결과로 덮어쓰지 않는다.
+concise rationale는 3.1절의 corpus/audit/preflight v4가 green이고, 새 source manifest/B0
+pair가 green일 때만 direct-answer와 독립 실험으로 추가한다. 현재 direct-answer artifact를
+rationale 결과로 덮어쓰지 않는다. production teacher corpus가 아직 없으므로 아래 명령은
+**다음 실행 계약**이며 실행 완료 기록이 아니다.
 
-단일-fold 비교 뒤에는 먼저 고정된 harm screen을 실행한다.
+```bash
+BASE_RUN_DIR="$PROJECT/artifacts/gate_b/20260810T234907KST/fold-0"
+RATIONALE_ADAPTER_DIR="$CHECKPOINT_DIR/adapter-concise-rationale-v1"
+
+"$GPU_CLI" gate-b-train-fold \
+  --train "$TRAIN" \
+  --train-exclusions "$EXCLUSIONS" \
+  --split-artifact "$SPLIT" \
+  --fold "$FOLD" \
+  --expected-train-sha256 "$TRAIN_SHA" \
+  --expected-exclusions-sha256 "$EXCLUSIONS_SHA" \
+  --expected-exclusion-count 627 \
+  --expected-split-sha256 "$SPLIT_SHA" \
+  --development-shard "$DEV_SHARD" \
+  --expected-development-shard-sha256 "$DEV_SHARD_SHA" \
+  --preflight-report "$PREFLIGHT" \
+  --gpu-smoke-report "$SMOKE" \
+  --config "$CONFIG" \
+  --source-root "$PROJECT" \
+  --source-manifest "$SOURCE_MANIFEST" \
+  --base-baseline-manifest "$BASE_RUN_DIR/base-direct-manifest.json" \
+  --rationale-corpus "$RATIONALE_ROOT/rationales.jsonl" \
+  --rationale-manifest "$RATIONALE_ROOT/manifest.json" \
+  --rationale-audit "$RATIONALE_ROOT/audit.json" \
+  --rationale-config "$RATIONALE_CONFIG" \
+  --output-dir "$RATIONALE_ADAPTER_DIR" \
+  --acknowledge-gpu-use
+
+"$GPU_CLI" gate-b-development \
+  --train "$TRAIN" \
+  --train-exclusions "$EXCLUSIONS" \
+  --split-artifact "$SPLIT" \
+  --fold "$FOLD" \
+  --expected-train-sha256 "$TRAIN_SHA" \
+  --expected-exclusions-sha256 "$EXCLUSIONS_SHA" \
+  --expected-exclusion-count 627 \
+  --expected-split-sha256 "$SPLIT_SHA" \
+  --development-shard "$DEV_SHARD" \
+  --expected-development-shard-sha256 "$DEV_SHARD_SHA" \
+  --preflight-report "$PREFLIGHT" \
+  --gpu-smoke-report "$SMOKE" \
+  --config "$CONFIG" \
+  --source-root "$PROJECT" \
+  --source-manifest "$SOURCE_MANIFEST" \
+  --adapter "$RATIONALE_ADAPTER_DIR" \
+  --base-baseline-manifest "$BASE_RUN_DIR/base-direct-manifest.json" \
+  --acknowledge-gpu-use \
+  --output-jsonl "$RUN_DIR/adapter-rationale-predictions.jsonl" \
+  --output-manifest "$RUN_DIR/adapter-rationale-manifest.json"
+
+uv run deep-challenge compare-development \
+  --train "$TRAIN" \
+  --train-exclusions "$EXCLUSIONS" \
+  --split-artifact "$SPLIT" \
+  --fold "$FOLD" \
+  --reference base-current \
+    "$BASE_RUN_DIR/base-direct-predictions.jsonl" \
+    "$BASE_RUN_DIR/base-direct-manifest.json" \
+  --candidate qlora-concise-rationale-v1 \
+    "$RUN_DIR/adapter-rationale-predictions.jsonl" \
+    "$RUN_DIR/adapter-rationale-manifest.json" \
+  --bootstrap-samples 10000 \
+  --bootstrap-seed 20260731 \
+  --confidence 0.95 \
+  --alpha 0.05 \
+  --expected-train-sha256 "$TRAIN_SHA" \
+  --expected-exclusions-sha256 "$EXCLUSIONS_SHA" \
+  --expected-exclusion-count 627 \
+  --expected-split-sha256 "$SPLIT_SHA" \
+  --development-shard "$DEV_SHARD" \
+  --expected-development-shard-sha256 "$DEV_SHARD_SHA" \
+  --output "$RUN_DIR/base-vs-rationale-probe.json"
+
+uv run deep-challenge decide-candidate-probe \
+  --comparison-artifact "$RUN_DIR/base-vs-rationale-probe.json" \
+  --candidate-label qlora-concise-rationale-v1 \
+  --output "artifacts/analysis/gate-b-candidate-probe-decision-$RUN_TAG-fold$FOLD-rationale-v1.json"
+```
+
+adapter manifest schema v4가 candidate config byte/semantic SHA와 corpus records/manifest/audit
+SHA를 모두 다시 결속해야 한다. generation은 기존 direct-answer inference route를 그대로
+사용한다. `candidate_full_oof_authorized=true`일 때만 folds 1--4에 fold별로 독립 teacher
+corpus/audit/adapter/run을 만들고 complete OOF로 간다.
+
+아래 harm-screen 명령은 이미 중단된 answer-only candidate의 역사적 재현 형식이다. 새
+rationale candidate에는 바로 위의 별도 label/output 명령을 사용한다.
 
 ```bash
 uv run deep-challenge decide-candidate-probe \
@@ -424,9 +602,10 @@ uv run deep-challenge decide-candidate-probe \
   --output "artifacts/analysis/gate-b-candidate-probe-decision-$RUN_TAG-fold$FOLD-v1.json"
 ```
 
-`candidate_full_oof_authorized=true`이고 전체 CPU 회귀가 green일 때만 `FOLD=1`, `2`, `3`,
-`4`로 바꾸어 6절과 7절을 반복한다. `false`이면 그 exact candidate는 중단하고 current-source
-base 또는 새 versioned candidate부터 다시 시작한다. 이 artifact는 비용 통제 전용이며
+각 candidate의 `candidate_full_oof_authorized=true`와 전체 CPU 회귀가 모두 green일 때만
+`FOLD=1`, `2`, `3`, `4`로 바꾸어 fold별 base/corpus/training/generation을 반복한다.
+`false`이면 그 exact candidate는 중단하고 새 versioned candidate부터 다시 시작한다. 이
+artifact는 비용 통제 전용이며
 `final_selection_eligible=false`, `complete_oof_required_before_freeze=true`다. 각 fold에서도
 반드시 base run을 먼저 만들고 그 fold의 base manifest로 학습을 승인한다. fold별
 `RUN_DIR`, `CHECKPOINT_DIR`, `ADAPTER_DIR`를 새 fold 값으로 다시 계산하며 공유하거나
@@ -447,42 +626,42 @@ uv run deep-challenge compare-development-oof \
   --split-artifact "$SPLIT" \
   --deployment-fold 0 \
   --reference-label base-direct \
-  --candidate-label qlora-direct \
+  --candidate-label qlora-concise-rationale-v1 \
   --base-run 0 \
-    "$RUN_ROOT/fold-0/base-direct-predictions.jsonl" \
-    "$RUN_ROOT/fold-0/base-direct-manifest.json" \
-  --adapter-run 0 qlora-direct \
-    "$RUN_ROOT/fold-0/adapter-direct-predictions.jsonl" \
-    "$RUN_ROOT/fold-0/adapter-direct-manifest.json" \
-    "$CHECKPOINT_ROOT/fold-0/adapter-direct" \
+    "$BASE_RUN_DIR/base-direct-predictions.jsonl" \
+    "$BASE_RUN_DIR/base-direct-manifest.json" \
+  --adapter-run 0 qlora-concise-rationale-v1 \
+    "$RUN_ROOT/fold-0/adapter-rationale-predictions.jsonl" \
+    "$RUN_ROOT/fold-0/adapter-rationale-manifest.json" \
+    "$CHECKPOINT_ROOT/fold-0/adapter-concise-rationale-v1" \
   --base-run 1 \
     "$RUN_ROOT/fold-1/base-direct-predictions.jsonl" \
     "$RUN_ROOT/fold-1/base-direct-manifest.json" \
-  --adapter-run 1 qlora-direct \
-    "$RUN_ROOT/fold-1/adapter-direct-predictions.jsonl" \
-    "$RUN_ROOT/fold-1/adapter-direct-manifest.json" \
-    "$CHECKPOINT_ROOT/fold-1/adapter-direct" \
+  --adapter-run 1 qlora-concise-rationale-v1 \
+    "$RUN_ROOT/fold-1/adapter-rationale-predictions.jsonl" \
+    "$RUN_ROOT/fold-1/adapter-rationale-manifest.json" \
+    "$CHECKPOINT_ROOT/fold-1/adapter-concise-rationale-v1" \
   --base-run 2 \
     "$RUN_ROOT/fold-2/base-direct-predictions.jsonl" \
     "$RUN_ROOT/fold-2/base-direct-manifest.json" \
-  --adapter-run 2 qlora-direct \
-    "$RUN_ROOT/fold-2/adapter-direct-predictions.jsonl" \
-    "$RUN_ROOT/fold-2/adapter-direct-manifest.json" \
-    "$CHECKPOINT_ROOT/fold-2/adapter-direct" \
+  --adapter-run 2 qlora-concise-rationale-v1 \
+    "$RUN_ROOT/fold-2/adapter-rationale-predictions.jsonl" \
+    "$RUN_ROOT/fold-2/adapter-rationale-manifest.json" \
+    "$CHECKPOINT_ROOT/fold-2/adapter-concise-rationale-v1" \
   --base-run 3 \
     "$RUN_ROOT/fold-3/base-direct-predictions.jsonl" \
     "$RUN_ROOT/fold-3/base-direct-manifest.json" \
-  --adapter-run 3 qlora-direct \
-    "$RUN_ROOT/fold-3/adapter-direct-predictions.jsonl" \
-    "$RUN_ROOT/fold-3/adapter-direct-manifest.json" \
-    "$CHECKPOINT_ROOT/fold-3/adapter-direct" \
+  --adapter-run 3 qlora-concise-rationale-v1 \
+    "$RUN_ROOT/fold-3/adapter-rationale-predictions.jsonl" \
+    "$RUN_ROOT/fold-3/adapter-rationale-manifest.json" \
+    "$CHECKPOINT_ROOT/fold-3/adapter-concise-rationale-v1" \
   --base-run 4 \
     "$RUN_ROOT/fold-4/base-direct-predictions.jsonl" \
     "$RUN_ROOT/fold-4/base-direct-manifest.json" \
-  --adapter-run 4 qlora-direct \
-    "$RUN_ROOT/fold-4/adapter-direct-predictions.jsonl" \
-    "$RUN_ROOT/fold-4/adapter-direct-manifest.json" \
-    "$CHECKPOINT_ROOT/fold-4/adapter-direct" \
+  --adapter-run 4 qlora-concise-rationale-v1 \
+    "$RUN_ROOT/fold-4/adapter-rationale-predictions.jsonl" \
+    "$RUN_ROOT/fold-4/adapter-rationale-manifest.json" \
+    "$CHECKPOINT_ROOT/fold-4/adapter-concise-rationale-v1" \
   --bootstrap-samples 10000 \
   --bootstrap-seed 20260731 \
   --confidence 0.95 \
@@ -500,19 +679,19 @@ jq '{comparisons, statistics, runs: (.runs | with_entries(.value |= {oof_exact_m
   "$COMPARE"
 
 # 위 evidence와 사전 승격 기준으로 아래 두 값 중 하나만 명시적으로 선택한다.
-# qlora-direct 또는 base-direct 외의 값은 이후 명령을 시작하지 못한다.
+# qlora-concise-rationale-v1 또는 base-direct 외의 값은 이후 명령을 시작하지 못한다.
 PRIMARY_LABEL=replace-after-reading-oof-evidence
 case "$PRIMARY_LABEL" in
-  qlora-direct)
+  qlora-concise-rationale-v1)
     PRIMARY_KIND=adapter
-    PRIMARY_ADAPTER="$CHECKPOINT_ROOT/fold-0/adapter-direct"
+    PRIMARY_ADAPTER="$CHECKPOINT_ROOT/fold-0/adapter-concise-rationale-v1"
     ;;
   base-direct)
     PRIMARY_KIND=base
     PRIMARY_ADAPTER=
     ;;
   *)
-    echo "PRIMARY_LABEL must be qlora-direct or base-direct" >&2
+    echo "PRIMARY_LABEL must be qlora-concise-rationale-v1 or base-direct" >&2
     exit 2
     ;;
 esac
@@ -675,6 +854,8 @@ final test가 공개되면 `FILTERED_LB`, `FILTERED_LB_SHA`, `--dataset-role lea
 - preflight/smoke가 green이 아님
 - tokenizer/model shard/adapter shard가 하나라도 누락되거나 checksum 불일치
 - fold training/validation ID 또는 response-only label digest 불일치
+- rationale corpus/audit가 exact fold-training coverage, config/teacher/target SHA,
+  reference-answer/parser match, training-only/no-tool/no-test/no-holdout 중 하나라도 불충족
 - parser conflict/invalid, prediction 누락, submission ID/order/header 오류
 - freeze 전에 holdout 접근을 요구하거나, leaderboard 점수로 freeze를 바꾸려는 경우
 - 인터넷 차단 상태에서 cache miss/download 시도

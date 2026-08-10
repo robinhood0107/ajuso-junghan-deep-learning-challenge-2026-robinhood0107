@@ -1,9 +1,9 @@
 # 07. 확인된 규칙과 잔여 질문
 
-기준일: **2026-08-10 KST**
+기준일: **2026-08-11 KST**
 
 이 문서는 추정 목록이 아니라 현재 실행 feature flag의 권위 원본이다. 사용자 제공
-초기 사용자 제공 규칙 원문은 다음 local snapshot으로 고정했다. 원본 attachment 경로와
+사용자 제공 규칙 원문은 다음 local snapshot으로 고정했다. 원본 attachment 경로와
 대회 데이터는 공개 Git 저장소에 넣지 않는다.
 
 - 원문: local user-provided attachment (public repository에서 제외)
@@ -102,7 +102,7 @@ teacher API, offline inference, ID/answer schema와 test-time voting은 확인�
 | organizer-only direct-answer baseline | 허용, 첫 모델 실험 |
 | organizer-only answer-only QLoRA | final GPU gate 뒤 허용 |
 | 공개 외부 데이터 | provenance/license/contamination 검증 뒤 ablation만 |
-| commercial teacher rationale | training-only, source/model/prompt 전부 기록, test/LB 금지 |
+| commercial teacher rationale | training-only, source/model/prompt 전부 기록, test/LB 금지. v1 candidate는 organizer reference를 prompt에서 숨기고 생성 후 exact-match rejection |
 | local Python/SymPy | off |
 | same-base multi-adapter/checkpoint 결합 | off |
 | 다른 모델 weight/최종 inference ensemble | 금지 |
