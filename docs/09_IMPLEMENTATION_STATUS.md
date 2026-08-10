@@ -22,7 +22,7 @@
 | Gate B0 GPU preflight | **READY (production v2 B1 완료)** | `model-preflight-gpu-ready-20260810T131821KST.json`은 pinned revision, full weights, CUDA/BF16/NF4 runtime, physical used/free 1,716/10,282MiB, `training_ready=true`, blockers 0을 입증했다. |
 | Gate B0 final GPU smoke | **READY (production v2 B1 완료)** | `gpu-smoke-20260810T131821KST.json`은 local `2+3` only, pinned NF4 load, LoRA backward/`paged_adamw_8bit` 1 step, cache-on generation/parser exact 5, peak allocated/reserved 3,301,260,800/4,661,968,896 bytes를 입증했다. |
 | Gate B1 base direct-answer | **v2 완료 / selection evidence** | `20260810T131821KST` organizer-only fold 0 run은 schema v2로 atomic 완료했다. 1,210/2,942 EM (41.1285%), parser `2143/3/796`, finish `2134/808`; source/B0/config byte와 seed/prompt/latency digest가 모두 재검증 가능하다. redacted parser audit v4도 통과했다. |
-| Gate B2 QLoRA SFT | **미실행 / 시작 gate 확보** | 같은 fold의 v2 base artifact와 실제-generation parser gate는 green이다. 문서·테스트 반영 뒤 바뀐 source를 새 manifest/B0 pair로 재결속하고 organizer-only answer-only QLoRA를 시작한다. |
+| Gate B2 QLoRA SFT | **첫 시도 fail-closed / 수정 후 재시도 대기** | `20260810T192204KST` 시도는 738/738 step과 train loss 0.480716까지 완료했지만 Transformers가 재직렬화한 tokenizer byte가 pinned snapshot과 달라 publish 전에 exit 2로 거부됐다. adapter/temporary directory는 남지 않았다. exact pinned tokenizer bytes를 cache에서 SHA 검증·복사하도록 수정했고 새 source/B0로 재시도한다. |
 | leaderboard prediction/submission | **미실행** | 모델 prediction 0건; leaderboard를 학습/API 입력에 쓰지 않음 |
 
 ### 실제 환경
@@ -88,7 +88,9 @@ preflight와 local synthetic smoke는 production run tag `20260810T131821KST`에
 - `gate_b_sft_preflight.py`: pinned tokenizer로 실제 fold payload를 response-only encode하고
   truncation/holdout·leaderboard 미사용을 증명
 - `gate_b_runtime.py`: base/adapter lazy NF4 generation (eval KV cache on), exact fold QLoRA training (cache off),
-  adapter manifest와 36-layer×7-projection×A/B=504 safetensors shape/dtype 검증
+  adapter manifest와 36-layer×7-projection×A/B=504 safetensors shape/dtype 검증. adapter tokenizer는
+  `save_pretrained()` 재직렬화가 아니라 pinned cache의 exact `tokenizer.json`/`tokenizer_config.json`
+  bytes를 각각 고정 SHA로 검증해 복사한다.
 - `gate_b_selection.py`: single-fold probe와 complete 5-fold OOF union 비교, paired
   duplicate-cluster bootstrap, exact McNemar, 한 family Holm; final freeze는 complete OOF만
   허용하고 base/adapter bundle·fold/data/example SHA·공통 method fingerprint를 결속
@@ -213,8 +215,8 @@ CPU-only SFT preflight v3는 fold 0 training 11,794행, validation 2,942행, uni
 ### 최신 전체 회귀
 
 - `uv run ruff check .`: **pass**
-- `CUDA_VISIBLE_DEVICES='' ... uv run pytest -s -q`: **352 passed, 1 skipped** (2026-08-10
-  v2 provenance/config-byte regression 포함 재실행)
+- `CUDA_VISIBLE_DEVICES='' ... uv run pytest -s -q`: **354 passed, 1 skipped** (2026-08-10
+  v2 provenance/config-byte와 exact tokenizer export regression 포함 재실행)
 - branch coverage: **78%** (7,146 statements, 2,556 branches)
 - skip 1건은 기본 CPU `.venv`에 PyTorch가 없어 실제 PEFT 0.20 serialization
   compatibility test를 건너뛴 것이다. 같은 구조의 real safetensors 파일에 대한
@@ -544,10 +546,10 @@ uv run pytest -s -q
 uv run pytest -s --cov=deep_challenge --cov-report=term-missing -q
 ```
 
-2026-08-10 v2 provenance guard까지 반영한 현재 결과:
+2026-08-10 v2 provenance와 exact tokenizer export guard까지 반영한 현재 결과:
 
 - Ruff: pass
-- pytest: **352 passed, 1 skipped** (`torch`가 없는 기본 CPU 환경의 실제-runtime test 1개만 skip)
+- pytest: **354 passed, 1 skipped** (`torch`가 없는 기본 CPU 환경의 실제-runtime test 1개만 skip)
 - current branch coverage: **78%** (7,146 statements, 2,556 branches)
 - public-repo guard: pass
 - canonical `CHECKSUMS.sha256`: pass

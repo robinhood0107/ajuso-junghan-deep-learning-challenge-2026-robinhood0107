@@ -92,6 +92,9 @@ _REQUIRED_TOKENIZER_FILES = frozenset({"tokenizer.json", "tokenizer_config.json"
 _PINNED_TOKENIZER_JSON_SHA256 = (
     "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539"
 )
+_PINNED_TOKENIZER_CONFIG_JSON_SHA256 = (
+    "5b5d4f65d0acd3b2d56a35b56d374a36cbc1c8fa5cf3b3febbbfabf22f359583"
+)
 _PINNED_TOKENIZER_CHAT_TEMPLATE_SHA256 = (
     "cd8e9439f0570856fd70470bf8889ebd8b5d1107207f67a5efb46e342330527f"
 )
@@ -914,7 +917,10 @@ class TransformersQLoRATrainingRuntime:  # pragma: no cover - requires the final
             trainer = transformers.Trainer(**trainer_kwargs)
             train_output = trainer.train()
             model.save_pretrained(export_dir, safe_serialization=True)
-            tokenizer.save_pretrained(export_dir)
+            _save_pinned_tokenizer_snapshot(
+                export_dir,
+                cached_file=transformers.utils.cached_file,
+            )
             metrics = _coerce_flat_metrics(getattr(train_output, "metrics", {}))
             global_step = int(getattr(trainer.state, "global_step", 0))
             return RuntimeTrainingResult(
@@ -1876,8 +1882,13 @@ def _validate_saved_tokenizer(root: Path) -> None:
     tokenizer_path = root / "tokenizer.json"
     if sha256_file(tokenizer_path) != _PINNED_TOKENIZER_JSON_SHA256:
         raise GateBValidationError("saved tokenizer.json differs from the pinned snapshot")
+    tokenizer_config_path = root / "tokenizer_config.json"
+    if sha256_file(tokenizer_config_path) != _PINNED_TOKENIZER_CONFIG_JSON_SHA256:
+        raise GateBValidationError(
+            "saved tokenizer_config.json differs from the pinned snapshot"
+        )
     _, config, _ = _load_json_artifact(
-        root / "tokenizer_config.json", "saved tokenizer config"
+        tokenizer_config_path, "saved tokenizer config"
     )
     chat_template = config.get("chat_template")
     if (
@@ -1891,6 +1902,56 @@ def _validate_saved_tokenizer(root: Path) -> None:
         raise GateBValidationError(
             "saved tokenizer config differs from the pinned Qwen tokenizer contract"
         )
+
+
+def _save_pinned_tokenizer_snapshot(
+    root: Path,
+    *,
+    cached_file: Callable[..., str | None],
+) -> None:
+    """Copy exact pinned tokenizer bytes instead of reserializing them.
+
+    Recent Transformers/tokenizers releases may add default fields to
+    ``tokenizer.json`` and externalize ``chat_template`` while running
+    ``save_pretrained``.  That output can tokenize equivalently but is no longer
+    the fixed revision's byte-identical tokenizer contract.
+    """
+
+    expected = {
+        "tokenizer.json": _PINNED_TOKENIZER_JSON_SHA256,
+        "tokenizer_config.json": _PINNED_TOKENIZER_CONFIG_JSON_SHA256,
+    }
+    payloads: dict[str, bytes] = {}
+    for filename, expected_sha256 in expected.items():
+        try:
+            cached = cached_file(
+                OFFICIAL_MODEL_ID,
+                filename,
+                revision=PINNED_MODEL_REVISION,
+                local_files_only=True,
+            )
+        except Exception as exc:
+            raise GateBValidationError(
+                f"pinned tokenizer cache lookup failed for {filename}: {exc}"
+            ) from exc
+        if not isinstance(cached, str) or not cached:
+            raise GateBValidationError(
+                f"pinned tokenizer cache is missing {filename}"
+            )
+        source = Path(cached).resolve(strict=True)
+        if not source.is_file():
+            raise GateBValidationError(
+                f"pinned tokenizer cache entry is not a regular file: {filename}"
+            )
+        payload = source.read_bytes()
+        if hashlib.sha256(payload).hexdigest() != expected_sha256:
+            raise GateBValidationError(
+                f"pinned tokenizer cache checksum mismatch: {filename}"
+            )
+        payloads[filename] = payload
+
+    for filename, payload in payloads.items():
+        _write_fsynced_file(root / filename, payload)
 
 
 def _validate_adapter_config(root: Path) -> Mapping[str, object]:

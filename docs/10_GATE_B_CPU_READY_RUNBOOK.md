@@ -325,6 +325,21 @@ full CPU test가 green이 되기 전에는 QLoRA를 시작하지 않는다.
 정확히 11,794개 training ID만 사용하고 holdout, validation 2,942행, hard-expanded
 exclusion을 제외한다.
 
+`20260810T192204KST` 첫 시도는 738/738 optimizer step, train runtime 5,375.9894초,
+train loss 0.4807161241까지 완료했지만 post-training tokenizer byte gate에서
+`saved tokenizer.json differs from the pinned snapshot`으로 exit 2가 났다. Transformers
+4.57.6의 `save_pretrained()`가 BPE JSON에 `ignore_merges=false`를 추가하고 chat template를
+별도 파일로 외부화한 것이 원인이었다. incomplete adapter와 temporary training directory는
+publish되지 않고 정리됐다.
+
+현재 runtime은 tokenizer를 재직렬화하지 않는다. pinned revision cache에서
+`tokenizer.json` SHA `c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539`와
+`tokenizer_config.json` SHA
+`5b5d4f65d0acd3b2d56a35b56d374a36cbc1c8fa5cf3b3febbbfabf22f359583`를 확인한 뒤 exact
+bytes만 export한다. 실제 cache copy/reload에서 vocab, encode, chat-template token sequence
+동일성을 확인했고 full CPU suite도 통과했다. 재시도는 이 수정 source의 새 manifest/B0 pair와
+새 no-overwrite tag에서만 한다.
+
 ```bash
 ADAPTER_DIR="$CHECKPOINT_DIR/adapter-direct"
 

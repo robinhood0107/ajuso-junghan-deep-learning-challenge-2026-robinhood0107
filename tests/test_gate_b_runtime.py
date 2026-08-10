@@ -56,6 +56,17 @@ from deep_challenge.splits import (
 )
 
 _MIB = 1024 * 1024
+_FAKE_TOKENIZER_CONFIG_BYTES = (
+    json.dumps(
+        {
+            "chat_template": "test-chat-template",
+            "eos_token": "<|im_end|>",
+            "pad_token": "<|endoftext|>",
+            "model_max_length": 131_072,
+        }
+    )
+    + "\n"
+).encode("utf-8")
 
 
 @pytest.fixture(autouse=True)
@@ -83,6 +94,11 @@ def _tiny_adapter_contract(monkeypatch: pytest.MonkeyPatch) -> None:
         runtime_module,
         "_PINNED_TOKENIZER_CHAT_TEMPLATE_SHA256",
         hashlib.sha256(b"test-chat-template").hexdigest(),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "_PINNED_TOKENIZER_CONFIG_JSON_SHA256",
+        hashlib.sha256(_FAKE_TOKENIZER_CONFIG_BYTES).hexdigest(),
     )
 
 
@@ -310,17 +326,8 @@ class _TrainingRuntime:
             ),
             encoding="utf-8",
         )
-        (export_dir / "tokenizer_config.json").write_text(
-            json.dumps(
-                {
-                    "chat_template": "test-chat-template",
-                    "eos_token": "<|im_end|>",
-                    "pad_token": "<|endoftext|>",
-                    "model_max_length": 131_072,
-                }
-            )
-            + "\n",
-            encoding="utf-8",
+        (export_dir / "tokenizer_config.json").write_bytes(
+            _FAKE_TOKENIZER_CONFIG_BYTES
         )
         if self.incomplete != "tokenizer":
             (export_dir / "tokenizer.json").write_text("{}\n", encoding="utf-8")
@@ -588,6 +595,59 @@ def test_qlora_fold_training_publishes_complete_atomic_no_overwrite_bundle(
             runtime_factory=unexpected_factory,
         )
     assert factory_called is False
+
+
+def test_pinned_tokenizer_export_copies_exact_cache_bytes(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    output = tmp_path / "output"
+    cache.mkdir()
+    output.mkdir()
+    tokenizer_bytes = b"{}\n"
+    (cache / "tokenizer.json").write_bytes(tokenizer_bytes)
+    (cache / "tokenizer_config.json").write_bytes(_FAKE_TOKENIZER_CONFIG_BYTES)
+    calls: list[tuple[str, str, str, bool]] = []
+
+    def cached_file(
+        model_id: str,
+        filename: str,
+        *,
+        revision: str,
+        local_files_only: bool,
+    ) -> str:
+        calls.append((model_id, filename, revision, local_files_only))
+        return str(cache / filename)
+
+    runtime_module._save_pinned_tokenizer_snapshot(
+        output,
+        cached_file=cached_file,
+    )
+
+    assert (output / "tokenizer.json").read_bytes() == tokenizer_bytes
+    assert (
+        output / "tokenizer_config.json"
+    ).read_bytes() == _FAKE_TOKENIZER_CONFIG_BYTES
+    assert calls == [
+        (OFFICIAL_MODEL_ID, "tokenizer.json", PINNED_MODEL_REVISION, True),
+        (OFFICIAL_MODEL_ID, "tokenizer_config.json", PINNED_MODEL_REVISION, True),
+    ]
+    runtime_module._validate_saved_tokenizer(output)
+
+
+def test_pinned_tokenizer_export_rejects_cache_checksum_drift(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    output = tmp_path / "output"
+    cache.mkdir()
+    output.mkdir()
+    (cache / "tokenizer.json").write_bytes(b"changed\n")
+    (cache / "tokenizer_config.json").write_bytes(_FAKE_TOKENIZER_CONFIG_BYTES)
+
+    with pytest.raises(GateBValidationError, match="cache checksum mismatch"):
+        runtime_module._save_pinned_tokenizer_snapshot(
+            output,
+            cached_file=lambda _model, filename, **_kwargs: str(cache / filename),
+        )
+
+    assert not tuple(output.iterdir())
 
 
 def test_adapter_structural_validator_rejects_fake_safetensors_and_risky_config(

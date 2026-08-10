@@ -178,6 +178,30 @@ regression으로 충분함을 확인했다. 이 v2 base bundle은 같은 fold QL
 evidence다. 다만 이 문서 반영이 source tree를 바꾸므로 실제 R6 직전에는 새 source manifest와
 새 B0 pair로 source를 재결속한다.
 
+### 3.1.3 R6 첫 시도 fail-closed와 tokenizer export 수정
+
+run tag `20260810T192204KST`의 새 source/B0 pair는 green이었고 fold 0 QLoRA는 정확히
+738/738 optimizer step을 끝냈다. 관측 train runtime은 5,375.9894초, train loss는
+`0.48071612413659653`였다. 그러나 adapter publish 전 exact tokenizer 검증에서
+`saved tokenizer.json differs from the pinned snapshot` 오류가 발생해 CLI는 exit 2로
+종료했다. target adapter directory와 temporary training directory는 존재하지 않으며 이
+시도를 checkpoint, adapter, OOF evidence로 사용하지 않는다.
+
+GPU 없이 재현한 결과 Transformers/tokenizers의 `save_pretrained()`가 pinned
+`tokenizer.json`에 `ignore_merges=false`를 추가하고 `tokenizer_config.json`의 chat template를
+별도 Jinja 파일로 외부화했다. 원본/saved tokenizer SHA는 각각
+`c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539`와
+`9c5ae00e602b8860cbd784ba82a8aa14e8feecec692e7076590d014d7b7fdafa`였다. runtime을 pinned
+cache 두 파일의 exact byte copy + known SHA 검증으로 바꾸고, 실제 cache copy/reload에서
+vocab size, encode 결과, chat-template token sequence가
+모두 동일함을 확인했다. 두 cache SHA는
+`c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539`와
+`5b5d4f65d0acd3b2d56a35b56d374a36cbc1c8fa5cf3b3febbbfabf22f359583`이다.
+regression 2건을 추가한 전체 결과는 Ruff pass, `354 passed, 1 skipped`다.
+
+R6 재시도는 수정 commit 뒤 새 source manifest, 새 B0 preflight/smoke, 새 checkpoint tag를
+사용한다. 이전 실패 tag의 경로를 재사용하거나 validation gate를 완화하지 않는다.
+
 ### 3.2 전체 백로그와 의존 관계
 
 아래 목록은 재개 시 순서를 바꾸지 않는 실행 단위다. `CPU`는 CUDA workload 없이 가능한
@@ -187,7 +211,7 @@ evidence다. 다만 이 문서 반영이 source tree를 바꾸므로 실제 R6 �
    통과했다. selection evidence로는 봉인한다.
 2. **R2 (완료, CPU):** private parser audit v2와 raw-free structural regression을 추가했다.
    conflict는 여전히 fail-visible이다.
-3. **R3 (완료, CPU):** Ruff, full `pytest -s -q` (352 passed, 1 skipped), public-repo guard,
+3. **R3 (완료, CPU):** Ruff, full `pytest -s -q` (354 passed, 1 skipped), public-repo guard,
    canonical checksum을 통과했고 docs 04/05/07/09/10/11을 현재 evidence로 갱신했다.
 4. **R4 (완료, GPU):** GPU `used/free=912/11,086MiB`의 새 관측값에서 당시 source
    preflight와 cache-on synthetic smoke를 `20260810T062500KST`로 실행했고 green pair를 만들었다.
@@ -195,8 +219,10 @@ evidence다. 다만 이 문서 반영이 source tree를 바꾸므로 실제 R6 �
    source manifest/B0 pair, no-overwrite fold 0 fixed-base output과 raw-free parser audit v4를
    모두 완료했다. selection-eligible base score는 1,210/2,942(41.1285%)다. v1 output은
    진단 보존만 한다.
-6. **R6 (다음, GPU):** 같은 fold 0 **v2** base manifest에 bound된 organizer-only answer-only QLoRA를
-   학습하고 adapter bundle, shard completeness, tokenizer/config/data provenance를 검증한다.
+6. **R6 (재시도 대기, GPU):** 첫 학습은 738/738 뒤 tokenizer snapshot drift를 publish gate가
+   거부했다. exact cache-byte export 수정 source의 새 B0 pair로 같은 fold 0 **v2** base
+   manifest에 bound된 organizer-only answer-only QLoRA를 재실행하고 adapter bundle, shard
+   completeness, tokenizer/config/data provenance를 검증한다.
 7. **R7 (GPU):** fold 0 adapter generation을 실행해 동일 validation partition에서 base와
    비교 가능한 pair를 만든다.
 8. **R8 (GPU):** R5--R7을 fold 1, 2, 3, 4에 순차 반복한다. GPU run은 병렬화하지 않는다.
