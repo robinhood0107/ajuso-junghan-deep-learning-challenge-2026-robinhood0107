@@ -2,7 +2,7 @@
 
 기준 시각: **2026-08-10 KST**
 대상 호스트: **WSL2 Ubuntu 24.04 + NVIDIA GeForce RTX 4070 SUPER 12GB**
-현재 판정: **CPU 준비 완료, GPU 환경은 검증됨, 새 v2 source의 B0/B1 재실행 대기**
+현재 판정: **production fold 0 B1 v2와 parser gate 완료, QLoRA용 새 source/B0 재결속 대기**
 
 이 문서는 현재 코드의 CLI와 정확히 일치하는 실행 순서다. GPU가 필요한 명령은 맨
 뒤의 별도 절에만 둔다. 2026-08-10 이전 source final smoke와 별도로, training cache-off와
@@ -165,9 +165,10 @@ submission allowance를 read-only 확인했다. 다음은 아직 확인하지 �
 
 ## 5. B0 GPU 승인 증거와 새 run 직전 재검사
 
-2026-08-10 target-host preflight와 local synthetic smoke는 당시 source에서 run tag
-`20260810T062500KST`로 green이다. 이 pair는 같은 tag의 production B1에만 bind하며, 다른
-run tag에는 재사용하지 않고 이 절의 새 `RUN_TAG` preflight와 smoke를 순서대로 다시 만든다.
+2026-08-10 target-host preflight와 local synthetic smoke는 production source에서 run tag
+`20260810T131821KST`로 green이고 같은 tag의 B1 v2까지 완료했다. 이 pair는 그 source의
+production B1에만 bind한다. 다른 run tag에는 재사용하지 않고 이 절의 새 `RUN_TAG`
+preflight와 smoke를 순서대로 다시 만든다.
 다른 GPU 프로세스를 종료하거나 선점하지 않으며, 모든 새 GPU run 직전에는 아래 두 조건을
 다시 관측한다.
 
@@ -237,6 +238,15 @@ evidence에 함께 남으며, 이후 training/inference gate도 이를 요구한
 ```
 
 ## 6. Gate B1 — base direct-answer development 기준선
+
+production tag `20260810T131821KST`는 이 절을 완료했다. records 2,942행과 v2 manifest가
+atomic publish됐고 records/manifest SHA-256은 각각
+`e25f9468fe4bb3fd2851c4cd69bb340619c2962b851e10f707bb998e18b022e7`와
+`e52cc656ff3a17f6b0794fdd39b81190005a43d6c92b8ac6b8c83ecd67771fa6`다. exact match는
+1,210/2,942(41.1285%), parser `ok/conflict/invalid=2143/3/796`, finish
+`stop/length=2134/808`이었다. parser audit
+`parser-golden-20260810T131821KST-fold0-v4.json`도 raw-free 19 classes로 통과했다. 이후
+문서·테스트가 source tree를 바꾸므로 7절 학습 전에는 새 tag/source manifest/B0 pair를 만든다.
 
 GPU green 뒤 첫 모델 실행은 fold 0 base greedy 한 개뿐이다. 아래 `FOLD=0`을 그대로
 두고 먼저 실행한다. 2026-08-10에 attention mask와 eval KV-cache 보강 전 시작한 동일 목적의 diagnostic

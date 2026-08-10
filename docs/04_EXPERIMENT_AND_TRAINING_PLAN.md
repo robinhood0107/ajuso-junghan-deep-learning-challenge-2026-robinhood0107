@@ -22,9 +22,9 @@
 - 공개·동등 접근 외부 데이터와 상용 API의 training-data/rationale 생성은 허용된다.
   leaderboard/test 입력은 금지다. Python/SymPy TIR과 same-base multi-adapter/checkpoint
   결합은 명시 답변 전 off다.
-- RTX 4070 SUPER 12GB의 당시-current-source B0 preflight와 local synthetic NF4 smoke는 run tag
-  `20260810T062500KST`에서 green이다. preflight는 `training_ready=true`이고 smoke가 final
-  kernel/NF4/cache-on gate를 닫았다. 같은 tag의 production B1 직전과 각 후속 GPU run 직전에도
+- RTX 4070 SUPER 12GB의 production v2 B0 preflight와 local synthetic NF4 smoke는 run tag
+  `20260810T131821KST`에서 green이다. preflight는 `training_ready=true`이고 smoke가 final
+  kernel/NF4/cache-on gate를 닫았다. 같은 tag의 fold 0 B1 v2는 atomic 완료됐으며 각 후속 GPU run 직전에도
   free VRAM 10GiB 이상과 pre-existing used VRAM 2GiB 이하를 다시 관측한다. leaderboard/test
   prediction은 여전히 freeze 이후에만 허용한다.
 - fold 0 fixed-base diagnostic은 old source와 당시 current source에서 각각 2,942 validation
@@ -32,10 +32,12 @@
   class를 만들었다. 당시-current-source `20260810T062500KST` output도 manifest schema v1이라
   B0/source/config-file byte binding과 run-level seed/prompt/latency digest가 없다. 따라서
   둘 다 QLoRA, OOF, method selection, holdout으로 승격하지 않는다. 실제 output에서 고른 safe
-  structural parser regression만 public code에 추가했고 production baseline은 새 B0와 v2
-  provenance manifest로 별도 tag에 다시 실행한다.
-- fold 0 base/direct-answer를 첫 probe로 실행하고 실제 generation parser golden을 고정한
-  뒤, 같은 base→QLoRA 순서를 fold 1~4에 반복한다. `compare-development-oof`는 모든
+  structural parser regression만 public code에 추가했다. production baseline은 새 B0와 v2
+  provenance manifest로 `20260810T131821KST`에 다시 실행해 1,210/2,942 exact match
+  (41.1285%)를 기록했다. source/B0/config byte와 seed/prompt/latency digest를 결속한 이 v2
+  artifact와 raw-free parser audit v4는 QLoRA authorization에 사용할 수 있다.
+- fold 0 base/direct-answer와 실제-generation parser golden을 완료했으므로 같은
+  base→QLoRA 순서를 fold 1~4에 반복한다. `compare-development-oof`는 모든
   label×fold run을 강제하고 전체 OOF union에서 paired cluster bootstrap, exact McNemar,
   Holm 보정을 다시 계산한다. base run은 pinned base checkpoint, adapter run은 실제
   adapter bundle의 fold/data/example provenance와 결속하며 run/adapter 재사용과 fold 간

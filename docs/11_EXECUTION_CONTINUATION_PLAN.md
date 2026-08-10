@@ -149,6 +149,35 @@ latency digest를 하나의 fail-closed manifest에 묶지 않았다. 따라서 
 QLoRA authorization, OOF comparison, method selection, freeze에는 사용 금지**다. v2 artifact
 reader는 이를 의도적으로 거부한다.
 
+### 3.1.2 20260810T131821KST production B1 v2 완료 근거
+
+같은 organizer-only fold 0 base direct-answer를 strict v2 source에서 no-overwrite로 다시
+실행했다. `base-direct-predictions.jsonl` 2,942행과 manifest가 함께 atomic publish됐고,
+records/manifest SHA-256은 각각
+`e25f9468fe4bb3fd2851c4cd69bb340619c2962b851e10f707bb998e18b022e7`와
+`e52cc656ff3a17f6b0794fdd39b81190005a43d6c92b8ac6b8c83ecd67771fa6`다.
+
+- exact match: 1,210/2,942 (`0.4112848402447315`)
+- parser: `ok=2143`, `conflict=3`, `invalid=796`
+- finish: `stop=2134`, `length=808`
+- output tokens: 989,549; max allocated VRAM: 2,193,992,192 bytes
+- generation latency: total 21,273,884.481795ms, mean 7,231.0960169ms
+- source manifest: file SHA
+  `20fe5b69fd450381a358e998415f5997ac6e3e9fe974c0a209d65e6e636b013c`, tree SHA
+  `0fd2e438eb7184d4d86dc943274c889acff6f8a489362c4f95b440810d560871`
+- B0 preflight/smoke SHA:
+  `32a09a3667a1fcb7cadfd9929ddd0161727a2966136dad61f60b42a58d8fc11e`,
+  `ded4c52db1ce18c533daabd86df890c9320980ddc82d5b4d1a9d812a8ff05be1`
+- parser audit v4 SHA:
+  `5954dc2ba7b668938fafd0853810034bd41c28456b752ed613b9b3fb44b75b5c`
+
+parser audit v4는 기존과 같은 19개 structural outcome class를 확인했고 raw completion,
+question, ID, answer, completion hash, parsed integer를 직렬화하지 않았다. leaderboard/test와
+locked holdout 접근은 모두 false다. 따라서 새 공개 fixture를 복사하지 않고 기존 synthetic
+regression으로 충분함을 확인했다. 이 v2 base bundle은 같은 fold QLoRA의 authorization
+evidence다. 다만 이 문서 반영이 source tree를 바꾸므로 실제 R6 직전에는 새 source manifest와
+새 B0 pair로 source를 재결속한다.
+
 ### 3.2 전체 백로그와 의존 관계
 
 아래 목록은 재개 시 순서를 바꾸지 않는 실행 단위다. `CPU`는 CUDA workload 없이 가능한
@@ -162,11 +191,11 @@ reader는 이를 의도적으로 거부한다.
    canonical checksum을 통과했고 docs 04/05/07/09/10/11을 현재 evidence로 갱신했다.
 4. **R4 (완료, GPU):** GPU `used/free=912/11,086MiB`의 새 관측값에서 당시 source
    preflight와 cache-on synthetic smoke를 `20260810T062500KST`로 실행했고 green pair를 만들었다.
-5. **R5 (진행 중, CPU → GPU):** R5.1에서 source manifest/B0/config byte를 strict v2
-   development manifest에 결속하는 code/test guard를 완료한다. R5.2에서 새 source manifest,
-   새 B0 pair, 새 no-overwrite fold 0 fixed-base output을 실행하고 parser golden gate를 통과한다.
-   v1 output은 진단 보존만 한다.
-6. **R6 (GPU):** 같은 fold 0 **v2** base manifest에 bound된 organizer-only answer-only QLoRA를
+5. **R5 (완료, CPU → GPU):** strict v2 provenance guard, run tag `20260810T131821KST`의
+   source manifest/B0 pair, no-overwrite fold 0 fixed-base output과 raw-free parser audit v4를
+   모두 완료했다. selection-eligible base score는 1,210/2,942(41.1285%)다. v1 output은
+   진단 보존만 한다.
+6. **R6 (다음, GPU):** 같은 fold 0 **v2** base manifest에 bound된 organizer-only answer-only QLoRA를
    학습하고 adapter bundle, shard completeness, tokenizer/config/data provenance를 검증한다.
 7. **R7 (GPU):** fold 0 adapter generation을 실행해 동일 validation partition에서 base와
    비교 가능한 pair를 만든다.

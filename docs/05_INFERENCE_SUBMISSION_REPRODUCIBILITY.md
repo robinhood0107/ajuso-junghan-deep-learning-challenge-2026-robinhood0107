@@ -166,8 +166,11 @@ fold 0 diagnostic은 각각 atomic publish된 2,942행 bundle을 남겼고, priv
 status/source/reason-code outcome class를 확인했다. 여기서 선택한 boxed/final/hash/fallback
 구조만 안전한 synthetic fixture로 재현했으며 실제 completion, ID, question, reference
 answer, parsed value는 public code에 넣지 않았다. 당시-current-source v1 diagnostic도 B0/source/
-config-file byte binding이 없어 parser gate만 닫는다. 다음 GPU 단계의 model selection 또는
-QLoRA authorization은 새 v2 manifest를 가진 base run을 요구한다.
+config-file byte binding이 없어 parser gate만 닫는다. production tag `20260810T131821KST`의
+fold 0 base run은 schema `gate-b1-development-run-v2`로 다시 완료됐고, source/B0/config
+byte와 run-level generation evidence를 결속했다. raw-free parser audit v4도 같은 19개
+outcome class를 검증했으므로 이 v2 bundle은 같은 fold의 QLoRA authorization 입력으로 쓸 수
+있다. 이후 source 문서가 바뀌면 새 source manifest와 B0 pair를 다시 만든다.
 
 `audit-parser-golden`은 이 작업의 private CPU-only 입력 검증 단계다. manifest checksum과
 JSONL line count, fold-validation/cross-validation partition, 각 row의 completion hash와
