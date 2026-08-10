@@ -148,20 +148,16 @@ def _staged_blob(path: str) -> bytes:
 def audit_git_tree(
     *, staged: bool
 ) -> tuple[tuple[str, ...], tuple[tuple[str, tuple[str, ...]], ...]]:
-    """Inspect tracked or staged content, returning paths and secret categories."""
+    """Inspect staged changes or the complete index tree for public-safety issues."""
 
     paths = _git_paths(staged=staged)
     forbidden = find_forbidden_paths(paths)
     secrets: list[tuple[str, tuple[str, ...]]] = []
     for path in paths:
-        markers = find_secret_markers(_staged_blob(path) if staged else _tracked_blob(path))
+        markers = find_secret_markers(_staged_blob(path))
         if markers:
             secrets.append((path, markers))
     return forbidden, tuple(secrets)
-
-
-def _tracked_blob(path: str) -> bytes:
-    return subprocess.run(["git", "show", f"HEAD:{path}"], check=True, capture_output=True).stdout
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -174,7 +170,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="inspect the index (the pre-commit default)",
     )
-    group.add_argument("--all", action="store_true", help="inspect all tracked files")
+    group.add_argument(
+        "--all",
+        action="store_true",
+        help="inspect every file in the complete Git index, including staged additions",
+    )
     args = parser.parse_args(argv)
     try:
         forbidden, secrets = audit_git_tree(staged=not args.all)
@@ -182,7 +182,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"public-repo guard could not read Git state: {exc}", file=sys.stderr)
         return 2
     if not forbidden and not secrets:
-        scope = "staged" if not args.all else "tracked"
+        scope = "staged" if not args.all else "indexed"
         print(f"public-repo guard: {scope} tree is safe")
         return 0
     for path in forbidden:

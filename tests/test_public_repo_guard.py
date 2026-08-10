@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from deep_challenge.public_repo_guard import find_forbidden_paths, find_secret_markers
+import subprocess
+from pathlib import Path
+
+from deep_challenge.public_repo_guard import (
+    find_forbidden_paths,
+    find_secret_markers,
+    main,
+)
 
 
 def test_forbidden_paths_cover_competition_data_credentials_and_model_outputs() -> None:
@@ -72,3 +79,23 @@ def test_secret_markers_report_categories_without_token_values() -> None:
     private_key_fixture = b"-----BEGIN " + b"PRIVATE KEY-----"
     assert find_secret_markers(private_key_fixture) == ("private-key",)
     assert find_secret_markers(b"KAGGLE_API_TOKEN is documented but redacted") == ()
+
+
+def test_all_scope_reads_newly_staged_files_from_the_complete_index(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+    (repository / "new_public_source.py").write_text("SAFE = True\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "new_public_source.py"],
+        cwd=repository,
+        check=True,
+    )
+    monkeypatch.chdir(repository)
+
+    assert main(["--all"]) == 0
+    assert capsys.readouterr().out == "public-repo guard: indexed tree is safe\n"
