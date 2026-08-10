@@ -24,6 +24,11 @@ from deep_challenge.answers import parse_answer
         ("Final answer: -84 / 2", -42, "final_answer"),
         ("Final answer: 84 / -2", -42, "final_answer"),
         ("Final answer:\n\n\\boxed{7}", 7, "final_answer"),
+        ("The final answer is: 19.", 19, "final_answer"),
+        ("The final answer is: `Final answer: 15552`", 15552, "final_answer"),
+        ("**Final answer: 676**", 676, "final_answer"),
+        ("**Final answer:** **2**", 2, "final_answer"),
+        (r"Therefore, the final answer is: \[ \text{Final answer: } 160 \]", 160, "final_answer"),
         ("The solution is \\boxed{x=42}.", 42, "boxed"),
     ],
 )
@@ -71,6 +76,16 @@ def test_repeated_selected_markers_must_agree() -> None:
     assert "conflicting_marker_values" in conflict.reason
 
 
+def test_nested_selected_markers_do_not_hide_conflicts() -> None:
+    conflict = parse_answer(
+        "The final answer is: Final answer: 8\nFinal answer: 9"
+    )
+
+    assert conflict.status == "conflict"
+    assert conflict.value is None
+    assert conflict.source == "final_answer"
+
+
 @pytest.mark.parametrize(
     ("completion", "reason_fragment"),
     [
@@ -83,6 +98,7 @@ def test_repeated_selected_markers_must_agree() -> None:
         ("Final answer: Infinity", "non_finite"),
         ("Final answer: 12,34", "unsupported_numeric_payload"),
         ("Final answer: 2 + 2 = 4", "multiple_values"),
+        ("Final answer: 2**3", "multiple_values"),
         ("\\boxed{42", "unbalanced_braces"),
         ("\\boxed 42", "missing_open_brace"),
         ("Final answer: __import__('os').system('echo no')", "unsupported_numeric_payload"),

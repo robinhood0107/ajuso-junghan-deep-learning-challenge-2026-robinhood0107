@@ -19,10 +19,11 @@
 | Gate B0 모델 파일 | **READY** | pinned tokenizer, index, 두 shard의 exact size/SHA/commit 확인 |
 | Gate B0 runtime packages | **CPU-hidden READY** | ext4 전용 환경에서 Torch/Transformers/Accelerate/PEFT/bitsandbytes/Triton 격리 import 성공 |
 | Gate B0 CPU/code readiness | **READY** | sealed development shard, real tokenizer SFT preflight, GPU runtime/training/inference/OOF selection/one-shot holdout/submission 경로 구현·회귀검증 |
-| Gate B0 GPU preflight | **READY (production v2 B1 완료)** | `model-preflight-gpu-ready-20260810T131821KST.json`은 pinned revision, full weights, CUDA/BF16/NF4 runtime, physical used/free 1,716/10,282MiB, `training_ready=true`, blockers 0을 입증했다. |
-| Gate B0 final GPU smoke | **READY (production v2 B1 완료)** | `gpu-smoke-20260810T131821KST.json`은 local `2+3` only, pinned NF4 load, LoRA backward/`paged_adamw_8bit` 1 step, cache-on generation/parser exact 5, peak allocated/reserved 3,301,260,800/4,661,968,896 bytes를 입증했다. |
-| Gate B1 base direct-answer | **v2 완료 / selection evidence** | `20260810T131821KST` organizer-only fold 0 run은 schema v2로 atomic 완료했다. 1,210/2,942 EM (41.1285%), parser `2143/3/796`, finish `2134/808`; source/B0/config byte와 seed/prompt/latency digest가 모두 재검증 가능하다. redacted parser audit v4도 통과했다. |
-| Gate B2 QLoRA SFT | **첫 시도 fail-closed / 수정 후 재시도 대기** | `20260810T192204KST` 시도는 738/738 step과 train loss 0.480716까지 완료했지만 Transformers가 재직렬화한 tokenizer byte가 pinned snapshot과 달라 publish 전에 exit 2로 거부됐다. adapter/temporary directory는 남지 않았다. exact pinned tokenizer bytes를 cache에서 SHA 검증·복사하도록 수정했고 새 source/B0로 재시도한다. |
+| Gate B0 GPU preflight | **READY / source-bound 재실행 필요** | `20260810T210605KST` pair는 pinned revision, full weights, CUDA/BF16/NF4 runtime과 `training_ready=true`, blockers 0을 입증해 실제 QLoRA 재시도를 승인했다. 이후 parser/code/docs가 바뀌었으므로 다음 GPU run에는 새 source manifest와 B0 pair가 필요하다. |
+| Gate B0 final GPU smoke | **READY / source-bound 재실행 필요** | `gpu-smoke-20260810T210605KST.json`은 local `2+3` only, pinned NF4 load, LoRA backward/optimizer step, cache-on generation을 green으로 닫았다. 다음 source에서는 같은 smoke를 새 no-overwrite tag로 다시 실행한다. |
+| Gate B1 base direct-answer | **v2 완료 / current parser 재실행 필요** | `20260810T131821KST` organizer-only fold 0 run은 당시 parser로 1,210/2,942 EM (41.1285%), parser `2143/3/796`, finish `2134/808`을 atomic 기록했다. parser v2 변경 뒤 이 immutable bundle은 historical evidence이며 current-source stored parse bundle을 다시 만들어야 한다. |
+| Gate B2 QLoRA SFT | **fold 0 완료 / candidate 중단** | 첫 시도 `20260810T192204KST`는 tokenizer byte drift를 publish 전에 fail-closed로 거부했다. 수정 뒤 `20260810T210605KST` 재시도는 738/738 step, runtime 5,171.3711초, loss 0.4800419로 완료했고 exact pinned tokenizer와 504 LoRA tensor를 검증한 adapter를 atomic publish했다. adapter EM은 627/2,942(21.3120%)로 base보다 -19.8165%p여서 나머지 fold를 중단했다. |
+| parser v2 CPU 재채점 | **진단 완료 / selection-ineligible** | `Final answer is:`와 중첩된 동일 marker, 균형 잡힌 Markdown/LaTeX label을 보수적으로 지원했다. conflict 3건은 유지하면서 기존 base raw의 EM은 1,210→1,653/2,942(56.1863%), invalid는 796→234로 개선됐다. 기존 bundle을 변조하지 않았고 새 current-source run 전에는 freeze 근거가 아니다. |
 | leaderboard prediction/submission | **미실행** | 모델 prediction 0건; leaderboard를 학습/API 입력에 쓰지 않음 |
 
 ### 실제 환경
@@ -34,7 +35,7 @@
 | GPU 전용 환경 | local ext4 `$GPU_ENV` (public repository에서 경로 제외) |
 | GPU runtime | Torch 2.13.0, Transformers 4.57.6, Accelerate 1.14.0, PEFT 0.20.0, bitsandbytes 0.50.0, Triton 3.7.1 |
 | GPU | NVIDIA GeForce RTX 4070 SUPER, 12,282MiB, compute capability 8.9 |
-| latest GPU evidence | production B0 preflight 직전 physical used/free 1,716/10,282MiB; smoke peak allocated/reserved 3,301,260,800/4,661,968,896 bytes. B1 종료 직후 physical used/free 1,782/10,216MiB. 값은 변동 가능하며 새 run 직전에 재측정하고 다른 프로세스는 중단하지 않음 |
+| latest GPU evidence | `20260810T210605KST` source/B0로 fold 0 QLoRA 738/738 step을 완료했다. adapter generation peak allocated 2,346,263,040 bytes, 총 latency 1,281,136.675536ms였다. 값은 변동 가능하며 새 run 직전에 재측정하고 다른 프로세스는 중단하지 않음 |
 | current WDDM baseline | 2026-08-10 재측정 used 1,401~1,446MiB/free 10,552~10,597MiB; `nvidia-smi` CUDA compute process 0개. 새 versioned smoke는 used 2,048MiB 상한과 free 10,240MiB 하한을 동시에 적용 |
 | WSL memory | RAM 18,857,226,240 bytes, available 15,645,212,672; swap free 6,354,501,632 bytes |
 | 저장공간 | Windows C: 58,220,236,800 bytes free, WSL ext4 972,765,863,936 bytes free |
@@ -78,8 +79,10 @@ preflight와 local synthetic smoke는 production run tag `20260810T131821KST`에
 - `gate_b.py`: split-bound SFT/dev records, response-only masking, full config SHA,
   structured generation result, parser conflict 보존, atomic no-overwrite JSONL/manifest
 - `parser_golden.py`: published development JSONL/manifest를 checksum·partition·stored
-  parser result까지 재검증하고 raw completion/ID/reference answer/value를 직렬화하지 않는
-  private parser-golden aggregate audit; locked holdout·leaderboard/test partition은 거부
+  parser result·fixed model/revision·exact-match 회계까지 재검증하고 raw
+  completion/ID/reference answer/value를 직렬화하지 않는 private parser-golden aggregate audit;
+  parser 변경 전후를 aggregate로만 비교하고 selection 승격을 명시적으로 금지하는
+  `audit-parser-rescore`도 제공; locked holdout·leaderboard/test partition은 거부
 - `model_preflight.py`: exact pinned shard contract, isolated import/ABI probe, physical VRAM
   gate, prerequisite-ready와 execution-ready 분리
 - `gpu_smoke.py`: 고정 synthetic 2+3 prompt만 쓰는 lazy NF4 load + LoRA backward +
@@ -93,7 +96,8 @@ preflight와 local synthetic smoke는 production run tag `20260810T131821KST`에
   bytes를 각각 고정 SHA로 검증해 복사한다.
 - `gate_b_selection.py`: single-fold probe와 complete 5-fold OOF union 비교, paired
   duplicate-cluster bootstrap, exact McNemar, 한 family Holm; final freeze는 complete OOF만
-  허용하고 base/adapter bundle·fold/data/example SHA·공통 method fingerprint를 결속
+  허용하고 base/adapter bundle·fold/data/example SHA·공통 method fingerprint를 결속.
+  single-fold significant-harm screen은 GPU 비용 중단만 결정하며 selection freeze로 승격되지 않음
 - `gate_b_holdout.py`: durable claim/receipt 뒤에만 원 train Q/A를 여는 one-shot frozen-policy
   평가; claim 이후 실패도 소비
 - `gate_b_prediction.py`: evaluation CSV 내부 strict load/SHA binding, primary 전체 처리 후
@@ -141,6 +145,14 @@ semantic config SHA는 `4530c14a4782c439ea3a8325b90d997793eda368b0371d765cb81069
 - `artifacts/analysis/parser-golden-20260810T131821KST-fold0-v4.json` (production B1 v2의
   19-class raw-free parser audit; SHA-256
   `5954dc2ba7b668938fafd0853810034bd41c28456b752ed613b9b3fb44b75b5c`)
+- `artifacts/analysis/parser-golden-20260810T210605KST-fold0-adapter-v5.json` (실제 QLoRA
+  output의 raw-free 3-class audit)
+- `artifacts/analysis/gate-b-candidate-probe-decision-20260810T210605KST-fold0-v1.json`
+  (answer-only QLoRA `stop_before_remaining_folds`, selection/freeze 불가)
+- `artifacts/analysis/parser-rescore-20260810T131821KST-fold0-base-v1.json` (base parser v2
+  CPU-only diagnostic, 1,653/2,942, selection-ineligible)
+- `artifacts/analysis/parser-rescore-20260810T210605KST-fold0-adapter-v1.json` (adapter parser
+  v2 diagnostic, 변경 0건)
 - `artifacts/analysis/source-manifest-final-v4.json` (역사적 Gate A snapshot; 새 Gate B
   실행 입력으로 재사용하지 않음)
 - `artifacts/analysis/source-manifest-parser-golden-v1-20260810.json` (parser golden audit
@@ -197,6 +209,35 @@ production run `artifacts/gate_b/20260810T131821KST/fold-0/`은 schema
 7,231.0960169ms였다. v2 manifest는 source/B0/config bytes, GPU name, seed/prompt sequence
 digest와 latency summary를 결속하므로 같은 fold QLoRA authorization에 사용할 수 있다.
 
+첫 QLoRA attempt `20260810T192204KST`는 738/738 optimizer step과 loss
+`0.48071612413659653`까지 끝났지만 post-training byte gate가 Transformers의 tokenizer
+재직렬화 drift를 찾아 adapter publish 전에 exit 2로 중단했다. exact pinned tokenizer bytes를
+cache에서 검증·복사하도록 고친 뒤 `20260810T210605KST` source manifest/B0 pair로 재시도했다.
+재시도는 training 11,794 / validation 2,942행, 738/738 step, runtime 5,171.3711초,
+loss `0.4800419177466292`로 완료됐다. adapter artifact/manifest/CHECKSUMS SHA-256은 각각
+`e6eb813a7fd36449759df38617576b7e5af2bd3d3b727d4895a16563619f27f4`,
+`499f340531a24b3f4fb1b34b526d0f83a60328751fc358ce79fc5a8b689122cf`,
+`bd6e1a54845b9e3206c56306dccca835707c1c894cc2c26bbc4932575b53e347`다. 504개 LoRA
+tensor와 shape/dtype, exact tokenizer bytes, split/data/source/B0 provenance를 독립 재검증했다.
+
+adapter generation records/manifest SHA-256은
+`ab80c295bd55a058fc3eb5ae00d6363a59e45cfde99161b9d3f4753c136e96e1`와
+`0dd933da255077060e5e2be2eb3acb6ba9e2741305ec1562f2587d4420bda7c0`다. 실제 점수는
+627/2,942 (`0.2131203263086336`), parser `ok/invalid=2940/2`, finish
+`stop/length=2936/6`, output token 24,313, peak allocated VRAM 2,346,263,040 bytes였다.
+base 대비 paired delta는 `-0.1981645139360979`, 95% duplicate-cluster bootstrap CI
+`[-0.21924047682833778, -0.17783066984019041]`, exact McNemar p
+`1.1017884458503882e-72`, 3-hypothesis family Holm-adjusted p
+`3.3053653375511645e-72`다. `single_fold_significant_harm_screen_v1`은 이 candidate의
+fold 1--4를 중단했지만, 단일 fold 결과로 base를 freeze하거나 holdout을 열지는 않는다.
+
+같은 raw base generation을 current parser로 변경 없이 다시 읽은 privacy-safe rescore는
+1,653/2,942 (`0.561862678450034`), parser `ok/conflict/invalid=2705/3/234`를 기록했다.
+stored result 대비 parser result 572건, exact match 443건이 바뀌었다. adapter rescore는
+변경 0건이다. 이 artifact는 `selection_eligible=false`와
+`requires_current_source_run_before_freeze=true`를 명시한다. 따라서 56.1863%는 구현 진단이며
+다음 current-source base run이 같은 결과를 atomic publish하기 전에는 model-selection 점수가 아니다.
+
 실제 JSONL/manifest 쌍이 atomic publish된 뒤에는 CUDA를 쓰지 않는
 `audit-parser-golden`으로 bundle checksum, fold-validation/cross-validation partition,
 각 stored parser result를 다시 확인한다. 이 명령은 raw completion, completion hash, ID,
@@ -215,9 +256,10 @@ CPU-only SFT preflight v3는 fold 0 training 11,794행, validation 2,942행, uni
 ### 최신 전체 회귀
 
 - `uv run ruff check .`: **pass**
-- `CUDA_VISIBLE_DEVICES='' ... uv run pytest -s -q`: **354 passed, 1 skipped** (2026-08-10
-  v2 provenance/config-byte와 exact tokenizer export regression 포함 재실행)
-- branch coverage: **78%** (7,146 statements, 2,556 branches)
+- `CUDA_VISIBLE_DEVICES='' ... uv run pytest -s -q`: **372 passed, 1 skipped** (2026-08-10
+  parser v2, raw-free rescore, candidate harm-screen regression 포함 재실행)
+- `CUDA_VISIBLE_DEVICES='' uv run coverage run --branch -m pytest -s -q` 뒤
+  `uv run coverage report`: **78%** (7,443 statements, 2,704 branches)
 - skip 1건은 기본 CPU `.venv`에 PyTorch가 없어 실제 PEFT 0.20 serialization
   compatibility test를 건너뛴 것이다. 같은 구조의 real safetensors 파일에 대한
   extra tensor/wrong shape/wrong dtype/incomplete index 음성 회귀는 CPU에서 통과했다.
@@ -546,11 +588,11 @@ uv run pytest -s -q
 uv run pytest -s --cov=deep_challenge --cov-report=term-missing -q
 ```
 
-2026-08-10 v2 provenance와 exact tokenizer export guard까지 반영한 현재 결과:
+2026-08-10 parser v2와 candidate cost gate까지 반영한 현재 결과:
 
 - Ruff: pass
-- pytest: **354 passed, 1 skipped** (`torch`가 없는 기본 CPU 환경의 실제-runtime test 1개만 skip)
-- current branch coverage: **78%** (7,146 statements, 2,556 branches)
+- pytest: **372 passed, 1 skipped** (`torch`가 없는 기본 CPU 환경의 실제-runtime test 1개만 skip)
+- current branch coverage: **78%** (7,443 statements, 2,704 branches)
 - public-repo guard: pass
 - canonical `CHECKSUMS.sha256`: pass
 
@@ -666,11 +708,15 @@ drift를 추적하는 역사적 trace이며 새 실험 입력으로 사용하지
   변경·누락·v1 schema는 QLoRA authorization 전에 fail-closed다.
 - 실제 raw generation 뒤 redacted parser golden corpus와 public safe-synthetic regression을
   추가하고 전체 Ruff/pytest를 통과한다. locked holdout 접근은 계속 0회여야 한다.
+- parser v2 CPU rescore의 56.1863%는 diagnostic-only다. 새 source manifest/B0 pair로 fold 0
+  base를 다시 atomic publish해 stored/current parser가 일치한 뒤에만 새 selection evidence로 쓴다.
 
 ### Gate B2 — QLoRA SFT
 
-- organizer-only clean subset으로 먼저 실행
-- response-only loss, 2K/4K, direct answer/verified concise rationale 비교
+- organizer-only answer-only 2K QLoRA fold 0는 완료했으며 significant harm screen에서 탈락했다.
+- 이 exact candidate의 fold 1--4 반복은 중단한다. 다음 candidate는 current-source base를 먼저
+  복구한 뒤 verified concise rationale 또는 별도 versioned prompt/config로 정의한다.
+- response-only loss, 2K/4K, direct answer/verified concise rationale는 서로 덮어쓰지 않고 비교
 - fold의 `training_ids(fold)`만 사용
 - checkpoint/data/config SHA와 비용 저장
 
@@ -697,8 +743,9 @@ drift를 추적하는 역사적 trace이며 새 실험 입력으로 사용하지
   multi-adapter/checkpoint 결합은 운영진의 명시 답변 전 off다.
 - final test CSV는 아직 공개되지 않았고, leaderboard/test prediction·submission upload는
   primary/fallback freeze, one-shot holdout, 사용자의 명시 upload 요청 전까지 실행하지 않는다.
-- GPU/model은 준비됐고 **selection-eligible fold 0 v2 base score 1개**를 확보했다. QLoRA gain,
-  complete 5-fold OOF result, locked-holdout score, leaderboard score는 아직 0개다.
+- GPU/model은 준비됐고 selection-eligible stored-parser fold 0 base 41.1285%와 실제 QLoRA
+  21.3120%를 확보했다. parser v2 base 56.1863%는 current-source rerun 대기 진단이다.
+  complete 5-fold OOF result, freeze, locked-holdout score, leaderboard score는 아직 0개다.
 
 이 blocker들은 Gate A의 실패가 아니라 규칙 authority 또는 후속 immutable evidence가 필요한
 조건이다. 기존 사용자 파일 `NUL`은 수정·삭제하지 않았다.

@@ -70,7 +70,7 @@ PYTHONPATH=src python3 -m deep_challenge.public_repo_guard --all
 | B1.0 | fold 0 base direct-answer | B0.3 green | JSONL + **v2 provenance manifest** + raw generation | invalid parser/artifact or any source/B0/config hash mismatch |
 | B1.1 | parser golden corpus | B1.0 real generations | added regression tests + full CPU suite | conflict is hidden or test fails |
 | B2.0 | fold 0 answer-only QLoRA | same-fold base manifest | exact adapter bundle/checksum/manifest | train IDs or provenance mismatch |
-| B1/B2.1 | folds 1–4 repeat | fold 0 regression green | five base + five adapter OOF runs | any fold incomplete |
+| B1/B2.1 | folds 1–4 repeat | fold 0 harm screen authorizes exact candidate | five base + five candidate OOF runs | significant fold 0 regression or any fold incomplete |
 | B2.2 | complete OOF comparison | all five folds | grouped paired bootstrap, exact McNemar, Holm | single fold/reused run/mixed method |
 | B3 | freeze and locked holdout | B2.2 evidence, primary decided | durable claim + one receipt | no freeze, already-consumed claim |
 | B4.1 | filtered leaderboard prediction | frozen policy, B3 complete | strict prediction manifest, no invalid answers | data SHA/schema/adapter mismatch |
@@ -200,7 +200,20 @@ vocab size, encode 결과, chat-template token sequence가
 regression 2건을 추가한 전체 결과는 Ruff pass, `354 passed, 1 skipped`다.
 
 R6 재시도는 수정 commit 뒤 새 source manifest, 새 B0 preflight/smoke, 새 checkpoint tag를
-사용한다. 이전 실패 tag의 경로를 재사용하거나 validation gate를 완화하지 않는다.
+사용했다. 이전 실패 tag의 경로를 재사용하거나 validation gate를 완화하지 않았다.
+
+### 3.1.4 R6/R7 성공과 answer-only candidate 중단
+
+`20260810T210605KST` source/B0 pair에서 재시도는 738/738 step, runtime 5,171.3711초,
+loss `0.4800419177466292`로 완료됐다. adapter artifact SHA는
+`e6eb813a7fd36449759df38617576b7e5af2bd3d3b727d4895a16563619f27f4`이며 exact tokenizer,
+504 LoRA tensor, split/data/source/B0 provenance와 `CHECKSUMS.sha256`를 모두 검증했다.
+
+adapter generation은 627/2,942(21.3120%), base는 1,210/2,942(41.1285%)였다. paired delta
+-19.8165%p의 95% cluster-bootstrap CI가 [-21.9240, -17.7831]%p이고 Holm-adjusted exact
+McNemar p가 3.31e-72이므로 cost-control gate는 fold 1--4를 중단했다. 이후 parser v2의
+immutable rescore는 base만 1,653/2,942(56.1863%)로 개선했고 adapter는 변하지 않았다.
+rescore는 selection-ineligible이며 다음 source-bound B1 전에는 freeze할 수 없다.
 
 ### 3.2 전체 백로그와 의존 관계
 
@@ -211,7 +224,7 @@ R6 재시도는 수정 commit 뒤 새 source manifest, 새 B0 preflight/smoke, �
    통과했다. selection evidence로는 봉인한다.
 2. **R2 (완료, CPU):** private parser audit v2와 raw-free structural regression을 추가했다.
    conflict는 여전히 fail-visible이다.
-3. **R3 (완료, CPU):** Ruff, full `pytest -s -q` (354 passed, 1 skipped), public-repo guard,
+3. **R3 (완료, CPU):** Ruff, full `pytest -s -q` (372 passed, 1 skipped), branch coverage 78%, public-repo guard,
    canonical checksum을 통과했고 docs 04/05/07/09/10/11을 현재 evidence로 갱신했다.
 4. **R4 (완료, GPU):** GPU `used/free=912/11,086MiB`의 새 관측값에서 당시 source
    preflight와 cache-on synthetic smoke를 `20260810T062500KST`로 실행했고 green pair를 만들었다.
@@ -219,26 +232,38 @@ R6 재시도는 수정 commit 뒤 새 source manifest, 새 B0 preflight/smoke, �
    source manifest/B0 pair, no-overwrite fold 0 fixed-base output과 raw-free parser audit v4를
    모두 완료했다. selection-eligible base score는 1,210/2,942(41.1285%)다. v1 output은
    진단 보존만 한다.
-6. **R6 (재시도 대기, GPU):** 첫 학습은 738/738 뒤 tokenizer snapshot drift를 publish gate가
-   거부했다. exact cache-byte export 수정 source의 새 B0 pair로 같은 fold 0 **v2** base
-   manifest에 bound된 organizer-only answer-only QLoRA를 재실행하고 adapter bundle, shard
-   completeness, tokenizer/config/data provenance를 검증한다.
-7. **R7 (GPU):** fold 0 adapter generation을 실행해 동일 validation partition에서 base와
-   비교 가능한 pair를 만든다.
-8. **R8 (GPU):** R5--R7을 fold 1, 2, 3, 4에 순차 반복한다. GPU run은 병렬화하지 않는다.
-9. **R9 (CPU):** 다섯 fold가 모두 완결된 뒤 grouped paired bootstrap, exact McNemar,
-   Holm correction으로 complete OOF comparison을 작성한다. leaderboard 점수로 선택하지 않는다.
-10. **R10 (CPU):** development evidence만으로 primary/fallback을 freeze하고 one-shot
+6. **R6 (완료, GPU):** 첫 학습은 738/738 뒤 tokenizer snapshot drift를 publish gate가
+   fail-closed로 거부했다. exact cache-byte export 수정 뒤 `20260810T210605KST` 재시도는
+   738/738, runtime 5,171.3711초, loss 0.4800419로 성공했고 adapter 504 tensor와 모든
+   checksum/provenance를 검증했다.
+7. **R7 (완료, GPU→CPU):** fold 0 adapter generation은 627/2,942(21.3120%)였다. base 대비
+   delta -19.8165%p, 95% cluster-bootstrap CI [-21.9240, -17.7831]%p, Holm-adjusted exact
+   McNemar p=3.31e-72다. raw-free parser audit v5와 comparison을 완료했다.
+8. **R8-A (완료, CPU cost gate):**
+   `gate-b-candidate-probe-decision-20260810T210605KST-fold0-v1.json`이
+   `stop_before_remaining_folds`와 `candidate_full_oof_authorized=false`를 기록했다. 따라서 이
+   exact answer-only QLoRA의 fold 1--4는 실행하지 않는다.
+9. **R8-B (완료, CPU parser v2):** `Final answer is:`/nested same-marker/균형 Markdown·LaTeX
+   parser를 보강했고 conflict 3건은 유지했다. immutable base raw rescore는
+   1,653/2,942(56.1863%), adapter는 627/2,942 그대로다. 둘 다 rescore 자체는
+   selection-ineligible이다.
+10. **R8-C (다음, CPU→GPU):** 전체 회귀·Git 기록 뒤 새 source manifest/B0 pair를 만들고
+    fold 0 current-source base를 다시 atomic publish한다. stored/current parser가 일치한
+    selection evidence를 얻기 전에는 새 candidate, freeze, holdout으로 가지 않는다.
+11. **R9 (대기):** current-source base 뒤 verified concise rationale 또는 별도 versioned
+    candidate를 정의하고 fold 0 harm screen을 먼저 통과시킨다. 통과한 method만 folds 1--4와
+    complete OOF grouped paired bootstrap, exact McNemar, Holm을 수행한다.
+12. **R10 (CPU):** development evidence만으로 primary/fallback을 freeze하고 one-shot
     holdout claim 전의 immutable method/route/config checkpoint binding을 검증한다.
-11. **R11 (GPU):** R10 이후에만 locked holdout을 정확히 한 번 평가한다. claim을 만든 뒤
+13. **R11 (GPU):** R10 이후에만 locked holdout을 정확히 한 번 평가한다. claim을 만든 뒤
     실패해도 접근권은 소비되므로 재시도 판단은 별도 기록한다.
-12. **R12 (GPU):** holdout 후 고정된 policy로 filtered leaderboard만 예측한다. 이 데이터는
+14. **R12 (GPU):** holdout 후 고정된 policy로 filtered leaderboard만 예측한다. 이 데이터는
     학습, self-training seed, prompt 개선, 외부 API 입력에 절대 쓰지 않는다.
-13. **R13 (CPU):** strict submission writer와 independent validator를 모두 통과시키고
+15. **R13 (CPU):** strict submission writer와 independent validator를 모두 통과시키고
     `ID,answer`, row order, checksum, invalid/missing=0인지 확인한다.
-14. **R14 (외부 권한):** Kaggle upload는 사용자의 명시 요청이 있을 때만 수행한다. upload
+16. **R14 (외부 권한):** Kaggle upload는 사용자의 명시 요청이 있을 때만 수행한다. upload
     전에는 final run manifest와 local submission checksum을 다시 대조한다.
-15. **R15 (CPU):** 각 완료 phase마다 source manifest와 canonical `CHECKSUMS.sha256`를
+17. **R15 (CPU):** 각 완료 phase마다 source manifest와 canonical `CHECKSUMS.sha256`를
     갱신하고, raw artifact 없이 public code/docs만 guard 검증·commit·push한다.
 
 R4--R8은 R3의 parser/test gate를 우회할 수 없고, R11--R14는 R9--R10의 complete OOF

@@ -739,6 +739,69 @@ def test_compare_development_oof_cli_wires_all_folds_from_development_shard(
     assert keyword["deployment_fold"] == 0
 
 
+def test_decide_candidate_probe_cli_writes_cost_control_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    comparison = tmp_path / "comparison.json"
+    comparison.write_text("{}\n", encoding="utf-8")
+    output = tmp_path / "decision.json"
+    captured: dict[str, object] = {}
+
+    def fake_decide(
+        comparison_artifact: Path,
+        *,
+        candidate_label: str,
+        output_path: Path,
+    ) -> GateBSelectionWriteResult:
+        captured.update(
+            comparison_artifact=comparison_artifact,
+            candidate_label=candidate_label,
+            output_path=output_path,
+        )
+        output_path.write_text(
+            json.dumps(
+                {
+                    "candidate_action": "stop_before_remaining_folds",
+                    "candidate_full_oof_authorized": False,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return GateBSelectionWriteResult(
+            path=str(output_path),
+            size_bytes=output_path.stat().st_size,
+            sha256="a" * 64,
+            payload_sha256="b" * 64,
+        )
+
+    monkeypatch.setattr(cli_module, "decide_candidate_probe_promotion", fake_decide)
+    assert (
+        main(
+            [
+                "decide-candidate-probe",
+                "--comparison-artifact",
+                str(comparison),
+                "--candidate-label",
+                "qlora-direct",
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    assert captured == {
+        "comparison_artifact": comparison,
+        "candidate_label": "qlora-direct",
+        "output_path": output,
+    }
+    rendered = json.loads(capsys.readouterr().out)
+    assert rendered["candidate_action"] == "stop_before_remaining_folds"
+    assert rendered["candidate_full_oof_authorized"] is False
+    assert rendered["selection_frozen"] is False
+    assert rendered["holdout_accessed"] is False
+
+
 @pytest.mark.parametrize(
     "command",
     [

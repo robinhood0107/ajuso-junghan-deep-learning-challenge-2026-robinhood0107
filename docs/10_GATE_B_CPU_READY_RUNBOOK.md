@@ -2,7 +2,7 @@
 
 기준 시각: **2026-08-10 KST**
 대상 호스트: **WSL2 Ubuntu 24.04 + NVIDIA GeForce RTX 4070 SUPER 12GB**
-현재 판정: **production fold 0 B1 v2와 parser gate 완료, QLoRA용 새 source/B0 재결속 대기**
+현재 판정: **fold 0 base·answer-only QLoRA 완료, QLoRA candidate 중단, parser v2 current-source B1 재실행 대기**
 
 이 문서는 현재 코드의 CLI와 정확히 일치하는 실행 순서다. GPU가 필요한 명령은 맨
 뒤의 별도 절에만 둔다. 2026-08-10 이전 source final smoke와 별도로, training cache-off와
@@ -309,6 +309,21 @@ uv run deep-challenge audit-parser-golden \
   --output "$PARSER_GOLDEN"
 ```
 
+parser source를 바꾼 뒤 기존 immutable bundle의 영향만 확인할 때는 다음 diagnostic을 쓴다.
+이 명령은 raw/ID/answer를 새 artifact에 쓰지 않고 stored/current aggregate만 비교하며,
+결과 자체에 `selection_eligible=false`를 기록한다.
+
+```bash
+uv run deep-challenge audit-parser-rescore \
+  --records "$RUN_DIR/base-direct-predictions.jsonl" \
+  --manifest "$RUN_DIR/base-direct-manifest.json" \
+  --output "artifacts/analysis/parser-rescore-$RUN_TAG-fold$FOLD-base-v1.json"
+```
+
+현재 parser v2의 기존 base rescore는 1,653/2,942(56.1863%), invalid 234, conflict 3이다.
+이는 GPU generation을 재사용한 구현 진단이고 freeze 근거가 아니므로 새 source/B0의 B1을
+반드시 다시 atomic publish한다.
+
 aggregate의 source/status/reason code에 새 구조가 있으면 공개 test에는 그 구조를
 재현하는 안전한 synthetic completion만 추가한다. 실제 question, ID, answer, raw completion,
 completion hash는 `artifacts/` 밖으로 옮기거나 Git에 stage하지 않는다. 이 regression과
@@ -337,8 +352,14 @@ publish되지 않고 정리됐다.
 `tokenizer_config.json` SHA
 `5b5d4f65d0acd3b2d56a35b56d374a36cbc1c8fa5cf3b3febbbfabf22f359583`를 확인한 뒤 exact
 bytes만 export한다. 실제 cache copy/reload에서 vocab, encode, chat-template token sequence
-동일성을 확인했고 full CPU suite도 통과했다. 재시도는 이 수정 source의 새 manifest/B0 pair와
-새 no-overwrite tag에서만 한다.
+동일성을 확인했고 full CPU suite도 통과했다. 실제 재시도 `20260810T210605KST`는
+738/738 step, runtime 5,171.3711초, loss 0.4800419로 성공했고 adapter bundle의 504 tensor,
+shape/dtype, exact tokenizer와 모든 provenance를 검증했다.
+
+같은 fold generation은 627/2,942(21.3120%)로 base 1,210/2,942(41.1285%)보다
+-19.8165%p 낮았다. paired cluster-bootstrap 95% CI는 [-21.9240, -17.7831]%p이고
+Holm-adjusted exact McNemar p는 `3.3053653375511645e-72`다. 따라서 아래 명령은 재현용으로
+보존하되 이 exact answer-only candidate를 fold 1--4에서 다시 실행하지 않는다.
 
 ```bash
 ADAPTER_DIR="$CHECKPOINT_DIR/adapter-direct"
@@ -394,8 +415,19 @@ manifest/tree SHA를 검증한 뒤 directory rename으로 publish한다. 불완�
 concise rationale는 별도 검증 corpus와 별도 immutable config를 만든 뒤 direct-answer와
 독립 실험으로만 추가한다. 현재 direct-answer artifact를 rationale 결과로 덮어쓰지 않는다.
 
-fold 0 base generation으로 parser golden corpus/tests를 추가하고 전체 회귀가 다시
-green이 된 뒤에만 `FOLD=1`, `2`, `3`, `4`로 바꾸어 6절과 7절을 반복한다. 각 fold에서도
+단일-fold 비교 뒤에는 먼저 고정된 harm screen을 실행한다.
+
+```bash
+uv run deep-challenge decide-candidate-probe \
+  --comparison-artifact "$RUN_DIR/base-vs-adapter-probe.json" \
+  --candidate-label qlora-direct \
+  --output "artifacts/analysis/gate-b-candidate-probe-decision-$RUN_TAG-fold$FOLD-v1.json"
+```
+
+`candidate_full_oof_authorized=true`이고 전체 CPU 회귀가 green일 때만 `FOLD=1`, `2`, `3`,
+`4`로 바꾸어 6절과 7절을 반복한다. `false`이면 그 exact candidate는 중단하고 current-source
+base 또는 새 versioned candidate부터 다시 시작한다. 이 artifact는 비용 통제 전용이며
+`final_selection_eligible=false`, `complete_oof_required_before_freeze=true`다. 각 fold에서도
 반드시 base run을 먼저 만들고 그 fold의 base manifest로 학습을 승인한다. fold별
 `RUN_DIR`, `CHECKPOINT_DIR`, `ADAPTER_DIR`를 새 fold 값으로 다시 계산하며 공유하거나
 덮어쓰지 않는다. JSONL과 작은 evidence는 project의 `artifacts/gate_b`에 두지만, Trainer

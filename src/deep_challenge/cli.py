@@ -55,6 +55,7 @@ from .gate_b_selection import (
     NamedDevelopmentRun,
     compare_cross_fold_development_runs,
     compare_development_runs,
+    decide_candidate_probe_promotion,
     freeze_development_selection,
     require_base_development_artifact,
 )
@@ -62,7 +63,10 @@ from .gate_b_sft_preflight import run_sft_encoding_preflight
 from .gpu_smoke import run_final_gpu_smoke
 from .independent_submission import verify_submission_independently
 from .model_preflight import run_model_preflight
-from .parser_golden import audit_development_parser_golden
+from .parser_golden import (
+    audit_development_parser_golden,
+    audit_development_parser_rescore,
+)
 from .provenance import (
     build_source_tree_manifest,
     canonical_json_bytes,
@@ -301,6 +305,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser_golden.add_argument("--output", required=True, type=Path)
     parser_golden.set_defaults(handler=_command_audit_parser_golden)
 
+    parser_rescore = subparsers.add_parser(
+        "audit-parser-rescore",
+        help="compare stored/current parser outcomes without selection promotion",
+    )
+    parser_rescore.add_argument("--records", required=True, type=Path)
+    parser_rescore.add_argument("--manifest", required=True, type=Path)
+    parser_rescore.add_argument("--output", required=True, type=Path)
+    parser_rescore.set_defaults(handler=_command_audit_parser_rescore)
+
     train_fold = subparsers.add_parser(
         "gate-b-train-fold",
         help="train one locked direct-answer QLoRA fold after the base baseline",
@@ -345,6 +358,15 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--expected-development-shard-sha256", required=True)
     compare.add_argument("--output", required=True, type=Path)
     compare.set_defaults(handler=_command_compare_development)
+
+    probe_decision = subparsers.add_parser(
+        "decide-candidate-probe",
+        help="apply the fixed single-fold harm screen before more GPU folds",
+    )
+    probe_decision.add_argument("--comparison-artifact", required=True, type=Path)
+    probe_decision.add_argument("--candidate-label", required=True)
+    probe_decision.add_argument("--output", required=True, type=Path)
+    probe_decision.set_defaults(handler=_command_decide_candidate_probe)
 
     compare_oof = subparsers.add_parser(
         "compare-development-oof",
@@ -1333,6 +1355,31 @@ def _command_audit_parser_golden(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_audit_parser_rescore(args: argparse.Namespace) -> int:
+    result = audit_development_parser_rescore(
+        args.records,
+        args.manifest,
+        output_path=args.output,
+    )
+    print(
+        json.dumps(
+            {
+                "output": result.path,
+                "size_bytes": result.size_bytes,
+                "sha256": result.sha256,
+                "payload_sha256": result.payload_sha256,
+                "changed_parser_result_count": result.case_count,
+                "selection_eligible": False,
+                "raw_completion_serialized": False,
+                "locked_holdout_accessed": False,
+                "leaderboard_or_test_used": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def _command_gate_b_train_fold(args: argparse.Namespace) -> int:
     _require_gpu_cli_acknowledgement(args.acknowledge_gpu_use)
     config = _load_locked_gate_b_config(args.config)
@@ -1851,6 +1898,33 @@ def _command_compare_development_oof(args: argparse.Namespace) -> int:
                 "fold_count": manifest.n_folds,
                 "deployment_fold": args.deployment_fold,
                 "bootstrap_unit": "duplicate_cluster",
+                "holdout_accessed": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _command_decide_candidate_probe(args: argparse.Namespace) -> int:
+    result = decide_candidate_probe_promotion(
+        args.comparison_artifact,
+        candidate_label=args.candidate_label,
+        output_path=args.output,
+    )
+    payload = json.loads(Path(result.path).read_text(encoding="utf-8"))
+    print(
+        json.dumps(
+            {
+                "output": result.path,
+                "sha256": result.sha256,
+                "payload_sha256": result.payload_sha256,
+                "candidate_label": args.candidate_label,
+                "candidate_action": payload["candidate_action"],
+                "candidate_full_oof_authorized": payload[
+                    "candidate_full_oof_authorized"
+                ],
+                "selection_frozen": False,
                 "holdout_accessed": False,
             },
             sort_keys=True,

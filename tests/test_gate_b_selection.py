@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -34,6 +34,7 @@ from deep_challenge.gate_b_selection import (
     authorize_locked_holdout_once,
     compare_cross_fold_development_runs,
     compare_development_runs,
+    decide_candidate_probe_promotion,
     freeze_development_selection,
     require_base_development_artifact,
     validate_frozen_selection_methods,
@@ -41,6 +42,7 @@ from deep_challenge.gate_b_selection import (
 )
 from deep_challenge.provenance import (
     build_source_tree_manifest,
+    canonical_json_bytes,
     validate_source_tree_manifest_artifact,
     write_json_atomic,
 )
@@ -280,6 +282,54 @@ def _comparison(tmp_path: Path) -> tuple[Path, SplitManifest, tuple[MathRecord, 
     return output, manifest, records
 
 
+def _rewrite_probe_statistics(
+    source: Path,
+    target: Path,
+    *,
+    delta: float,
+    ci_low: float,
+    ci_high: float,
+    raw_p: float,
+    reject: bool,
+) -> Path:
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    comparison = payload["comparisons"][0]
+    assert comparison["delta_b_minus_a"] == delta
+    comparison["bootstrap_delta_ci_low"] = ci_low
+    comparison["bootstrap_delta_ci_high"] = ci_high
+    comparison["mcnemar_exact_p_value"] = raw_p
+    raw_p_values = {
+        item["candidate_label"]: item["mcnemar_exact_p_value"]
+        for item in payload["comparisons"]
+    }
+    raw_p_values.update(
+        {
+            item["hypothesis"]: item["mcnemar_exact_p_value"]
+            for item in payload["fallback_routing_comparisons"]
+        }
+    )
+    adjustments = {
+        item.hypothesis: asdict(item)
+        for item in selection_module.holm_bonferroni(
+            raw_p_values,
+            alpha=payload["statistics"]["alpha"],
+        )
+    }
+    for item in payload["comparisons"]:
+        item["holm"] = adjustments[item["candidate_label"]]
+    for item in payload["fallback_routing_comparisons"]:
+        item["holm"] = adjustments[item["hypothesis"]]
+    comparison["holm"]["reject"] = reject
+    payload.pop("payload_sha256")
+    payload["payload_sha256"] = hashlib.sha256(
+        canonical_json_bytes(payload)
+    ).hexdigest()
+    target.write_text(
+        json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    return target
+
+
 def _oof_comparison(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> tuple[
@@ -441,6 +491,96 @@ def test_comparison_validates_runs_and_writes_cluster_statistics(tmp_path: Path)
             development_shard_sha256="4" * 64,
             output_path=output,
             bootstrap_samples=10,
+        )
+
+
+def test_candidate_probe_harm_screen_stops_only_significant_regression(
+    tmp_path: Path,
+) -> None:
+    comparison, _, _ = _comparison(tmp_path)
+    continue_output = tmp_path / "continue-decision.json"
+    decide_candidate_probe_promotion(
+        comparison,
+        candidate_label="qlora",
+        output_path=continue_output,
+    )
+    continued = json.loads(continue_output.read_text(encoding="utf-8"))
+    assert continued["candidate_action"] == "continue_to_complete_oof"
+    assert continued["candidate_full_oof_authorized"] is True
+    assert continued["final_selection_eligible"] is False
+    assert continued["complete_oof_required_before_freeze"] is True
+    assert continued["locked_holdout_accessed"] is False
+
+    significant = _rewrite_probe_statistics(
+        comparison,
+        tmp_path / "significant-regression.json",
+        delta=-0.25,
+        ci_low=-0.30,
+        ci_high=-0.10,
+        raw_p=0.001,
+        reject=True,
+    )
+    stop_output = tmp_path / "stop-decision.json"
+    decide_candidate_probe_promotion(
+        significant,
+        candidate_label="qlora",
+        output_path=stop_output,
+    )
+    stopped = json.loads(stop_output.read_text(encoding="utf-8"))
+    assert stopped["significant_regression"] is True
+    assert stopped["candidate_action"] == "stop_before_remaining_folds"
+    assert stopped["candidate_full_oof_authorized"] is False
+    assert stopped["selection_frozen"] is False
+    assert stopped["leaderboard_or_test_used"] is False
+
+    with pytest.raises(GateBValidationError, match="overwrite"):
+        decide_candidate_probe_promotion(
+            significant,
+            candidate_label="qlora",
+            output_path=stop_output,
+        )
+
+
+def test_candidate_probe_rejects_inconsistent_holm_evidence(tmp_path: Path) -> None:
+    comparison, _, _ = _comparison(tmp_path)
+    inconsistent = _rewrite_probe_statistics(
+        comparison,
+        tmp_path / "inconsistent-regression.json",
+        delta=-0.25,
+        ci_low=-0.30,
+        ci_high=-0.10,
+        raw_p=0.001,
+        reject=False,
+    )
+    with pytest.raises(GateBValidationError, match="full comparison family"):
+        decide_candidate_probe_promotion(
+            inconsistent,
+            candidate_label="qlora",
+            output_path=tmp_path / "forbidden-decision.json",
+        )
+
+
+def test_candidate_probe_rejects_accuracy_inconsistent_with_contingency(
+    tmp_path: Path,
+) -> None:
+    comparison, _, _ = _comparison(tmp_path)
+    payload = json.loads(comparison.read_text(encoding="utf-8"))
+    payload["comparisons"][0]["accuracy_a"] = 0.5
+    payload["comparisons"][0]["accuracy_b"] = 0.25
+    payload.pop("payload_sha256")
+    payload["payload_sha256"] = hashlib.sha256(
+        canonical_json_bytes(payload)
+    ).hexdigest()
+    inconsistent = tmp_path / "inconsistent-contingency.json"
+    inconsistent.write_text(
+        json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(GateBValidationError, match="paired contingency"):
+        decide_candidate_probe_promotion(
+            inconsistent,
+            candidate_label="qlora",
+            output_path=tmp_path / "forbidden-contingency-decision.json",
         )
 
 

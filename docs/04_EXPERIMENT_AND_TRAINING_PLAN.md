@@ -36,12 +36,21 @@
   provenance manifest로 `20260810T131821KST`에 다시 실행해 1,210/2,942 exact match
   (41.1285%)를 기록했다. source/B0/config byte와 seed/prompt/latency digest를 결속한 이 v2
   artifact와 raw-free parser audit v4는 QLoRA authorization에 사용할 수 있다.
-- fold 0 base/direct-answer와 실제-generation parser golden을 완료했으므로 같은
-  base→QLoRA 순서를 fold 1~4에 반복한다. `compare-development-oof`는 모든
-  label×fold run을 강제하고 전체 OOF union에서 paired cluster bootstrap, exact McNemar,
-  Holm 보정을 다시 계산한다. base run은 pinned base checkpoint, adapter run은 실제
-  adapter bundle의 fold/data/example provenance와 결속하며 run/adapter 재사용과 fold 간
-  training-method fingerprint 혼합을 거부한다. 단일-fold 비교는 probe 전용이고 최종
+- fold 0 answer-only QLoRA는 738/738 step으로 완료됐지만 627/2,942(21.3120%)로 base
+  1,210/2,942(41.1285%)보다 `-0.1981645` 낮았다. 95% cluster-bootstrap CI 전체가 0 아래이고
+  Holm-adjusted exact McNemar가 기각했으므로 `single_fold_significant_harm_screen_v1`이 이
+  exact candidate의 fold 1~4 GPU 반복을 중단했다. 이 cost-control 판단은 단일 fold를 최종
+  선택 근거로 승격하지 않으며 base freeze·holdout도 허용하지 않는다.
+- parser v2는 `Final answer is:`와 중첩된 동일 marker, 균형 잡힌 Markdown/LaTeX label만
+  추가로 허용하고 conflict를 그대로 보존한다. 기존 base raw의 CPU-only rescore는
+  1,653/2,942(56.1863%), `ok/conflict/invalid=2705/3/234`였지만 selection-ineligible이다.
+  새 source/B0에서 stored/current parse가 일치하는 base bundle을 다시 만든 뒤 다음 candidate를
+  결정한다.
+- 승격 가능한 새 candidate가 생기면 `compare-development-oof`는 모든 label×fold run을
+  강제하고 전체 OOF union에서 paired cluster bootstrap, exact McNemar, Holm 보정을 다시
+  계산한다. base run은 pinned base checkpoint, adapter run은 실제 adapter bundle의
+  fold/data/example provenance와 결속하며 run/adapter 재사용과 fold 간 training-method
+  fingerprint 혼합을 거부한다. 단일-fold 비교는 probe 전용이고 최종
   freeze·holdout·leaderboard/test 경로로 승격할 수 없다.
 - 최종 실행 checkpoint는 OOF 전에 사전 지정한 deployment fold 0의 단일 checkpoint다.
   fold별 checkpoint를 ensemble하지 않는다. full-development refit은 별도 실험이며 현재
@@ -760,12 +769,14 @@ workspace에는 source와 작은 분석 artifact만 둔다.
 현재 first-pass의 현실적인 순서는 다음으로 고정한다.
 
 1. G0 데이터/평가·규칙 잠금
-2. B01 base direct-answer greedy를 모든 development fold에서 실행
-3. 실제 raw completion으로 parser golden regression을 추가
-4. S00 answer-only QLoRA를 동일 fold·동일 direct-answer 계약에서 실행
-5. complete OOF paired cluster bootstrap, exact McNemar, Holm으로 primary/fallback freeze
-6. frozen policy만 locked holdout에서 정확히 한 번 평가
-7. strict offline prediction과 두 validator로 submission을 만들되, Kaggle upload는 사용자 명시 요청 때만 수행
+2. fold 0 base direct-answer greedy와 parser golden을 실행
+3. fold 0 answer-only QLoRA harm screen을 실행하고, 열세면 해당 candidate를 조기중단
+4. current parser/source로 base fold 0를 재확인한 뒤 verified concise-rationale 등 새
+   versioned candidate만 별도 probe
+5. harm screen을 통과한 method만 모든 development fold에서 complete OOF 실행
+6. complete OOF paired cluster bootstrap, exact McNemar, Holm으로 primary/fallback freeze
+7. frozen policy만 locked holdout에서 정확히 한 번 평가
+8. strict offline prediction과 두 validator로 submission을 만들되, Kaggle upload는 사용자 명시 요청 때만 수행
 
 concise rationale, 외부 공개 데이터, self-training, preference/RL, deterministic tool,
 same-base multi-checkpoint fallback, adaptive self-consistency, full-development refit은 이

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import stat
 import tempfile
@@ -20,9 +21,12 @@ from pathlib import Path
 from typing import Any
 
 from .answers import AnswerParseResult, parse_answer
+from .gate_b import PINNED_MODEL_REVISION
+from .model_preflight import OFFICIAL_MODEL_ID
 from .provenance import canonical_json_bytes, sha256_file
 
 PARSER_GOLDEN_AUDIT_SCHEMA = "gate-b-parser-golden-audit-v1"
+PARSER_RESCORE_AUDIT_SCHEMA = "gate-b-parser-rescore-audit-v1"
 _DEVELOPMENT_RECORD_SCHEMA = "gate-b1-development-baseline-v2"
 _DEVELOPMENT_MANIFEST_SCHEMA = "gate-b1-development-run-v2"
 _SAFE_PARSE_SOURCES = frozenset({"final_answer", "boxed", "hashes", "answer", "fallback"})
@@ -100,6 +104,60 @@ def audit_development_parser_golden(
     )
 
 
+def audit_development_parser_rescore(
+    records_path: str | Path,
+    manifest_path: str | Path,
+    *,
+    output_path: str | Path,
+) -> ParserGoldenAuditWriteResult:
+    """Compare stored and current parser outcomes without mutating run evidence.
+
+    The source bundle must still be an intact development fold.  Unlike the
+    golden audit, this diagnostic deliberately permits a stored/current parser
+    mismatch, reports only aggregate counts, and marks itself ineligible for
+    selection.  A current-source model run is still required before freeze.
+    """
+
+    records_file = _require_regular_file(records_path, "development records JSONL")
+    manifest_file = _require_regular_file(manifest_path, "development manifest")
+    if records_file == manifest_file:
+        raise ParserGoldenAuditError("records and manifest paths must be different")
+    manifest = _load_json_object(manifest_file, "development manifest")
+    _validate_manifest(manifest, records_file)
+    stored, current, stored_exact, current_exact = _load_parser_rescore_rows(
+        records_file, manifest
+    )
+    changed = sum(before != after for before, after in zip(stored, current, strict=True))
+    payload = {
+        "schema_version": PARSER_RESCORE_AUDIT_SCHEMA,
+        "input_evidence": _input_evidence(records_file, manifest_file, manifest),
+        "stored": {
+            "parser_status_counts": _status_counts(stored),
+            "exact_match_count": stored_exact,
+            "exact_match_accuracy": stored_exact / len(stored),
+        },
+        "current": {
+            "parser_status_counts": _status_counts(current),
+            "exact_match_count": current_exact,
+            "exact_match_accuracy": current_exact / len(current),
+        },
+        "changed_parser_result_count": changed,
+        "exact_match_delta": current_exact - stored_exact,
+        "selection_eligible": False,
+        "requires_current_source_run_before_freeze": True,
+        "privacy_contract": _privacy_contract(),
+    }
+    payload_bytes = _json_bytes(payload)
+    target = _write_json_noreplace(output_path, payload_bytes)
+    return ParserGoldenAuditWriteResult(
+        path=str(target),
+        size_bytes=len(payload_bytes),
+        sha256=hashlib.sha256(payload_bytes).hexdigest(),
+        payload_sha256=hashlib.sha256(canonical_json_bytes(payload)).hexdigest(),
+        case_count=changed,
+    )
+
+
 def _validate_manifest(manifest: dict[str, Any], records_file: Path) -> None:
     if manifest.get("schema_version") != _DEVELOPMENT_MANIFEST_SCHEMA:
         raise ParserGoldenAuditError("development manifest has an unsupported schema_version")
@@ -131,11 +189,58 @@ def _validate_manifest(manifest: dict[str, Any], records_file: Path) -> None:
         "eligibility_ids_sha256",
     ):
         _require_trimmed_string(manifest.get(field_name), f"development manifest {field_name}")
+    if manifest["model_id"] != OFFICIAL_MODEL_ID:
+        raise ParserGoldenAuditError(
+            "development manifest does not bind the official model"
+        )
+    if manifest["revision"] != PINNED_MODEL_REVISION:
+        raise ParserGoldenAuditError(
+            "development manifest does not bind the pinned revision"
+        )
+    if manifest["route"] != "direct_answer":
+        raise ParserGoldenAuditError(
+            "development manifest route must be direct_answer"
+        )
     for field_name in ("execution_evidence", "generation_evidence"):
         if not isinstance(manifest.get(field_name), dict):
             raise ParserGoldenAuditError(
                 f"development manifest {field_name} is required for provenance-complete runs"
             )
+    parser_status_counts = manifest.get("parser_status_counts")
+    if not isinstance(parser_status_counts, dict) or not parser_status_counts:
+        raise ParserGoldenAuditError(
+            "development manifest parser_status_counts must be a non-empty object"
+        )
+    for status, count in parser_status_counts.items():
+        if status not in _SAFE_PARSE_STATUSES:
+            raise ParserGoldenAuditError(
+                "development manifest parser_status_counts has an unsupported status"
+            )
+        _require_nonnegative_int(
+            count, f"development manifest parser_status_counts[{status!r}]"
+        )
+    if sum(parser_status_counts.values()) != manifest["record_count"]:
+        raise ParserGoldenAuditError(
+            "development manifest parser_status_counts does not sum to record_count"
+        )
+    exact_match_count = manifest.get("exact_match_count")
+    _require_nonnegative_int(
+        exact_match_count, "development manifest exact_match_count"
+    )
+    if exact_match_count > manifest["record_count"]:
+        raise ParserGoldenAuditError(
+            "development manifest exact_match_count exceeds record_count"
+        )
+    accuracy = manifest.get("exact_match_accuracy")
+    if (
+        isinstance(accuracy, bool)
+        or not isinstance(accuracy, (int, float))
+        or not math.isfinite(float(accuracy))
+        or float(accuracy) != exact_match_count / manifest["record_count"]
+    ):
+        raise ParserGoldenAuditError(
+            "development manifest exact_match_accuracy is inconsistent"
+        )
     for field_name in (
         "config_sha256",
         "checkpoint_sha256",
@@ -159,6 +264,7 @@ def _load_and_validate_rows(
     parsed_results: list[AnswerParseResult] = []
     problem_ids: set[str] = set()
     observed_statuses: Counter[str] = Counter()
+    observed_exact_matches = 0
     for index, line in enumerate(lines, start=1):
         row = _load_json_line(line, index)
         result = _validate_row(row, manifest, index)
@@ -167,6 +273,7 @@ def _load_and_validate_rows(
         problem_ids.add(problem_id)
         parsed_results.append(result)
         observed_statuses[result.status] += 1
+        observed_exact_matches += row["exact_match"]
 
     if len(problem_ids) != manifest["problem_count"]:
         raise ParserGoldenAuditError("development records problem_count does not match manifest")
@@ -179,12 +286,79 @@ def _load_and_validate_rows(
         raise ParserGoldenAuditError(
             "development manifest parser_status_counts does not match rows"
         )
+    if manifest["exact_match_count"] != observed_exact_matches:
+        raise ParserGoldenAuditError(
+            "development manifest exact_match_count does not match rows"
+        )
     return parsed_results
+
+
+def _load_parser_rescore_rows(
+    records_file: Path, manifest: dict[str, Any]
+) -> tuple[list[AnswerParseResult], list[AnswerParseResult], int, int]:
+    try:
+        lines = records_file.read_text(encoding="utf-8", errors="strict").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise ParserGoldenAuditError(f"could not read development records: {exc}") from exc
+    if len(lines) != manifest["record_count"]:
+        raise ParserGoldenAuditError("development records line count does not match manifest")
+
+    stored_results: list[AnswerParseResult] = []
+    current_results: list[AnswerParseResult] = []
+    problem_ids: set[str] = set()
+    stored_exact = 0
+    current_exact = 0
+    for index, line in enumerate(lines, start=1):
+        row = _load_json_line(line, index)
+        stored, current, reference_answer = _validate_row_pair(row, manifest, index)
+        problem_id = row["problem_id"]
+        assert isinstance(problem_id, str)
+        problem_ids.add(problem_id)
+        stored_results.append(stored)
+        current_results.append(current)
+        stored_match = stored.ok and stored.value == reference_answer
+        current_match = current.ok and current.value == reference_answer
+        if row.get("exact_match") is not stored_match:
+            raise ParserGoldenAuditError(
+                f"development row {index} stored exact_match is inconsistent"
+            )
+        stored_exact += stored_match
+        current_exact += current_match
+
+    if len(problem_ids) != manifest["problem_count"]:
+        raise ParserGoldenAuditError("development records problem_count does not match manifest")
+    if _status_counts(stored_results) != dict(
+        sorted(manifest["parser_status_counts"].items())
+    ):
+        raise ParserGoldenAuditError(
+            "development manifest parser_status_counts does not match stored rows"
+        )
+    if manifest.get("exact_match_count") != stored_exact:
+        raise ParserGoldenAuditError(
+            "development manifest exact_match_count does not match stored rows"
+        )
+    return stored_results, current_results, stored_exact, current_exact
 
 
 def _validate_row(
     row: dict[str, Any], manifest: dict[str, Any], index: int
 ) -> AnswerParseResult:
+    actual, expected, reference_answer = _validate_row_pair(row, manifest, index)
+    if actual != expected:
+        raise ParserGoldenAuditError(
+            f"development row {index} stored parser result does not match completion"
+        )
+    stored_match = actual.ok and actual.value == reference_answer
+    if row["exact_match"] is not stored_match:
+        raise ParserGoldenAuditError(
+            f"development row {index} stored exact_match is inconsistent"
+        )
+    return actual
+
+
+def _validate_row_pair(
+    row: dict[str, Any], manifest: dict[str, Any], index: int
+) -> tuple[AnswerParseResult, AnswerParseResult, int]:
     prefix = f"development row {index}"
     if row.get("schema_version") != _DEVELOPMENT_RECORD_SCHEMA:
         raise ParserGoldenAuditError(f"{prefix} has an unsupported schema_version")
@@ -218,9 +392,12 @@ def _validate_row(
         raise ParserGoldenAuditError(f"{prefix} raw_completion_sha256 does not match")
     expected = parse_answer(completion)
     actual = _parse_result_from_row(row.get("parse"), prefix)
-    if actual != expected:
-        raise ParserGoldenAuditError(f"{prefix} stored parser result does not match completion")
-    return actual
+    reference_answer = row.get("reference_answer")
+    if isinstance(reference_answer, bool) or not isinstance(reference_answer, int):
+        raise ParserGoldenAuditError(f"{prefix} reference_answer must be an integer")
+    if type(row.get("exact_match")) is not bool:
+        raise ParserGoldenAuditError(f"{prefix} exact_match must be boolean")
+    return actual, expected, reference_answer
 
 
 def _parse_result_from_row(value: object, prefix: str) -> AnswerParseResult:
@@ -268,34 +445,48 @@ def _redacted_payload(
     ]
     return {
         "schema_version": PARSER_GOLDEN_AUDIT_SCHEMA,
-        "input_evidence": {
-            "records_sha256": sha256_file(records_file),
-            "manifest_sha256": sha256_file(manifest_file),
-            "record_count": manifest["record_count"],
-            "problem_count": manifest["problem_count"],
-            "fold": manifest["fold"],
-            "model_id": manifest["model_id"],
-            "revision": manifest["revision"],
-            "route": manifest["route"],
-            "checkpoint_sha256": manifest["checkpoint_sha256"],
-            "config_sha256": manifest["config_sha256"],
-            "split_sha256": manifest["split_sha256"],
-            "eligibility_ids_sha256": manifest["eligibility_ids_sha256"],
-            "partition": "fold_validation",
-            "split_partition": "cross_validation",
-        },
+        "input_evidence": _input_evidence(records_file, manifest_file, manifest),
         "observed_parser_outcomes": outcomes,
-        "privacy_contract": {
-            "raw_completion_serialized": False,
-            "raw_completion_sha256_serialized": False,
-            "problem_id_serialized": False,
-            "question_serialized": False,
-            "reference_answer_serialized": False,
-            "parsed_integer_value_serialized": False,
-            "locked_holdout_accessed": False,
-            "leaderboard_or_test_used": False,
-        },
+        "privacy_contract": _privacy_contract(),
     }
+
+
+def _input_evidence(
+    records_file: Path, manifest_file: Path, manifest: dict[str, Any]
+) -> dict[str, Any]:
+    return {
+        "records_sha256": sha256_file(records_file),
+        "manifest_sha256": sha256_file(manifest_file),
+        "record_count": manifest["record_count"],
+        "problem_count": manifest["problem_count"],
+        "fold": manifest["fold"],
+        "model_id": manifest["model_id"],
+        "revision": manifest["revision"],
+        "route": manifest["route"],
+        "checkpoint_sha256": manifest["checkpoint_sha256"],
+        "config_sha256": manifest["config_sha256"],
+        "split_sha256": manifest["split_sha256"],
+        "eligibility_ids_sha256": manifest["eligibility_ids_sha256"],
+        "partition": "fold_validation",
+        "split_partition": "cross_validation",
+    }
+
+
+def _privacy_contract() -> dict[str, bool]:
+    return {
+        "raw_completion_serialized": False,
+        "raw_completion_sha256_serialized": False,
+        "problem_id_serialized": False,
+        "question_serialized": False,
+        "reference_answer_serialized": False,
+        "parsed_integer_value_serialized": False,
+        "locked_holdout_accessed": False,
+        "leaderboard_or_test_used": False,
+    }
+
+
+def _status_counts(results: list[AnswerParseResult]) -> dict[str, int]:
+    return dict(sorted(Counter(result.status for result in results).items()))
 
 
 def _safe_reason_code(reason: str) -> str:
@@ -318,7 +509,7 @@ def _load_json_object(path: Path, label: str) -> dict[str, Any]:
             object_pairs_hook=_unique_json_object,
             parse_constant=_reject_json_constant,
         )
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, ValueError) as exc:
         raise ParserGoldenAuditError(f"invalid {label}: {exc}") from exc
     if not isinstance(value, dict):
         raise ParserGoldenAuditError(f"{label} must be a JSON object")
@@ -332,7 +523,7 @@ def _load_json_line(line: str, index: int) -> dict[str, Any]:
             object_pairs_hook=_unique_json_object,
             parse_constant=_reject_json_constant,
         )
-    except json.JSONDecodeError as exc:
+    except ValueError as exc:
         raise ParserGoldenAuditError(f"development row {index} is not valid JSON") from exc
     if not isinstance(value, dict):
         raise ParserGoldenAuditError(f"development row {index} must be a JSON object")
@@ -438,7 +629,9 @@ def _require_sha256(value: object, label: str) -> None:
 
 __all__ = [
     "PARSER_GOLDEN_AUDIT_SCHEMA",
+    "PARSER_RESCORE_AUDIT_SCHEMA",
     "ParserGoldenAuditError",
     "ParserGoldenAuditWriteResult",
     "audit_development_parser_golden",
+    "audit_development_parser_rescore",
 ]

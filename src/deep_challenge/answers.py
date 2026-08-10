@@ -74,17 +74,28 @@ _NUMERIC_LIKE_RE = re.compile(
 _FINAL_ANSWER_RE = re.compile(
     r"(?im)^[ \t]*(?:[-*][ \t]+)?(?:\*\*|__)?"
     r"(?:(?:therefore|thus|hence)[,:]?[ \t]+)?(?:the[ \t]+)?"
-    r"final[ \t]+answer\b(?:\*\*|__)?[ \t]*(?:is\b|[:=])?"
+    r"final[ \t]+answer\b(?:\*\*|__)?[ \t]*"
+    r"(?:is\b[ \t]*(?:[:=])?|[:=])?"
     r"[ \t]*(?:\*\*|__)?[ \t]*"
     r"(?P<payload>[^\r\n]*)"
 )
 _HASHES_RE = re.compile(r"(?m)^[ \t]*####[ \t]*(?P<payload>[^\r\n]*)")
 _ANSWER_RE = re.compile(
     r"(?im)^[ \t]*(?:[-*][ \t]+)?(?:\*\*|__)?"
-    r"answer\b(?:\*\*|__)?[ \t]*(?:is\b|[:=])?[ \t]*(?:\*\*|__)?"
-    r"[ \t]*(?P<payload>[^\r\n]*)"
+    r"answer\b(?:\*\*|__)?[ \t]*(?:is\b[ \t]*(?:[:=])?|[:=])?"
+    r"[ \t]*(?:\*\*|__)?[ \t]*"
+    r"(?P<payload>[^\r\n]*)"
 )
 _BOX_COMMAND_RE = re.compile(r"\\(?:boxed|fbox)\s*")
+_NESTED_ANSWER_LABEL_RE = re.compile(
+    r"(?is)^(?:(?:the[ \t]+)?final[ \t]+answer|answer)\b"
+    r"(?:[ \t]+is\b[ \t]*(?:[:=])?|[ \t]*[:=])?[ \t]*"
+    r"(?P<payload>.+)$"
+)
+_LATEX_ANSWER_LABEL_RE = re.compile(
+    r"(?is)^\\text\{[ \t]*(?:(?:the[ \t]+)?final[ \t]+answer|answer)"
+    r"[ \t]*:?[ \t]*\}[ \t]*(?:[:=])?[ \t]*(?P<payload>.+)$"
+)
 
 
 def parse_answer(completion: str) -> AnswerParseResult:
@@ -137,6 +148,17 @@ def _line_marker_candidates(text: str, pattern: re.Pattern[str]) -> list[_Candid
     candidates: list[_Candidate] = []
     for match in pattern.finditer(text):
         payload = match.group("payload").strip()
+        line = match.group(0).strip()
+        line_without_bullet = re.sub(r"^[-*][ \t]+", "", line, count=1)
+        for decoration in ("**", "__"):
+            if (
+                line_without_bullet.startswith(decoration)
+                and line_without_bullet.endswith(decoration)
+                and payload.endswith(decoration)
+                and not payload.startswith(decoration)
+            ):
+                payload = payload[: -len(decoration)].rstrip()
+                break
         if not payload:
             payload = _next_nonempty_line(text, match.end())
         candidates.append(_Candidate(payload, None if payload else "empty_marker_payload"))
@@ -318,6 +340,12 @@ def _normalize_presentation(payload: str) -> str:
         if unwrapped is not None:
             text = unwrapped.strip()
             changed = True
+        for marker_pattern in (_NESTED_ANSWER_LABEL_RE, _LATEX_ANSWER_LABEL_RE):
+            nested = marker_pattern.fullmatch(text)
+            if nested is not None:
+                text = nested.group("payload").strip()
+                changed = True
+                break
         text = _strip_sentence_punctuation(text)
     return text.strip()
 

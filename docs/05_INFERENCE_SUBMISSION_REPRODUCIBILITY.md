@@ -172,6 +172,15 @@ byte와 run-level generation evidence를 결속했다. raw-free parser audit v4�
 outcome class를 검증했으므로 이 v2 bundle은 같은 fold의 QLoRA authorization 입력으로 쓸 수
 있다. 이후 source 문서가 바뀌면 새 source manifest와 B0 pair를 다시 만든다.
 
+실제 QLoRA output까지 얻은 뒤 parser audit v5는 `ok=2940`, `invalid=2`의 3개 aggregate
+outcome class를 확인했다. 이어 base의 `Final answer is:`가 `is` 뒤 콜론을 payload에 남기고,
+동일 marker가 중첩된 안전한 표기를 거부하던 문제를 고쳤다. 새 parser는 selected marker
+class의 모든 값을 계속 비교하므로 기존 conflict 3건을 숨기지 않는다. immutable raw bundle을
+변경하지 않는 `audit-parser-rescore` 결과는 base 1,210→1,653 exact, invalid 796→234,
+adapter 변경 0건이다. 이 artifact는 `selection_eligible=false`와
+`requires_current_source_run_before_freeze=true`를 명시하므로 current-source bundle 전에는
+freeze/holdout/submission 근거가 아니다.
+
 `audit-parser-golden`은 이 작업의 private CPU-only 입력 검증 단계다. manifest checksum과
 JSONL line count, fold-validation/cross-validation partition, 각 row의 completion hash와
 stored parse result를 다시 대조한 뒤, raw completion/ID/question/reference answer/parsed
@@ -185,6 +194,12 @@ uv run deep-challenge audit-parser-golden \
   --records "$RUN_DIR/base-direct-predictions.jsonl" \
   --manifest "$RUN_DIR/base-direct-manifest.json" \
   --output "artifacts/analysis/parser-golden-<RUN_TAG>-fold0.json"
+
+# parser source가 바뀐 경우 기존 immutable run은 diagnostic으로만 비교한다.
+uv run deep-challenge audit-parser-rescore \
+  --records "$RUN_DIR/base-direct-predictions.jsonl" \
+  --manifest "$RUN_DIR/base-direct-manifest.json" \
+  --output "artifacts/analysis/parser-rescore-<RUN_TAG>-fold0-base-v1.json"
 ```
 
 이 명령이 holdout/non-development partition, stale checksum, parser mismatch를 발견하면
@@ -457,6 +472,7 @@ Fallback도 사전에 full rehearsal해야 한다.
 - [ ] test와 model artifact checksum
 - [ ] network-off full run 2회
 - [x] parser golden tests (actual fold-0 diagnostic의 redacted outcome class 기반)
+- [x] parser 변경 전후 raw-free rescore와 selection-ineligible gate
 - [x] production validator와 독립 최소 CSV validator 교차검증 구현
 - [ ] 모든 ID의 raw generation과 selected answer provenance
 - [ ] runtime이 window의 50% 이하인 여유 계획

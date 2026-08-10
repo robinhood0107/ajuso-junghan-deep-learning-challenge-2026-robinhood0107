@@ -48,6 +48,7 @@ _TRAIN_ID_RE = re.compile(r"train-\d{6}\Z")
 _LABEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
 _MAX_JSONL_LINE_BYTES = 16 * 1024 * 1024
 _COMPARISON_SCHEMA = "gate-b-development-comparison-v2"
+_PROBE_DECISION_SCHEMA = "gate-b-candidate-probe-decision-v1"
 _OOF_COMPARISON_SCHEMA = "gate-b-development-oof-comparison-v1"
 _FREEZE_SCHEMA = "gate-b-selection-freeze-v3"
 _HOLDOUT_SCHEMA = "gate-b-locked-holdout-access-v1"
@@ -448,6 +449,252 @@ def compare_development_runs(
         },
         "comparisons": comparisons,
         "fallback_routing_comparisons": fallback_routing_comparisons,
+    }
+    return _write_hashed_json_noreplace(output_path, payload_without_hash)
+
+
+def decide_candidate_probe_promotion(
+    comparison_artifact: str | Path,
+    *,
+    candidate_label: str,
+    output_path: str | Path,
+) -> GateBSelectionWriteResult:
+    """Apply the fixed single-fold harm screen before spending more GPU time.
+
+    This decision is intentionally cost-control evidence only.  A candidate is
+    stopped when its paired delta is negative, the entire cluster-bootstrap
+    interval is below zero, and its Holm-adjusted exact McNemar test rejects at
+    the comparison artifact's alpha.  Every other outcome may continue to the
+    complete OOF experiment, but can never be frozen from this probe alone.
+    """
+
+    source, comparison, comparison_sha = _load_hashed_json_artifact(
+        comparison_artifact, expected_schema=_COMPARISON_SCHEMA
+    )
+    candidate = _validated_label(candidate_label)
+    if comparison.get("partition") != "fold_validation":
+        raise GateBValidationError("candidate probe must use one fold-validation run")
+    if comparison.get("locked_holdout_accessed") is not False:
+        raise GateBValidationError("candidate probe must not access the locked holdout")
+    if comparison.get("leaderboard_or_test_used") is not False:
+        raise GateBValidationError("candidate probe must not use leaderboard/test data")
+    if comparison.get("model_id") != OFFICIAL_MODEL_ID:
+        raise GateBValidationError("candidate probe does not bind the official model")
+    if comparison.get("revision") != PINNED_MODEL_REVISION:
+        raise GateBValidationError("candidate probe does not bind the pinned revision")
+
+    reference = _validated_label(
+        _required_string(comparison.get("reference_label"), "reference_label")
+    )
+    comparisons = comparison.get("comparisons")
+    if not isinstance(comparisons, list):
+        raise GateBValidationError("candidate probe comparisons must be a list")
+    matches = [
+        item
+        for item in comparisons
+        if isinstance(item, Mapping) and item.get("candidate_label") == candidate
+    ]
+    if len(matches) != 1:
+        raise GateBValidationError(
+            "candidate probe must contain exactly one comparison for the label"
+        )
+    evidence = matches[0]
+    if evidence.get("reference_label") != reference:
+        raise GateBValidationError("candidate probe reference label mismatch")
+
+    statistics = comparison.get("statistics")
+    if not isinstance(statistics, Mapping):
+        raise GateBValidationError("candidate probe lacks statistical provenance")
+    if statistics.get("paired") is not True:
+        raise GateBValidationError("candidate probe statistics must be paired")
+    if statistics.get("bootstrap_unit") != "duplicate_cluster":
+        raise GateBValidationError("candidate probe must bootstrap duplicate clusters")
+    if statistics.get("mcnemar") != "exact_two_sided":
+        raise GateBValidationError("candidate probe must use exact two-sided McNemar")
+    if statistics.get("multiple_comparisons") != "holm_bonferroni":
+        raise GateBValidationError("candidate probe must use Holm correction")
+    alpha = _required_probability(
+        statistics.get("alpha"), "statistics alpha", open_interval=True
+    )
+    confidence = _required_probability(
+        statistics.get("confidence"), "statistics confidence", open_interval=True
+    )
+    if not math.isclose(confidence, 1.0 - alpha, rel_tol=0.0, abs_tol=1e-15):
+        raise GateBValidationError(
+            "candidate probe confidence must equal one minus alpha"
+        )
+    bootstrap_samples = statistics.get("bootstrap_samples")
+    if type(bootstrap_samples) is not int or bootstrap_samples <= 0:
+        raise GateBValidationError(
+            "candidate probe bootstrap_samples must be a positive integer"
+        )
+    family_size = statistics.get("family_size")
+    if type(family_size) is not int or family_size <= 0:
+        raise GateBValidationError(
+            "candidate probe family_size must be a positive integer"
+        )
+    accuracy_reference = _required_probability(
+        evidence.get("accuracy_a"),
+        "reference accuracy",
+        open_interval=False,
+    )
+    accuracy_candidate = _required_probability(
+        evidence.get("accuracy_b"),
+        "candidate accuracy",
+        open_interval=False,
+    )
+    delta = _required_finite_number(
+        evidence.get("delta_b_minus_a"), "candidate delta_b_minus_a"
+    )
+    if not math.isclose(
+        delta,
+        accuracy_candidate - accuracy_reference,
+        rel_tol=0.0,
+        abs_tol=1e-15,
+    ):
+        raise GateBValidationError("candidate delta disagrees with run accuracies")
+    ci_low = _required_finite_number(
+        evidence.get("bootstrap_delta_ci_low"), "candidate bootstrap CI low"
+    )
+    ci_high = _required_finite_number(
+        evidence.get("bootstrap_delta_ci_high"), "candidate bootstrap CI high"
+    )
+    if ci_low > ci_high:
+        raise GateBValidationError("candidate bootstrap CI bounds are reversed")
+    if ci_low < -1.0 or ci_high > 1.0:
+        raise GateBValidationError("candidate bootstrap CI must remain within [-1, 1]")
+    if evidence.get("bootstrap_unit") != "duplicate_cluster":
+        raise GateBValidationError(
+            "candidate evidence must use duplicate-cluster bootstrap"
+        )
+    if evidence.get("bootstrap_samples") != bootstrap_samples:
+        raise GateBValidationError(
+            "candidate bootstrap_samples disagree with statistical provenance"
+        )
+    bootstrap_group_count = evidence.get("bootstrap_group_count")
+    if type(bootstrap_group_count) is not int or bootstrap_group_count <= 0:
+        raise GateBValidationError(
+            "candidate bootstrap_group_count must be a positive integer"
+        )
+    problem_count = comparison.get("problem_count")
+    if type(problem_count) is not int or problem_count <= 0:
+        raise GateBValidationError("candidate probe problem_count must be positive")
+    contingency_fields = ("both_correct", "both_wrong", "only_a_correct", "only_b_correct")
+    contingency: dict[str, int] = {}
+    for field_name in contingency_fields:
+        value = evidence.get(field_name)
+        if type(value) is not int or value < 0:
+            raise GateBValidationError(
+                f"candidate contingency {field_name} must be non-negative"
+            )
+        contingency[field_name] = value
+    evidence_total = evidence.get("total")
+    if (
+        sum(contingency.values()) != problem_count
+        or type(evidence_total) is not int
+        or evidence_total != problem_count
+    ):
+        raise GateBValidationError("candidate contingency does not match problem_count")
+    contingency_accuracy_reference = (
+        contingency["both_correct"] + contingency["only_a_correct"]
+    ) / problem_count
+    contingency_accuracy_candidate = (
+        contingency["both_correct"] + contingency["only_b_correct"]
+    ) / problem_count
+    contingency_delta = (
+        contingency["only_b_correct"] - contingency["only_a_correct"]
+    ) / problem_count
+    if not math.isclose(
+        accuracy_reference,
+        contingency_accuracy_reference,
+        rel_tol=0.0,
+        abs_tol=1e-15,
+    ) or not math.isclose(
+        accuracy_candidate,
+        contingency_accuracy_candidate,
+        rel_tol=0.0,
+        abs_tol=1e-15,
+    ):
+        raise GateBValidationError(
+            "candidate accuracies disagree with the paired contingency"
+        )
+    if not math.isclose(
+        delta,
+        contingency_delta,
+        rel_tol=0.0,
+        abs_tol=1e-15,
+    ):
+        raise GateBValidationError(
+            "candidate delta disagrees with the paired contingency"
+        )
+    mcnemar_p = _required_probability(
+        evidence.get("mcnemar_exact_p_value"),
+        "candidate exact McNemar p-value",
+        open_interval=False,
+    )
+    holm_family = _validated_probe_holm_family(
+        comparison,
+        comparisons=comparisons,
+        alpha=alpha,
+        family_size=family_size,
+    )
+    holm = holm_family[candidate]
+    raw_p = holm.raw_p_value
+    adjusted_p = holm.adjusted_p_value
+    reject = holm.reject
+    if raw_p != mcnemar_p:
+        raise GateBValidationError("candidate Holm raw p-value disagrees with McNemar")
+
+    significant_regression = delta < 0.0 and ci_high < 0.0 and reject
+    action = (
+        "stop_before_remaining_folds"
+        if significant_regression
+        else "continue_to_complete_oof"
+    )
+    payload_without_hash: dict[str, Any] = {
+        "schema_version": _PROBE_DECISION_SCHEMA,
+        "decision_scope": "single_fold_gpu_cost_control_only",
+        "policy": {
+            "name": "single_fold_significant_harm_screen_v1",
+            "stop_if": (
+                "delta_b_minus_a<0 and bootstrap_delta_ci_high<0 and "
+                "holm_reject_at_comparison_alpha"
+            ),
+            "alpha": alpha,
+        },
+        "comparison_artifact": {
+            "path": str(source),
+            "size_bytes": source.stat().st_size,
+            "sha256": comparison_sha,
+            "payload_sha256": comparison["payload_sha256"],
+        },
+        "model_id": OFFICIAL_MODEL_ID,
+        "revision": PINNED_MODEL_REVISION,
+        "split_version": comparison.get("split_version"),
+        "split_sha256": comparison.get("split_sha256"),
+        "source_groups_sha256": comparison.get("source_groups_sha256"),
+        "fold": comparison.get("fold"),
+        "reference_label": reference,
+        "candidate_label": candidate,
+        "evidence": {
+            "problem_count": problem_count,
+            "accuracy_reference": accuracy_reference,
+            "accuracy_candidate": accuracy_candidate,
+            "delta_candidate_minus_reference": delta,
+            "bootstrap_delta_ci_low": ci_low,
+            "bootstrap_delta_ci_high": ci_high,
+            "mcnemar_exact_p_value": mcnemar_p,
+            "holm_adjusted_p_value": adjusted_p,
+            "holm_reject": reject,
+        },
+        "significant_regression": significant_regression,
+        "candidate_action": action,
+        "candidate_full_oof_authorized": not significant_regression,
+        "final_selection_eligible": False,
+        "complete_oof_required_before_freeze": True,
+        "selection_frozen": False,
+        "locked_holdout_accessed": False,
+        "leaderboard_or_test_used": False,
     }
     return _write_hashed_json_noreplace(output_path, payload_without_hash)
 
@@ -2209,6 +2456,118 @@ def _required_sha256(value: object, field_name: str) -> str:
     return value
 
 
+def _required_finite_number(value: object, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise GateBValidationError(f"{field_name} must be numeric")
+    result = float(value)
+    if not math.isfinite(result):
+        raise GateBValidationError(f"{field_name} must be finite")
+    return result
+
+
+def _validated_probe_holm_family(
+    comparison: Mapping[str, Any],
+    *,
+    comparisons: list[object],
+    alpha: float,
+    family_size: int,
+) -> dict[str, Any]:
+    family_entries: list[tuple[str, Mapping[str, Any]]] = []
+    for item in comparisons:
+        if not isinstance(item, Mapping):
+            raise GateBValidationError("candidate probe comparison must be an object")
+        hypothesis = _validated_label(
+            _required_string(item.get("candidate_label"), "candidate label")
+        )
+        family_entries.append((hypothesis, item))
+    fallback_entries = comparison.get("fallback_routing_comparisons")
+    if not isinstance(fallback_entries, list):
+        raise GateBValidationError(
+            "candidate probe fallback comparisons must be a list"
+        )
+    for item in fallback_entries:
+        if not isinstance(item, Mapping):
+            raise GateBValidationError(
+                "candidate probe fallback comparison must be an object"
+            )
+        hypothesis = _required_string(
+            item.get("hypothesis"), "fallback hypothesis"
+        )
+        family_entries.append((hypothesis, item))
+    if len(family_entries) != family_size:
+        raise GateBValidationError(
+            "candidate probe family_size disagrees with comparison entries"
+        )
+
+    raw_p_values: dict[str, float] = {}
+    stored_holm: dict[str, Mapping[str, Any]] = {}
+    for hypothesis, item in family_entries:
+        if hypothesis in raw_p_values:
+            raise GateBValidationError(
+                "candidate probe Holm hypotheses must be unique"
+            )
+        raw_p_values[hypothesis] = _required_probability(
+            item.get("mcnemar_exact_p_value"),
+            f"Holm raw p-value for {hypothesis}",
+            open_interval=False,
+        )
+        holm = item.get("holm")
+        if not isinstance(holm, Mapping) or holm.get("hypothesis") != hypothesis:
+            raise GateBValidationError(
+                "candidate probe lacks matching Holm evidence"
+            )
+        stored_holm[hypothesis] = holm
+
+    expected = {
+        item.hypothesis: item
+        for item in holm_bonferroni(raw_p_values, alpha=alpha)
+    }
+    for hypothesis, holm in stored_holm.items():
+        raw_p = _required_probability(
+            holm.get("raw_p_value"),
+            f"Holm stored raw p-value for {hypothesis}",
+            open_interval=False,
+        )
+        adjusted_p = _required_probability(
+            holm.get("adjusted_p_value"),
+            f"Holm adjusted p-value for {hypothesis}",
+            open_interval=False,
+        )
+        reject = holm.get("reject")
+        if type(reject) is not bool:
+            raise GateBValidationError("candidate Holm reject must be boolean")
+        expected_item = expected[hypothesis]
+        if (
+            raw_p != expected_item.raw_p_value
+            or not math.isclose(
+                adjusted_p,
+                expected_item.adjusted_p_value,
+                rel_tol=0.0,
+                abs_tol=1e-15,
+            )
+            or reject != expected_item.reject
+        ):
+            raise GateBValidationError(
+                "candidate Holm evidence disagrees with the full comparison family"
+            )
+    return expected
+
+
+def _required_probability(
+    value: object, field_name: str, *, open_interval: bool
+) -> float:
+    result = _required_finite_number(value, field_name)
+    valid = 0.0 < result < 1.0 if open_interval else 0.0 <= result <= 1.0
+    if not valid:
+        interval = (
+            "strictly between zero and one"
+            if open_interval
+            else "between zero and one"
+        )
+        raise GateBValidationError(f"{field_name} must be {interval}")
+    return result
+
+
 def _ids_sha256(values: Sequence[str]) -> str:
     return hashlib.sha256(canonical_json_bytes(list(values))).hexdigest()
 
@@ -2242,6 +2601,7 @@ __all__ = [
     "authorize_locked_holdout_once",
     "compare_development_runs",
     "compare_cross_fold_development_runs",
+    "decide_candidate_probe_promotion",
     "freeze_development_selection",
     "require_base_development_artifact",
     "validate_frozen_selection_methods",

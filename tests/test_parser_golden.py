@@ -12,10 +12,14 @@ import pytest
 
 from deep_challenge.answers import parse_answer
 from deep_challenge.cli import main
+from deep_challenge.gate_b import PINNED_MODEL_REVISION
+from deep_challenge.model_preflight import OFFICIAL_MODEL_ID
 from deep_challenge.parser_golden import (
     PARSER_GOLDEN_AUDIT_SCHEMA,
+    PARSER_RESCORE_AUDIT_SCHEMA,
     ParserGoldenAuditError,
     audit_development_parser_golden,
+    audit_development_parser_rescore,
 )
 
 
@@ -23,13 +27,14 @@ def _write_bundle(tmp_path: Path, completions: list[str]) -> tuple[Path, Path]:
     rows: list[dict[str, object]] = []
     for index, completion in enumerate(completions):
         parsed = parse_answer(completion)
+        reference_answer = parsed.value if parsed.ok else 0
         rows.append(
             {
                 "schema_version": "gate-b1-development-baseline-v2",
                 "problem_id": f"synthetic-{index:03d}",
-                "model_id": "Qwen/Qwen2.5-3B-Instruct",
-                "revision": "a" * 40,
-                "route": "direct-answer",
+                "model_id": OFFICIAL_MODEL_ID,
+                "revision": PINNED_MODEL_REVISION,
+                "route": "direct_answer",
                 "config_sha256": "c" * 64,
                 "checkpoint_sha256": "b" * 64,
                 "split_version": "v4",
@@ -44,6 +49,8 @@ def _write_bundle(tmp_path: Path, completions: list[str]) -> tuple[Path, Path]:
                     completion.encode("utf-8")
                 ).hexdigest(),
                 "parse": asdict(parsed),
+                "reference_answer": reference_answer,
+                "exact_match": parsed.ok and parsed.value == reference_answer,
             }
         )
     records = tmp_path / "development.jsonl"
@@ -60,9 +67,9 @@ def _write_bundle(tmp_path: Path, completions: list[str]) -> tuple[Path, Path]:
         "record_count": len(rows),
         "problem_count": len(rows),
         "samples_per_problem": 1,
-        "model_id": "Qwen/Qwen2.5-3B-Instruct",
-        "revision": "a" * 40,
-        "route": "direct-answer",
+        "model_id": OFFICIAL_MODEL_ID,
+        "revision": PINNED_MODEL_REVISION,
+        "route": "direct_answer",
         "checkpoint_sha256": "b" * 64,
         "config_sha256": "c" * 64,
         "split_version": "v4",
@@ -75,6 +82,9 @@ def _write_bundle(tmp_path: Path, completions: list[str]) -> tuple[Path, Path]:
         "parser_status_counts": dict(
             sorted(Counter(parse_answer(value).status for value in completions).items())
         ),
+        "exact_match_count": sum(parse_answer(value).ok for value in completions),
+        "exact_match_accuracy": sum(parse_answer(value).ok for value in completions)
+        / len(completions),
         "execution_evidence": {},
         "generation_evidence": {},
     }
@@ -161,6 +171,85 @@ def test_parser_golden_audit_rejects_parser_mismatch_without_output(tmp_path: Pa
     assert not output.exists()
 
 
+def test_parser_golden_audit_rejects_inconsistent_exact_match_without_output(
+    tmp_path: Path,
+) -> None:
+    records, manifest = _write_bundle(tmp_path, ["Final answer: 5"])
+    row = json.loads(records.read_text(encoding="utf-8"))
+    row["exact_match"] = False
+    records.write_text(json.dumps(row, sort_keys=True) + "\n", encoding="utf-8")
+    _rewrite_manifest_for_records(records, manifest)
+    output = tmp_path / "must-not-exist.json"
+
+    with pytest.raises(ParserGoldenAuditError, match="stored exact_match"):
+        audit_development_parser_golden(records, manifest, output_path=output)
+
+    assert not output.exists()
+
+
+def test_parser_golden_audit_rejects_manifest_exact_match_count_mismatch(
+    tmp_path: Path,
+) -> None:
+    records, manifest = _write_bundle(tmp_path, ["Final answer: 5"])
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["exact_match_count"] = 0
+    payload["exact_match_accuracy"] = 0.0
+    manifest.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(ParserGoldenAuditError, match="exact_match_count does not match"):
+        audit_development_parser_golden(
+            records,
+            manifest,
+            output_path=tmp_path / "must-not-exist.json",
+        )
+
+
+def test_parser_rescore_reports_aggregate_gain_without_promoting_selection(
+    tmp_path: Path,
+) -> None:
+    records, manifest = _write_bundle(
+        tmp_path, ["The final answer is: Final answer: 8"]
+    )
+    row = json.loads(records.read_text(encoding="utf-8"))
+    row["parse"] = {
+        "status": "invalid",
+        "value": None,
+        "source": "final_answer",
+        "reason": "marker_1:unsupported_numeric_payload",
+    }
+    row["exact_match"] = False
+    row["reference_answer"] = 8
+    records.write_text(json.dumps(row, sort_keys=True) + "\n", encoding="utf-8")
+    _rewrite_manifest_for_records(records, manifest)
+    manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest_payload["parser_status_counts"] = {"invalid": 1}
+    manifest_payload["exact_match_count"] = 0
+    manifest_payload["exact_match_accuracy"] = 0.0
+    manifest.write_text(
+        json.dumps(manifest_payload, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    output = tmp_path / "parser-rescore.json"
+
+    result = audit_development_parser_rescore(records, manifest, output_path=output)
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert result.case_count == 1
+    assert payload["schema_version"] == PARSER_RESCORE_AUDIT_SCHEMA
+    assert payload["stored"]["exact_match_count"] == 0
+    assert payload["current"]["exact_match_count"] == 1
+    assert payload["exact_match_delta"] == 1
+    assert payload["changed_parser_result_count"] == 1
+    assert payload["selection_eligible"] is False
+    assert payload["requires_current_source_run_before_freeze"] is True
+    assert payload["privacy_contract"]["raw_completion_serialized"] is False
+    rendered = output.read_text(encoding="utf-8")
+    assert "Final answer: 8" not in rendered
+    assert "synthetic-000" not in rendered
+
+    with pytest.raises(FileExistsError, match="refusing to overwrite"):
+        audit_development_parser_rescore(records, manifest, output_path=output)
+
+
 def test_parser_golden_audit_rejects_non_development_partition(tmp_path: Path) -> None:
     records, manifest = _write_bundle(tmp_path, ["Final answer: 5"])
     payload = json.loads(manifest.read_text(encoding="utf-8"))
@@ -169,6 +258,33 @@ def test_parser_golden_audit_rejects_non_development_partition(tmp_path: Path) -
     manifest.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
 
     with pytest.raises(ParserGoldenAuditError, match="fold_validation"):
+        audit_development_parser_golden(
+            records,
+            manifest,
+            output_path=tmp_path / "must-not-exist.json",
+        )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "bad_value", "message"),
+    [
+        ("model_id", "forbidden/model", "official model"),
+        ("revision", "0" * 40, "pinned revision"),
+        ("route", "chain_of_thought", "route must be direct_answer"),
+    ],
+)
+def test_parser_golden_audit_enforces_fixed_model_contract(
+    tmp_path: Path,
+    field_name: str,
+    bad_value: str,
+    message: str,
+) -> None:
+    records, manifest = _write_bundle(tmp_path, ["Final answer: 5"])
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload[field_name] = bad_value
+    manifest.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(ParserGoldenAuditError, match=message):
         audit_development_parser_golden(
             records,
             manifest,
@@ -196,6 +312,32 @@ def test_parser_golden_cli_reports_only_safe_summary(tmp_path: Path, capsys) -> 
     )
     report = json.loads(capsys.readouterr().out)
     assert report["case_count"] == 1
+    assert report["raw_completion_serialized"] is False
+    assert report["locked_holdout_accessed"] is False
+    assert report["leaderboard_or_test_used"] is False
+
+
+def test_parser_rescore_cli_reports_only_safe_summary(tmp_path: Path, capsys) -> None:
+    records, manifest = _write_bundle(tmp_path, ["Final answer: 5"])
+    output = tmp_path / "parser-rescore.json"
+
+    assert (
+        main(
+            [
+                "audit-parser-rescore",
+                "--records",
+                str(records),
+                "--manifest",
+                str(manifest),
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["changed_parser_result_count"] == 0
+    assert report["selection_eligible"] is False
     assert report["raw_completion_serialized"] is False
     assert report["locked_holdout_accessed"] is False
     assert report["leaderboard_or_test_used"] is False
