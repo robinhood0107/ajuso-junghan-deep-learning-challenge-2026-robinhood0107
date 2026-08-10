@@ -1,0 +1,24 @@
+{
+  "allow_leaderboard_or_test": false,
+  "allow_locked_holdout": false,
+  "allow_python_or_sympy_tool": false,
+  "allowed_verification_methods": [
+    "reference_answer_exact_match",
+    "human_reviewed_reference_answer_exact_match"
+  ],
+  "candidate_label": "qlora-concise-rationale-v1",
+  "config_sha256": "75a315b638481a0c8213c413aa3a1253d269776d08bd2252b68654fb38c3f053",
+  "inference_route": "direct_answer",
+  "max_rationale_characters": 1500,
+  "max_rationale_lines": 12,
+  "min_rationale_characters": 16,
+  "require_exact_fold_training_coverage": true,
+  "require_reference_answer_exact_match": true,
+  "require_reference_answer_hidden_from_teacher": true,
+  "require_training_only_teacher_scope": true,
+  "required_final_marker": "Final answer:",
+  "schema_version": "gate-b-concise-rationale-candidate-v1",
+  "student_model_id": "Qwen/Qwen2.5-3B-Instruct",
+  "student_revision": "aa8e72537993ba99e69dfaafa59ed015b17504d1",
+  "training_target_kind": "verified_concise_rationale"
+}

@@ -48,6 +48,13 @@ from deep_challenge.provenance import (
     validate_source_tree_manifest_artifact,
     write_json_atomic,
 )
+from deep_challenge.rationale_corpus import (
+    DEFAULT_CONCISE_RATIONALE_CONFIG,
+    audit_rationale_corpus,
+    build_rationale_corpus,
+    load_concise_rationale_config,
+    load_verified_rationale_corpus,
+)
 from deep_challenge.splits import (
     SplitManifest,
     eligible_training_ids,
@@ -129,6 +136,105 @@ def _split_manifest() -> SplitManifest:
 
 def _records(identifiers: tuple[str, ...]) -> tuple[MathRecord, ...]:
     return tuple(_record(identifier) for identifier in identifiers)
+
+
+def _rationale_corpus_evidence(
+    tmp_path: Path,
+    manifest: SplitManifest,
+    records: tuple[MathRecord, ...],
+    *,
+    fold: int,
+    excluded_ids: tuple[str, ...],
+):
+    candidate_config_path = Path(
+        "configs/gate_b/rtx4070-super-12gb-concise-rationale-v1.json"
+    )
+    candidate_config, config_file_sha256 = load_concise_rationale_config(
+        candidate_config_path
+    )
+    source = tmp_path / "teacher-rationales.jsonl"
+    rows = []
+    for record in records:
+        target = (
+            "The identifier directly determines the requested integer.\n"
+            f"Final answer: {record.answer}"
+        )
+        rows.append(
+            {
+                "schema_version": "gate-b-concise-rationale-row-v1",
+                "problem_id": record.id,
+                "question_sha256": hashlib.sha256(
+                    record.question_raw.encode("utf-8")
+                ).hexdigest(),
+                "target_text": target,
+                "target_sha256": hashlib.sha256(target.encode("utf-8")).hexdigest(),
+                "teacher": {
+                    "provider": "local-test-provider",
+                    "model_id": "teacher-test-model",
+                    "model_revision": "teacher-test-revision",
+                    "prompt_sha256": "5" * 64,
+                    "generation_config_sha256": "6" * 64,
+                    "seed": 7,
+                    "sample_index": 0,
+                    "raw_generation_sha256": "7" * 64,
+                    "reference_answer_in_prompt": False,
+                    "network_scope": "training_only",
+                },
+                "verification": {
+                    "status": "accepted",
+                    "method": "reference_answer_exact_match",
+                    "leaderboard_or_test_used": False,
+                    "locked_holdout_accessed": False,
+                    "tool_used": False,
+                },
+            }
+        )
+    source.write_text(
+        "".join(
+            json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+            for row in rows
+        ),
+        encoding="utf-8",
+    )
+    corpus_root = tmp_path / "rationale-corpus"
+    corpus_root.mkdir()
+    corpus = corpus_root / "rationales.jsonl"
+    corpus_manifest = corpus_root / "manifest.json"
+    build_rationale_corpus(
+        source,
+        records,
+        split_manifest=manifest,
+        fold=fold,
+        excluded_ids=excluded_ids,
+        candidate_config_file_sha256=config_file_sha256,
+        output_jsonl=corpus,
+        output_manifest=corpus_manifest,
+        config=candidate_config,
+    )
+    audit = tmp_path / "rationale-audit.json"
+    audit_rationale_corpus(
+        corpus,
+        corpus_manifest,
+        records,
+        split_manifest=manifest,
+        fold=fold,
+        excluded_ids=excluded_ids,
+        candidate_config_file_sha256=config_file_sha256,
+        output_path=audit,
+        config=candidate_config,
+    )
+    evidence = load_verified_rationale_corpus(
+        corpus,
+        corpus_manifest,
+        records,
+        split_manifest=manifest,
+        fold=fold,
+        excluded_ids=excluded_ids,
+        candidate_config_file_sha256=config_file_sha256,
+        audit_path=audit,
+        config=candidate_config,
+    )
+    return evidence, candidate_config
 
 
 def _data_provenance_args() -> dict[str, str]:
@@ -595,6 +701,81 @@ def test_qlora_fold_training_publishes_complete_atomic_no_overwrite_bundle(
             runtime_factory=unexpected_factory,
         )
     assert factory_called is False
+
+
+def test_rationale_qlora_training_publishes_v4_target_provenance(
+    tmp_path: Path,
+) -> None:
+    preflight, smoke = _gate_artifacts(tmp_path)
+    manifest = _split_manifest()
+    excluded = (manifest.training_ids(0)[0],)
+    training_ids = eligible_training_ids(manifest, 0, excluded)
+    validation_ids = eligible_validation_ids(manifest, 0, excluded)
+    training_records = _records(training_ids)
+    rationale_corpus, rationale_config = _rationale_corpus_evidence(
+        tmp_path,
+        manifest,
+        training_records,
+        fold=0,
+        excluded_ids=excluded,
+    )
+    fake = _TrainingRuntime()
+    output = tmp_path / "adapter-rationale-fold-0"
+
+    artifact = train_qlora_fold(
+        training_records,
+        _records(validation_ids),
+        split_manifest=manifest,
+        fold=0,
+        excluded_ids=excluded,
+        **_data_provenance_args(),
+        source_manifest=_source_manifest_evidence(tmp_path),
+        preflight_artifact=preflight,
+        gpu_smoke_artifact=smoke,
+        output_dir=output,
+        gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+        rationale_corpus=rationale_corpus,
+        rationale_config=rationale_config,
+        runtime_factory=lambda _evidence: fake,
+    )
+
+    validated = validate_adapter_artifact(output)
+    private_manifest = json.loads(
+        (output / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert artifact.training_target_kind == "verified_concise_rationale"
+    assert validated.training_target_kind == "verified_concise_rationale"
+    assert validated.rationale_candidate_config_sha256 == (
+        DEFAULT_CONCISE_RATIONALE_CONFIG.sha256
+    )
+    assert validated.rationale_candidate_config_file_sha256 == (
+        rationale_corpus.candidate_config_file_sha256
+    )
+    assert validated.rationale_corpus_records_sha256 == rationale_corpus.records_sha256
+    assert validated.rationale_corpus_manifest_sha256 == rationale_corpus.manifest_sha256
+    assert validated.rationale_corpus_audit_sha256 == rationale_corpus.audit_sha256
+    assert private_manifest["schema_version"] == "gate-b-qlora-adapter-v4"
+    assert private_manifest["training_target"]["kind"] == (
+        "verified_concise_rationale"
+    )
+
+    private_manifest["training_target"]["candidate_config_sha256"] = "f" * 64
+    manifest_bytes = (
+        json.dumps(private_manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    ).encode("utf-8")
+    (output / "manifest.json").write_bytes(manifest_bytes)
+    checksums = (output / "CHECKSUMS.sha256").read_text(encoding="utf-8").splitlines()
+    replacement = f"{hashlib.sha256(manifest_bytes).hexdigest()}  manifest.json"
+    (output / "CHECKSUMS.sha256").write_text(
+        "\n".join(
+            replacement if line.endswith("  manifest.json") else line
+            for line in checksums
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(GateBValidationError, match="locked v1 policy"):
+        validate_adapter_artifact(output)
 
 
 def test_pinned_tokenizer_export_copies_exact_cache_bytes(tmp_path: Path) -> None:

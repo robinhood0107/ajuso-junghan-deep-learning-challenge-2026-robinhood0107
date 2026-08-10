@@ -9,6 +9,7 @@ import pytest
 
 import deep_challenge.cli as cli_module
 from deep_challenge.cli import main
+from deep_challenge.data import load_train_csv
 from deep_challenge.gate_b import DEFAULT_GATE_B_CONFIG, GenerationResult
 from deep_challenge.gate_b_prediction import PredictionArtifactWriteResult
 from deep_challenge.gate_b_runtime import RuntimeGateEvidence, TrainingArtifact
@@ -22,6 +23,7 @@ from deep_challenge.provenance import (
     canonical_json_bytes,
     write_json_atomic,
 )
+from deep_challenge.splits import SplitManifest, eligible_training_ids
 
 
 def _write_csv(path: Path, rows: list[list[str]]) -> None:
@@ -63,6 +65,72 @@ def _locked_gate_b_config() -> Path:
         / "configs"
         / "gate_b"
         / "rtx4070-super-12gb-direct-answer-v1.json"
+    )
+
+
+def _locked_rationale_config() -> Path:
+    return (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "gate_b"
+        / "rtx4070-super-12gb-concise-rationale-v1.json"
+    )
+
+
+def _write_cli_rationale_source(
+    path: Path,
+    *,
+    train: Path,
+    split: Path,
+    fold: int,
+    excluded_ids: tuple[str, ...],
+) -> None:
+    split_payload = json.loads(split.read_text(encoding="utf-8"))
+    manifest = SplitManifest.from_dict(split_payload["split"])
+    records = {record.id: record for record in load_train_csv(train)}
+    rows: list[dict[str, object]] = []
+    for problem_id in eligible_training_ids(manifest, fold, excluded_ids):
+        record = records[problem_id]
+        target = (
+            "The problem statement directly identifies the requested integer.\n"
+            f"Final answer: {record.answer}"
+        )
+        rows.append(
+            {
+                "schema_version": "gate-b-concise-rationale-row-v1",
+                "problem_id": problem_id,
+                "question_sha256": hashlib.sha256(
+                    record.question_raw.encode("utf-8")
+                ).hexdigest(),
+                "target_text": target,
+                "target_sha256": hashlib.sha256(target.encode("utf-8")).hexdigest(),
+                "teacher": {
+                    "provider": "local-test-provider",
+                    "model_id": "teacher-test-model",
+                    "model_revision": "teacher-test-revision",
+                    "prompt_sha256": "1" * 64,
+                    "generation_config_sha256": "2" * 64,
+                    "seed": 7,
+                    "sample_index": 0,
+                    "raw_generation_sha256": "3" * 64,
+                    "reference_answer_in_prompt": False,
+                    "network_scope": "training_only",
+                },
+                "verification": {
+                    "status": "accepted",
+                    "method": "reference_answer_exact_match",
+                    "leaderboard_or_test_used": False,
+                    "locked_holdout_accessed": False,
+                    "tool_used": False,
+                },
+            }
+        )
+    path.write_text(
+        "".join(
+            json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+            for row in rows
+        ),
+        encoding="utf-8",
     )
 
 
@@ -650,6 +718,140 @@ def test_gate_b_sft_preflight_cli_is_cpu_only(
     assert payload["status"] == "green"
     assert payload["torch_or_cuda_used"] is False
     assert payload["locked_holdout_accessed"] is False
+
+
+def test_rationale_corpus_cli_roundtrip_and_sft_preflight_are_cpu_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    contract, train, _, split = _gate_b_cli_fixture(tmp_path)
+    source = tmp_path / "private-teacher.jsonl"
+    _write_cli_rationale_source(
+        source,
+        train=train,
+        split=split,
+        fold=0,
+        excluded_ids=("train-000001",),
+    )
+    corpus_dir = tmp_path / "private-corpus"
+    corpus_dir.mkdir()
+    corpus = corpus_dir / "rationales.jsonl"
+    corpus_manifest = corpus_dir / "manifest.json"
+    audit = tmp_path / "rationale-audit.json"
+
+    assert (
+        main(
+            [
+                "build-rationale-corpus",
+                *contract,
+                "--source-jsonl",
+                str(source),
+                "--rationale-config",
+                str(_locked_rationale_config()),
+                "--output-jsonl",
+                str(corpus),
+                "--output-manifest",
+                str(corpus_manifest),
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "audit-rationale-corpus",
+                *contract,
+                "--rationale-corpus",
+                str(corpus),
+                "--rationale-manifest",
+                str(corpus_manifest),
+                "--rationale-config",
+                str(_locked_rationale_config()),
+                "--output",
+                str(audit),
+            ]
+        )
+        == 0
+    )
+    provenance = {
+        "model_id": OFFICIAL_MODEL_ID,
+        "requested_revision": OFFICIAL_REVISION,
+        "resolved_commit": OFFICIAL_REVISION,
+        "local_files_only": True,
+        "files": {},
+    }
+    monkeypatch.setattr(
+        cli_module,
+        "load_pinned_tokenizer",
+        lambda **_kwargs: (_GateBTokenizer(), provenance),
+    )
+    preflight = tmp_path / "rationale-sft-preflight.json"
+    rationale_inputs = [
+        "--rationale-corpus",
+        str(corpus),
+        "--rationale-manifest",
+        str(corpus_manifest),
+        "--rationale-audit",
+        str(audit),
+        "--rationale-config",
+        str(_locked_rationale_config()),
+    ]
+    assert (
+        main(
+            [
+                "gate-b-sft-preflight",
+                *contract,
+                "--revision",
+                OFFICIAL_REVISION,
+                "--config",
+                str(_locked_gate_b_config()),
+                *rationale_inputs,
+                "--output",
+                str(preflight),
+            ]
+        )
+        == 0
+    )
+
+    audit_payload = json.loads(audit.read_text(encoding="utf-8"))
+    preflight_payload = json.loads(preflight.read_text(encoding="utf-8"))
+    assert audit_payload["raw_rationale_serialized"] is False
+    assert audit_payload["locked_holdout_accessed"] is False
+    assert preflight_payload["schema_version"] == "gate-b-sft-encoding-preflight-v4"
+    assert preflight_payload["training_target"]["kind"] == (
+        "verified_concise_rationale"
+    )
+    assert preflight_payload["training_target"]["corpus_audit_sha256"] == (
+        hashlib.sha256(audit.read_bytes()).hexdigest()
+    )
+    assert preflight_payload["torch_or_cuda_used"] is False
+    assert preflight_payload["locked_holdout_accessed"] is False
+
+
+def test_rationale_training_cli_inputs_are_all_or_none(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contract, _, _, _ = _gate_b_cli_fixture(tmp_path)
+    output = tmp_path / "must-not-exist.json"
+
+    assert (
+        main(
+            [
+                "gate-b-sft-preflight",
+                *contract,
+                "--revision",
+                OFFICIAL_REVISION,
+                "--config",
+                str(_locked_gate_b_config()),
+                "--rationale-corpus",
+                str(tmp_path / "unread-corpus.jsonl"),
+                "--output",
+                str(output),
+            ]
+        )
+        == 2
+    )
+    assert "all-or-none" in capsys.readouterr().err
+    assert not output.exists()
 
 
 def test_compare_development_oof_cli_wires_all_folds_from_development_shard(

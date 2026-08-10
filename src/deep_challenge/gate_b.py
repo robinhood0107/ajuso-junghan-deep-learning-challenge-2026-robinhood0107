@@ -32,6 +32,10 @@ from .provenance import (
     canonical_json_bytes,
     sha256_file,
 )
+from .rationale_corpus import (
+    ConciseRationaleConfig,
+    RationaleCorpusEvidence,
+)
 from .splits import (
     SplitManifest,
     SplitPartition,
@@ -614,6 +618,75 @@ def build_direct_answer_sft_examples(
                 prompt_messages=_prompt_messages(record.question_raw, config),
                 target_text=target_text,
                 group_id=provenance.group_ids[problem_id],
+                **provenance.common,
+            )
+        )
+    return tuple(examples)
+
+
+def build_concise_rationale_sft_examples(
+    records: Iterable[MathRecord],
+    *,
+    split_manifest: SplitManifest,
+    fold: int,
+    excluded_ids: Iterable[str],
+    rationale_corpus: RationaleCorpusEvidence,
+    rationale_config: ConciseRationaleConfig,
+    config: GateBConfig = DEFAULT_GATE_B_CONFIG,
+) -> tuple[DirectAnswerSFTExample, ...]:
+    """Build response-only targets from one audited private rationale corpus.
+
+    The corpus loader has already recomputed every answer and split invariant;
+    this boundary rechecks its fold, ID order, question digests, and mandatory
+    audit binding before target text can reach the GPU runtime.
+    """
+
+    if not isinstance(rationale_corpus, RationaleCorpusEvidence):
+        raise TypeError("rationale_corpus must be RationaleCorpusEvidence")
+    if not isinstance(rationale_config, ConciseRationaleConfig):
+        raise TypeError("rationale_config must be ConciseRationaleConfig")
+    if rationale_corpus.audit_path is None or rationale_corpus.audit_sha256 is None:
+        raise GateBValidationError(
+            "concise-rationale SFT requires a validated redacted corpus audit"
+        )
+    if rationale_corpus.fold != fold:
+        raise GateBValidationError("rationale corpus fold does not match the SFT fold")
+    if rationale_corpus.candidate_config_sha256 != rationale_config.sha256:
+        raise GateBValidationError(
+            "rationale corpus is not bound to the supplied candidate config"
+        )
+    eligible_ids = _derive_eligible_ids(split_manifest, fold, excluded_ids, training=True)
+    ordered_ids, records_by_id = _validated_partition_records(records, eligible_ids)
+    if rationale_corpus.training_ids_sha256 != _ids_sha256(ordered_ids):
+        raise GateBValidationError(
+            "rationale corpus training ID digest does not match the fold partition"
+        )
+    if rationale_corpus.record_count != len(ordered_ids):
+        raise GateBValidationError("rationale corpus record count does not match the fold")
+    if tuple(row.problem_id for row in rationale_corpus.rows) != ordered_ids:
+        raise GateBValidationError("rationale corpus changed split-derived ID order")
+    provenance = _partition_provenance(split_manifest, fold, ordered_ids, "fold_training")
+    examples: list[DirectAnswerSFTExample] = []
+    for row in rationale_corpus.rows:
+        record = records_by_id[row.problem_id]
+        answer = _required_reference_answer(record)
+        question_sha256 = _sha256_text(record.question_raw)
+        if row.question_sha256 != question_sha256:
+            raise GateBValidationError(
+                f"{row.problem_id}: rationale question SHA changed after corpus audit"
+            )
+        parsed = parse_answer(row.target_text)
+        if not parsed.ok or parsed.value != answer or parsed.source != "final_answer":
+            raise GateBValidationError(
+                f"{row.problem_id}: rationale target no longer matches the organizer answer"
+            )
+        examples.append(
+            DirectAnswerSFTExample(
+                problem_id=row.problem_id,
+                question_sha256=question_sha256,
+                prompt_messages=_prompt_messages(record.question_raw, config),
+                target_text=row.target_text,
+                group_id=provenance.group_ids[row.problem_id],
                 **provenance.common,
             )
         )
@@ -1423,6 +1496,7 @@ __all__ = [
     "GenerationResult",
     "PINNED_MODEL_REVISION",
     "TransformersGenerationBackend",
+    "build_concise_rationale_sft_examples",
     "build_direct_answer_sft_examples",
     "create_development_execution_evidence",
     "encode_response_only_example",

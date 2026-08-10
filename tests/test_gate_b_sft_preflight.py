@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -9,6 +10,12 @@ from deep_challenge.data import MathRecord
 from deep_challenge.gate_b import DEFAULT_GATE_B_CONFIG, GateBValidationError
 from deep_challenge.gate_b_sft_preflight import run_sft_encoding_preflight
 from deep_challenge.model_preflight import OFFICIAL_MODEL_ID, OFFICIAL_REVISION
+from deep_challenge.rationale_corpus import (
+    DEFAULT_CONCISE_RATIONALE_CONFIG,
+    audit_rationale_corpus,
+    build_rationale_corpus,
+    load_verified_rationale_corpus,
+)
 from deep_challenge.splits import (
     eligible_training_ids,
     eligible_validation_ids,
@@ -83,6 +90,91 @@ def _cv_records(manifest, fold: int = 0) -> tuple[MathRecord, ...]:
         *eligible_validation_ids(manifest, fold, ()),
     }
     return tuple(_record(identifier) for identifier in sorted(identifiers))
+
+
+def _rationale_evidence(tmp_path: Path, manifest, fold: int = 0):
+    training_ids = eligible_training_ids(manifest, fold, ())
+    records = tuple(_record(identifier) for identifier in training_ids)
+    rows = []
+    for record in records:
+        target = (
+            "The identifier explicitly supplies the requested integer.\n"
+            f"Final answer: {record.answer}"
+        )
+        rows.append(
+            {
+                "schema_version": "gate-b-concise-rationale-row-v1",
+                "problem_id": record.id,
+                "question_sha256": hashlib.sha256(
+                    record.question_raw.encode("utf-8")
+                ).hexdigest(),
+                "target_text": target,
+                "target_sha256": hashlib.sha256(target.encode("utf-8")).hexdigest(),
+                "teacher": {
+                    "provider": "local-test-provider",
+                    "model_id": "teacher-test-model",
+                    "model_revision": "teacher-test-revision",
+                    "prompt_sha256": "1" * 64,
+                    "generation_config_sha256": "2" * 64,
+                    "seed": 7,
+                    "sample_index": 0,
+                    "raw_generation_sha256": "3" * 64,
+                    "reference_answer_in_prompt": False,
+                    "network_scope": "training_only",
+                },
+                "verification": {
+                    "status": "accepted",
+                    "method": "reference_answer_exact_match",
+                    "leaderboard_or_test_used": False,
+                    "locked_holdout_accessed": False,
+                    "tool_used": False,
+                },
+            }
+        )
+    source = tmp_path / "teacher.jsonl"
+    source.write_text(
+        "".join(
+            json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+            for row in rows
+        ),
+        encoding="utf-8",
+    )
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    corpus = corpus_dir / "rationales.jsonl"
+    corpus_manifest = corpus_dir / "manifest.json"
+    config_file_sha256 = "4" * 64
+    build_rationale_corpus(
+        source,
+        records,
+        split_manifest=manifest,
+        fold=fold,
+        excluded_ids=(),
+        candidate_config_file_sha256=config_file_sha256,
+        output_jsonl=corpus,
+        output_manifest=corpus_manifest,
+    )
+    audit = tmp_path / "audit.json"
+    audit_rationale_corpus(
+        corpus,
+        corpus_manifest,
+        records,
+        split_manifest=manifest,
+        fold=fold,
+        excluded_ids=(),
+        candidate_config_file_sha256=config_file_sha256,
+        output_path=audit,
+    )
+    return load_verified_rationale_corpus(
+        corpus,
+        corpus_manifest,
+        records,
+        split_manifest=manifest,
+        fold=fold,
+        excluded_ids=(),
+        candidate_config_file_sha256=config_file_sha256,
+        audit_path=audit,
+    )
 
 
 def test_sft_encoding_preflight_is_cpu_only_and_excludes_locked_holdout(
@@ -186,4 +278,57 @@ def test_sft_encoding_preflight_requires_pinned_local_tokenizer(tmp_path: Path) 
             development_shard_sha256="4" * 64,
             output_path=tmp_path / "bad-provenance.json",
             folds=(0,),
+        )
+
+
+def test_sft_encoding_preflight_binds_audited_concise_rationale_target(
+    tmp_path: Path,
+) -> None:
+    manifest = _split()
+    evidence = _rationale_evidence(tmp_path, manifest)
+    output = tmp_path / "rationale-sft-preflight.json"
+
+    run_sft_encoding_preflight(
+        _cv_records(manifest),
+        split_manifest=manifest,
+        excluded_ids=(),
+        tokenizer=_Tokenizer(),
+        tokenizer_provenance=_provenance(),
+        train_file_sha256="1" * 64,
+        exclusions_file_sha256="2" * 64,
+        split_artifact_sha256="3" * 64,
+        development_shard_sha256="4" * 64,
+        output_path=output,
+        folds=(0,),
+        rationale_corpus=evidence,
+        rationale_config=DEFAULT_CONCISE_RATIONALE_CONFIG,
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "gate-b-sft-encoding-preflight-v4"
+    assert payload["training_target"] == {
+        "kind": "verified_concise_rationale",
+        "candidate_config_sha256": evidence.candidate_config_sha256,
+        "candidate_config_file_sha256": evidence.candidate_config_file_sha256,
+        "corpus_records_sha256": evidence.records_sha256,
+        "corpus_manifest_sha256": evidence.manifest_sha256,
+        "corpus_audit_sha256": evidence.audit_sha256,
+    }
+    assert payload["torch_or_cuda_used"] is False
+    assert payload["locked_holdout_accessed"] is False
+
+    with pytest.raises(GateBValidationError, match="corpus-bound fold"):
+        run_sft_encoding_preflight(
+            tuple(_record(assignment.record_id) for assignment in manifest.assignments),
+            split_manifest=manifest,
+            excluded_ids=(),
+            tokenizer=_Tokenizer(),
+            tokenizer_provenance=_provenance(),
+            train_file_sha256="1" * 64,
+            exclusions_file_sha256="2" * 64,
+            split_artifact_sha256="3" * 64,
+            development_shard_sha256="4" * 64,
+            output_path=tmp_path / "all-folds.json",
+            rationale_corpus=evidence,
+            rationale_config=DEFAULT_CONCISE_RATIONALE_CONFIG,
         )

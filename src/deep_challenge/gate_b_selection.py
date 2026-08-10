@@ -1120,13 +1120,30 @@ def _validate_oof_method_provenance(
         "training_ids_sha256": plan.training_ids_sha256,
         "validation_count": len(plan.validation_ids),
         "validation_ids_sha256": plan.validation_ids_sha256,
-        "training_examples_sha256": plan.training_examples_sha256,
         "validation_examples_sha256": plan.validation_examples_sha256,
         "train_file_sha256": train_file_sha256,
         "exclusions_file_sha256": exclusions_file_sha256,
         "split_artifact_sha256": split_artifact_sha256,
         "development_shard_sha256": development_shard_sha256,
     }
+    if adapter.training_target_kind == "direct_answer":
+        expected["training_examples_sha256"] = plan.training_examples_sha256
+    elif adapter.training_target_kind == "verified_concise_rationale":
+        rationale_fields = (
+            adapter.rationale_candidate_config_sha256,
+            adapter.rationale_candidate_config_file_sha256,
+            adapter.rationale_corpus_records_sha256,
+            adapter.rationale_corpus_manifest_sha256,
+            adapter.rationale_corpus_audit_sha256,
+        )
+        if any(value is None for value in rationale_fields):
+            raise GateBValidationError(
+                "OOF rationale adapter is missing corpus/config provenance"
+            )
+    else:
+        raise GateBValidationError(
+            f"OOF adapter has unsupported training target: {adapter.training_target_kind!r}"
+        )
     mismatched = [
         field_name
         for field_name, expected_value in expected.items()
@@ -1147,6 +1164,32 @@ def _validate_oof_method_provenance(
         "manifest_sha256": adapter.manifest_sha256,
         "checksums_sha256": adapter.checksums_sha256,
     }
+    if adapter.training_target_kind == "verified_concise_rationale":
+        assert adapter.rationale_candidate_config_sha256 is not None
+        assert adapter.rationale_candidate_config_file_sha256 is not None
+        assert adapter.rationale_corpus_records_sha256 is not None
+        assert adapter.rationale_corpus_manifest_sha256 is not None
+        assert adapter.rationale_corpus_audit_sha256 is not None
+        artifact.update(
+            {
+                "training_target_kind": adapter.training_target_kind,
+                "rationale_candidate_config_sha256": (
+                    adapter.rationale_candidate_config_sha256
+                ),
+                "rationale_candidate_config_file_sha256": (
+                    adapter.rationale_candidate_config_file_sha256
+                ),
+                "rationale_corpus_records_sha256": (
+                    adapter.rationale_corpus_records_sha256
+                ),
+                "rationale_corpus_manifest_sha256": (
+                    adapter.rationale_corpus_manifest_sha256
+                ),
+                "rationale_corpus_audit_sha256": (
+                    adapter.rationale_corpus_audit_sha256
+                ),
+            }
+        )
     return _ValidatedMethodProvenance(
         method_kind=ADAPTER_METHOD_KIND,
         training_method_fingerprint=_adapter_method_fingerprint(adapter),
@@ -1170,32 +1213,44 @@ def _base_method_fingerprint() -> str:
 
 
 def _adapter_method_fingerprint(adapter: AdapterArtifactEvidence) -> str:
-    return hashlib.sha256(
-        canonical_json_bytes(
+    payload: dict[str, object] = {
+        "schema_version": "gate-b-oof-method-fingerprint-v1",
+        "method_kind": ADAPTER_METHOD_KIND,
+        "model_id": OFFICIAL_MODEL_ID,
+        "revision": PINNED_MODEL_REVISION,
+        "config_sha256": adapter.config_sha256,
+        "split_version": adapter.split_version,
+        "split_sha256": adapter.split_sha256,
+        "source_groups_sha256": adapter.source_groups_sha256,
+        "excluded_ids_sha256": adapter.excluded_ids_sha256,
+        "train_file_sha256": adapter.train_file_sha256,
+        "exclusions_file_sha256": adapter.exclusions_file_sha256,
+        "split_artifact_sha256": adapter.split_artifact_sha256,
+        "development_shard_sha256": adapter.development_shard_sha256,
+        "preflight_sha256": adapter.preflight_sha256,
+        "gpu_smoke_sha256": adapter.gpu_smoke_sha256,
+        "source_manifest_sha256": adapter.source_manifest_sha256,
+        "source_tree_sha256": adapter.source_tree_sha256,
+        "source_file_count": adapter.source_file_count,
+        "response_only_labels": True,
+        "truncation": False,
+        "tensor_contract": "qwen2.5-3b-all-linear-lora-504",
+    }
+    if adapter.training_target_kind == "verified_concise_rationale":
+        payload.update(
             {
-                "schema_version": "gate-b-oof-method-fingerprint-v1",
-                "method_kind": ADAPTER_METHOD_KIND,
-                "model_id": OFFICIAL_MODEL_ID,
-                "revision": PINNED_MODEL_REVISION,
-                "config_sha256": adapter.config_sha256,
-                "split_version": adapter.split_version,
-                "split_sha256": adapter.split_sha256,
-                "source_groups_sha256": adapter.source_groups_sha256,
-                "excluded_ids_sha256": adapter.excluded_ids_sha256,
-                "train_file_sha256": adapter.train_file_sha256,
-                "exclusions_file_sha256": adapter.exclusions_file_sha256,
-                "split_artifact_sha256": adapter.split_artifact_sha256,
-                "development_shard_sha256": adapter.development_shard_sha256,
-                "preflight_sha256": adapter.preflight_sha256,
-                "gpu_smoke_sha256": adapter.gpu_smoke_sha256,
-                "source_manifest_sha256": adapter.source_manifest_sha256,
-                "source_tree_sha256": adapter.source_tree_sha256,
-                "source_file_count": adapter.source_file_count,
-                "response_only_labels": True,
-                "truncation": False,
-                "tensor_contract": "qwen2.5-3b-all-linear-lora-504",
+                "schema_version": "gate-b-oof-method-fingerprint-v2",
+                "training_target_kind": adapter.training_target_kind,
+                "rationale_candidate_config_sha256": (
+                    adapter.rationale_candidate_config_sha256
+                ),
+                "rationale_candidate_config_file_sha256": (
+                    adapter.rationale_candidate_config_file_sha256
+                ),
             }
         )
+    return hashlib.sha256(
+        canonical_json_bytes(payload)
     ).hexdigest()
 
 
@@ -1792,11 +1847,25 @@ def _revalidate_deployment_method_evidence(
         return
     if method_kind != ADAPTER_METHOD_KIND or not isinstance(adapter_evidence, Mapping):
         raise GateBValidationError("frozen candidate method lacks adapter provenance")
-    if set(adapter_evidence) != {
+    base_adapter_keys = {
         "path",
         "artifact_sha256",
         "manifest_sha256",
         "checksums_sha256",
+    }
+    rationale_adapter_keys = {
+        *base_adapter_keys,
+        "training_target_kind",
+        "rationale_candidate_config_sha256",
+        "rationale_candidate_config_file_sha256",
+        "rationale_corpus_records_sha256",
+        "rationale_corpus_manifest_sha256",
+        "rationale_corpus_audit_sha256",
+    }
+    actual_adapter_keys = frozenset(adapter_evidence)
+    if actual_adapter_keys not in {
+        frozenset(base_adapter_keys),
+        frozenset(rationale_adapter_keys),
     }:
         raise GateBValidationError("frozen adapter evidence has an unexpected schema")
     adapter = validate_adapter_artifact(
@@ -1808,6 +1877,36 @@ def _revalidate_deployment_method_evidence(
         "manifest_sha256": adapter.manifest_sha256,
         "checksums_sha256": adapter.checksums_sha256,
     }
+    expected_evidence_keys = (
+        rationale_adapter_keys
+        if adapter.training_target_kind == "verified_concise_rationale"
+        else base_adapter_keys
+    )
+    if set(adapter_evidence) != expected_evidence_keys:
+        raise GateBValidationError(
+            "frozen adapter evidence does not match its training target schema"
+        )
+    if adapter.training_target_kind == "verified_concise_rationale":
+        expected_adapter_identity.update(
+            {
+                "training_target_kind": adapter.training_target_kind,
+                "rationale_candidate_config_sha256": (
+                    adapter.rationale_candidate_config_sha256
+                ),
+                "rationale_candidate_config_file_sha256": (
+                    adapter.rationale_candidate_config_file_sha256
+                ),
+                "rationale_corpus_records_sha256": (
+                    adapter.rationale_corpus_records_sha256
+                ),
+                "rationale_corpus_manifest_sha256": (
+                    adapter.rationale_corpus_manifest_sha256
+                ),
+                "rationale_corpus_audit_sha256": (
+                    adapter.rationale_corpus_audit_sha256
+                ),
+            }
+        )
     identity_mismatches = [
         field_name
         for field_name, actual_value in expected_adapter_identity.items()

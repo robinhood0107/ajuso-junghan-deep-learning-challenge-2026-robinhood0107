@@ -23,6 +23,7 @@ from .gate_b import (
 from .gate_b_runtime import build_fold_sft_plan
 from .model_preflight import OFFICIAL_MODEL_ID, OFFICIAL_REVISION
 from .provenance import canonical_json_bytes
+from .rationale_corpus import ConciseRationaleConfig, RationaleCorpusEvidence
 from .splits import SplitManifest, eligible_training_ids, eligible_validation_ids
 
 
@@ -47,6 +48,8 @@ def run_sft_encoding_preflight(
     development_shard_sha256: str,
     output_path: str | Path,
     folds: Sequence[int] | None = None,
+    rationale_corpus: RationaleCorpusEvidence | None = None,
+    rationale_config: ConciseRationaleConfig | None = None,
     config: GateBConfig = DEFAULT_GATE_B_CONFIG,
 ) -> SFTEncodingPreflightWriteResult:
     """Encode exact fold partitions and prove response-only labels fit at 2K.
@@ -71,6 +74,14 @@ def run_sft_encoding_preflight(
         if isinstance(fold, bool) or not isinstance(fold, int):
             raise GateBValidationError("fold values must be integers")
         split_manifest.fold_ids(fold)
+    if (rationale_corpus is None) != (rationale_config is None):
+        raise GateBValidationError(
+            "rationale_corpus and rationale_config must be supplied together"
+        )
+    if rationale_corpus is not None and selected_folds != (rationale_corpus.fold,):
+        raise GateBValidationError(
+            "rationale encoding preflight accepts exactly the corpus-bound fold"
+        )
 
     required_ids: set[str] = set()
     for fold in selected_folds:
@@ -122,6 +133,8 @@ def run_sft_encoding_preflight(
             split_manifest=split_manifest,
             fold=fold,
             excluded_ids=exclusions,
+            rationale_corpus=rationale_corpus,
+            rationale_config=rationale_config,
             config=config,
         )
         partitions: dict[str, Any] = {}
@@ -185,7 +198,11 @@ def run_sft_encoding_preflight(
 
     assert global_max is not None
     payload_without_hash = {
-        "schema_version": "gate-b-sft-encoding-preflight-v3",
+        "schema_version": (
+            "gate-b-sft-encoding-preflight-v3"
+            if rationale_corpus is None
+            else "gate-b-sft-encoding-preflight-v4"
+        ),
         "status": "green",
         "proof_scope": "cpu_only_pinned_tokenizer_response_only_encoding",
         "model_weights_loaded": False,
@@ -198,6 +215,20 @@ def run_sft_encoding_preflight(
         "max_sequence_length": config.max_sequence_length,
         "response_only_loss": config.response_only_loss,
         "truncation_allowed": False,
+        "training_target": (
+            {"kind": "direct_answer"}
+            if rationale_corpus is None
+            else {
+                "kind": "verified_concise_rationale",
+                "candidate_config_sha256": rationale_corpus.candidate_config_sha256,
+                "candidate_config_file_sha256": (
+                    rationale_corpus.candidate_config_file_sha256
+                ),
+                "corpus_records_sha256": rationale_corpus.records_sha256,
+                "corpus_manifest_sha256": rationale_corpus.manifest_sha256,
+                "corpus_audit_sha256": rationale_corpus.audit_sha256,
+            }
+        ),
         "tokenizer_provenance": dict(tokenizer_provenance),
         "data_provenance": {
             "train_file_sha256": train_file_sha256,

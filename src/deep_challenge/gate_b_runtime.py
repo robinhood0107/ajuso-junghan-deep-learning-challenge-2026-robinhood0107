@@ -41,6 +41,7 @@ from .gate_b import (
     GateBValidationError,
     GenerationRequest,
     GenerationResult,
+    build_concise_rationale_sft_examples,
     build_direct_answer_sft_examples,
     encode_response_only_example,
 )
@@ -51,6 +52,11 @@ from .gpu_smoke import (
 )
 from .model_preflight import OFFICIAL_MODEL_ID, PINNED_WEIGHT_ARTIFACTS
 from .provenance import SourceTreeArtifactEvidence, canonical_json_bytes, sha256_file
+from .rationale_corpus import (
+    DEFAULT_CONCISE_RATIONALE_CONFIG,
+    ConciseRationaleConfig,
+    RationaleCorpusEvidence,
+)
 from .splits import (
     SplitManifest,
     SplitPartition,
@@ -62,6 +68,7 @@ from .splits import (
 _TRAIN_ID_RE = re.compile(r"train-\d{6}\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _ADAPTER_MANIFEST_SCHEMA = "gate-b-qlora-adapter-v3"
+_RATIONALE_ADAPTER_MANIFEST_SCHEMA = "gate-b-qlora-adapter-v4"
 _CHECKSUM_FILENAME = "CHECKSUMS.sha256"
 _MANIFEST_FILENAME = "manifest.json"
 GPU_EXECUTION_ACKNOWLEDGEMENT = "USE_GPU_AFTER_FINAL_SMOKE"
@@ -155,6 +162,12 @@ class FoldSFTPlan:
     training_examples: tuple[DirectAnswerSFTExample, ...]
     validation_examples: tuple[DirectAnswerSFTExample, ...]
     config_sha256: str
+    training_target_kind: str = "direct_answer"
+    rationale_candidate_config_sha256: str | None = None
+    rationale_candidate_config_file_sha256: str | None = None
+    rationale_corpus_records_sha256: str | None = None
+    rationale_corpus_manifest_sha256: str | None = None
+    rationale_corpus_audit_sha256: str | None = None
 
     @property
     def training_ids_sha256(self) -> str:
@@ -201,6 +214,7 @@ class TrainingArtifact:
     file_count: int
     training_count: int
     validation_count: int
+    training_target_kind: str = "direct_answer"
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +247,12 @@ class AdapterArtifactEvidence:
     source_manifest_sha256: str
     source_tree_sha256: str
     source_file_count: int
+    training_target_kind: str = "direct_answer"
+    rationale_candidate_config_sha256: str | None = None
+    rationale_candidate_config_file_sha256: str | None = None
+    rationale_corpus_records_sha256: str | None = None
+    rationale_corpus_manifest_sha256: str | None = None
+    rationale_corpus_audit_sha256: str | None = None
 
 
 class FoldTrainingRuntime(Protocol):
@@ -262,6 +282,8 @@ def build_fold_sft_plan(
     split_manifest: SplitManifest,
     fold: int,
     excluded_ids: Iterable[str],
+    rationale_corpus: RationaleCorpusEvidence | None = None,
+    rationale_config: ConciseRationaleConfig | None = None,
     config: GateBConfig = DEFAULT_GATE_B_CONFIG,
 ) -> FoldSFTPlan:
     """Derive and validate one fold without exposing holdout/full-train paths."""
@@ -291,13 +313,47 @@ def build_fold_sft_plan(
     validation_materialized = _validated_exact_records(
         validation_records, validation_ids, "validation_records"
     )
-    training_examples = build_direct_answer_sft_examples(
-        training_materialized,
-        split_manifest=split_manifest,
-        fold=fold,
-        excluded_ids=exclusions,
-        config=config,
-    )
+    if (rationale_corpus is None) != (rationale_config is None):
+        raise GateBValidationError(
+            "rationale_corpus and rationale_config must be supplied together"
+        )
+    if rationale_corpus is None:
+        training_examples = build_direct_answer_sft_examples(
+            training_materialized,
+            split_manifest=split_manifest,
+            fold=fold,
+            excluded_ids=exclusions,
+            config=config,
+        )
+        target_binding: dict[str, str | None] = {
+            "training_target_kind": "direct_answer",
+            "rationale_candidate_config_sha256": None,
+            "rationale_candidate_config_file_sha256": None,
+            "rationale_corpus_records_sha256": None,
+            "rationale_corpus_manifest_sha256": None,
+            "rationale_corpus_audit_sha256": None,
+        }
+    else:
+        assert rationale_config is not None
+        training_examples = build_concise_rationale_sft_examples(
+            training_materialized,
+            split_manifest=split_manifest,
+            fold=fold,
+            excluded_ids=exclusions,
+            rationale_corpus=rationale_corpus,
+            rationale_config=rationale_config,
+            config=config,
+        )
+        target_binding = {
+            "training_target_kind": rationale_config.training_target_kind,
+            "rationale_candidate_config_sha256": rationale_config.sha256,
+            "rationale_candidate_config_file_sha256": (
+                rationale_corpus.candidate_config_file_sha256
+            ),
+            "rationale_corpus_records_sha256": rationale_corpus.records_sha256,
+            "rationale_corpus_manifest_sha256": rationale_corpus.manifest_sha256,
+            "rationale_corpus_audit_sha256": rationale_corpus.audit_sha256,
+        }
     validation_examples = _build_validation_examples(
         validation_materialized,
         validation_ids=validation_ids,
@@ -316,6 +372,7 @@ def build_fold_sft_plan(
         training_examples=training_examples,
         validation_examples=validation_examples,
         config_sha256=config.sha256,
+        **target_binding,
     )
 
 
@@ -424,6 +481,8 @@ def train_qlora_fold(
     gpu_smoke_artifact: str | Path,
     output_dir: str | Path,
     gpu_acknowledgement: str,
+    rationale_corpus: RationaleCorpusEvidence | None = None,
+    rationale_config: ConciseRationaleConfig | None = None,
     runtime_factory: Callable[[RuntimeGateEvidence], FoldTrainingRuntime] | None = None,
     config: GateBConfig = DEFAULT_GATE_B_CONFIG,
 ) -> TrainingArtifact:
@@ -461,6 +520,8 @@ def train_qlora_fold(
         split_manifest=split_manifest,
         fold=fold,
         excluded_ids=excluded_ids,
+        rationale_corpus=rationale_corpus,
+        rationale_config=rationale_config,
         config=config,
     )
     target = _validated_new_directory_target(output_dir)
@@ -510,8 +571,10 @@ def train_qlora_fold(
             config=config,
         )
         staged = validate_adapter_artifact(export_dir, config=config)
+        _validate_adapter_target_binding(staged, plan)
         _publish_directory_noreplace(export_dir, target)
         published = validate_adapter_artifact(target, config=config)
+        _validate_adapter_target_binding(published, plan)
         if published.artifact_sha256 != staged.artifact_sha256:
             raise GateBValidationError("published adapter digest changed after atomic rename")
         return TrainingArtifact(
@@ -522,6 +585,7 @@ def train_qlora_fold(
             file_count=published.file_count,
             training_count=len(plan.training_ids),
             validation_count=len(plan.validation_ids),
+            training_target_kind=plan.training_target_kind,
         )
     finally:
         with suppress(Exception):
@@ -556,8 +620,13 @@ def validate_adapter_artifact(
 
     manifest_path = root / _MANIFEST_FILENAME
     _, manifest, manifest_digest = _load_json_artifact(manifest_path, "adapter manifest")
+    schema_version = manifest.get("schema_version")
+    if schema_version not in {
+        _ADAPTER_MANIFEST_SCHEMA,
+        _RATIONALE_ADAPTER_MANIFEST_SCHEMA,
+    }:
+        raise GateBValidationError("adapter manifest schema_version is unsupported")
     expected_manifest = {
-        "schema_version": _ADAPTER_MANIFEST_SCHEMA,
         "model_id": OFFICIAL_MODEL_ID,
         "revision": PINNED_MODEL_REVISION,
         "config": config.as_dict(),
@@ -569,6 +638,67 @@ def validate_adapter_artifact(
     mismatched = [key for key, value in expected_manifest.items() if manifest.get(key) != value]
     if mismatched:
         raise GateBValidationError(f"adapter manifest binding mismatch: {mismatched!r}")
+    training_target_kind = "direct_answer"
+    rationale_candidate_config_sha256: str | None = None
+    rationale_candidate_config_file_sha256: str | None = None
+    rationale_corpus_records_sha256: str | None = None
+    rationale_corpus_manifest_sha256: str | None = None
+    rationale_corpus_audit_sha256: str | None = None
+    training_target = manifest.get("training_target")
+    if schema_version == _ADAPTER_MANIFEST_SCHEMA:
+        if training_target is not None:
+            raise GateBValidationError(
+                "direct-answer adapter manifest must not contain training_target"
+            )
+    else:
+        if not isinstance(training_target, Mapping):
+            raise GateBValidationError(
+                "concise-rationale adapter manifest requires training_target"
+            )
+        expected_target_keys = {
+            "kind",
+            "candidate_config_sha256",
+            "candidate_config_file_sha256",
+            "corpus_records_sha256",
+            "corpus_manifest_sha256",
+            "corpus_audit_sha256",
+        }
+        if set(training_target) != expected_target_keys:
+            raise GateBValidationError(
+                "concise-rationale adapter training_target keys are invalid"
+            )
+        training_target_kind = str(training_target.get("kind"))
+        if training_target_kind != "verified_concise_rationale":
+            raise GateBValidationError(
+                "concise-rationale adapter training target kind is invalid"
+            )
+        rationale_candidate_config_sha256 = _required_sha256(
+            training_target.get("candidate_config_sha256"),
+            "adapter rationale candidate_config_sha256",
+        )
+        if (
+            rationale_candidate_config_sha256
+            != DEFAULT_CONCISE_RATIONALE_CONFIG.sha256
+        ):
+            raise GateBValidationError(
+                "adapter rationale candidate config is not the locked v1 policy"
+            )
+        rationale_candidate_config_file_sha256 = _required_sha256(
+            training_target.get("candidate_config_file_sha256"),
+            "adapter rationale candidate_config_file_sha256",
+        )
+        rationale_corpus_records_sha256 = _required_sha256(
+            training_target.get("corpus_records_sha256"),
+            "adapter rationale corpus_records_sha256",
+        )
+        rationale_corpus_manifest_sha256 = _required_sha256(
+            training_target.get("corpus_manifest_sha256"),
+            "adapter rationale corpus_manifest_sha256",
+        )
+        rationale_corpus_audit_sha256 = _required_sha256(
+            training_target.get("corpus_audit_sha256"),
+            "adapter rationale corpus_audit_sha256",
+        )
     split_version = manifest.get("split_version")
     if not isinstance(split_version, str) or not split_version:
         raise GateBValidationError("adapter manifest split_version must be non-empty")
@@ -697,6 +827,14 @@ def validate_adapter_artifact(
         source_manifest_sha256=source_manifest_sha256,
         source_tree_sha256=source_tree_sha256,
         source_file_count=source_file_count,
+        training_target_kind=training_target_kind,
+        rationale_candidate_config_sha256=rationale_candidate_config_sha256,
+        rationale_candidate_config_file_sha256=(
+            rationale_candidate_config_file_sha256
+        ),
+        rationale_corpus_records_sha256=rationale_corpus_records_sha256,
+        rationale_corpus_manifest_sha256=rationale_corpus_manifest_sha256,
+        rationale_corpus_audit_sha256=rationale_corpus_audit_sha256,
     )
 
 
@@ -1388,6 +1526,66 @@ def _validate_plan_binding(plan: FoldSFTPlan, config: GateBConfig) -> None:
         raise GateBValidationError("fold plan is not bound to the locked config")
     _validated_train_ids(plan.training_ids, "plan training IDs")
     _validated_train_ids(plan.validation_ids, "plan validation IDs")
+    rationale_values = (
+        plan.rationale_candidate_config_sha256,
+        plan.rationale_candidate_config_file_sha256,
+        plan.rationale_corpus_records_sha256,
+        plan.rationale_corpus_manifest_sha256,
+        plan.rationale_corpus_audit_sha256,
+    )
+    if plan.training_target_kind == "direct_answer":
+        if any(value is not None for value in rationale_values):
+            raise GateBValidationError(
+                "direct-answer fold plan contains rationale provenance"
+            )
+        return
+    if plan.training_target_kind != "verified_concise_rationale":
+        raise GateBValidationError("fold plan training target kind is unsupported")
+    for value, label in zip(
+        rationale_values,
+        (
+            "rationale candidate config sha256",
+            "rationale candidate config file sha256",
+            "rationale corpus records sha256",
+            "rationale corpus manifest sha256",
+            "rationale corpus audit sha256",
+        ),
+        strict=True,
+    ):
+        _required_sha256(value, label)
+    if (
+        plan.rationale_candidate_config_sha256
+        != DEFAULT_CONCISE_RATIONALE_CONFIG.sha256
+    ):
+        raise GateBValidationError(
+            "fold plan rationale policy is not the locked concise-rationale v1 config"
+        )
+
+
+def _validate_adapter_target_binding(
+    adapter: AdapterArtifactEvidence, plan: FoldSFTPlan
+) -> None:
+    expected = {
+        "training_target_kind": plan.training_target_kind,
+        "rationale_candidate_config_sha256": (
+            plan.rationale_candidate_config_sha256
+        ),
+        "rationale_candidate_config_file_sha256": (
+            plan.rationale_candidate_config_file_sha256
+        ),
+        "rationale_corpus_records_sha256": plan.rationale_corpus_records_sha256,
+        "rationale_corpus_manifest_sha256": plan.rationale_corpus_manifest_sha256,
+        "rationale_corpus_audit_sha256": plan.rationale_corpus_audit_sha256,
+    }
+    mismatched = [
+        field_name
+        for field_name, expected_value in expected.items()
+        if getattr(adapter, field_name) != expected_value
+    ]
+    if mismatched:
+        raise GateBValidationError(
+            f"adapter training-target provenance mismatch: {mismatched!r}"
+        )
 
 
 def _load_json_artifact(
@@ -1684,7 +1882,11 @@ def _prepare_adapter_bundle(
     _validate_adapter_weight_files(root, names)
     inventory = _file_inventory(root, excluded=set())
     manifest = {
-        "schema_version": _ADAPTER_MANIFEST_SCHEMA,
+        "schema_version": (
+            _ADAPTER_MANIFEST_SCHEMA
+            if plan.training_target_kind == "direct_answer"
+            else _RATIONALE_ADAPTER_MANIFEST_SCHEMA
+        ),
         "model_id": OFFICIAL_MODEL_ID,
         "revision": PINNED_MODEL_REVISION,
         "config": config.as_dict(),
@@ -1719,6 +1921,34 @@ def _prepare_adapter_bundle(
         "package_versions": dict(sorted(result.package_versions.items())),
         "files": inventory,
     }
+    if plan.training_target_kind != "direct_answer":
+        if plan.training_target_kind != "verified_concise_rationale":
+            raise GateBValidationError(
+                f"unsupported training target kind: {plan.training_target_kind!r}"
+            )
+        manifest["training_target"] = {
+            "kind": plan.training_target_kind,
+            "candidate_config_sha256": _required_sha256(
+                plan.rationale_candidate_config_sha256,
+                "rationale candidate config sha256",
+            ),
+            "candidate_config_file_sha256": _required_sha256(
+                plan.rationale_candidate_config_file_sha256,
+                "rationale candidate config file sha256",
+            ),
+            "corpus_records_sha256": _required_sha256(
+                plan.rationale_corpus_records_sha256,
+                "rationale corpus records sha256",
+            ),
+            "corpus_manifest_sha256": _required_sha256(
+                plan.rationale_corpus_manifest_sha256,
+                "rationale corpus manifest sha256",
+            ),
+            "corpus_audit_sha256": _required_sha256(
+                plan.rationale_corpus_audit_sha256,
+                "rationale corpus audit sha256",
+            ),
+        }
     manifest_path = root / _MANIFEST_FILENAME
     _write_fsynced_file(
         manifest_path,

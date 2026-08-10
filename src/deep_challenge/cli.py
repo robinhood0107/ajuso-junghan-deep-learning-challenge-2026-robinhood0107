@@ -79,6 +79,14 @@ from .quality import (
     math_aware_fingerprint,
     source_format_fingerprint,
 )
+from .rationale_corpus import (
+    ConciseRationaleConfig,
+    RationaleCorpusEvidence,
+    audit_rationale_corpus,
+    build_rationale_corpus,
+    load_concise_rationale_config,
+    load_verified_rationale_corpus,
+)
 from .splits import (
     SplitManifest,
     build_group_clusters,
@@ -169,6 +177,15 @@ def _add_current_source_provenance(parser: argparse.ArgumentParser) -> None:
 
     parser.add_argument("--source-root", required=True, type=Path)
     parser.add_argument("--source-manifest", required=True, type=Path)
+
+
+def _add_optional_rationale_training_inputs(parser: argparse.ArgumentParser) -> None:
+    """Add the all-or-none private corpus inputs for the rationale candidate."""
+
+    parser.add_argument("--rationale-corpus", type=Path)
+    parser.add_argument("--rationale-manifest", type=Path)
+    parser.add_argument("--rationale-audit", type=Path)
+    parser.add_argument("--rationale-config", type=Path)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -276,8 +293,31 @@ def build_parser() -> argparse.ArgumentParser:
     _add_required_gate_b_data_contract(sft_preflight)
     sft_preflight.add_argument("--revision", required=True)
     sft_preflight.add_argument("--config", required=True, type=Path)
+    _add_optional_rationale_training_inputs(sft_preflight)
     sft_preflight.add_argument("--output", required=True, type=Path)
     sft_preflight.set_defaults(handler=_command_gate_b_sft_preflight)
+
+    rationale_build = subparsers.add_parser(
+        "build-rationale-corpus",
+        help="CPU-only canonicalization of a private fold-training teacher JSONL",
+    )
+    _add_required_gate_b_data_contract(rationale_build)
+    rationale_build.add_argument("--source-jsonl", required=True, type=Path)
+    rationale_build.add_argument("--rationale-config", required=True, type=Path)
+    rationale_build.add_argument("--output-jsonl", required=True, type=Path)
+    rationale_build.add_argument("--output-manifest", required=True, type=Path)
+    rationale_build.set_defaults(handler=_command_build_rationale_corpus)
+
+    rationale_audit = subparsers.add_parser(
+        "audit-rationale-corpus",
+        help="CPU-only raw-free audit of a canonical concise-rationale corpus",
+    )
+    _add_required_gate_b_data_contract(rationale_audit)
+    rationale_audit.add_argument("--rationale-corpus", required=True, type=Path)
+    rationale_audit.add_argument("--rationale-manifest", required=True, type=Path)
+    rationale_audit.add_argument("--rationale-config", required=True, type=Path)
+    rationale_audit.add_argument("--output", required=True, type=Path)
+    rationale_audit.set_defaults(handler=_command_audit_rationale_corpus)
 
     development = subparsers.add_parser(
         "gate-b-development",
@@ -321,6 +361,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_required_gate_b_data_contract(train_fold)
     _add_gpu_runtime_gate(train_fold)
     _add_current_source_provenance(train_fold)
+    _add_optional_rationale_training_inputs(train_fold)
     train_fold.add_argument("--base-baseline-manifest", required=True, type=Path)
     train_fold.add_argument("--output-dir", required=True, type=Path)
     train_fold.set_defaults(handler=_command_gate_b_train_fold)
@@ -1183,6 +1224,13 @@ def _command_gate_b_sft_preflight(args: argparse.Namespace) -> int:
     development_records = tuple(record for record in train if record.id in required_ids)
     if len(development_records) != len(required_ids):  # pragma: no cover - split guard
         raise RuntimeError("SFT preflight could not resolve every development-CV row")
+    training_records = _records_for_ids(train.records, training_ids)
+    rationale_corpus, rationale_config = _load_optional_rationale_training_inputs(
+        args,
+        training_records=training_records,
+        split_manifest=manifest,
+        exclusions=exclusions,
+    )
     tokenizer, tokenizer_provenance = load_pinned_tokenizer(
         revision=args.revision,
         local_files_only=True,
@@ -1199,6 +1247,8 @@ def _command_gate_b_sft_preflight(args: argparse.Namespace) -> int:
         development_shard_sha256=args.expected_development_shard_sha256,
         output_path=args.output,
         folds=(args.fold,),
+        rationale_corpus=rationale_corpus,
+        rationale_config=rationale_config,
         config=config,
     )
     print(
@@ -1211,6 +1261,81 @@ def _command_gate_b_sft_preflight(args: argparse.Namespace) -> int:
                 "development_cv_count": len(required_ids),
                 "torch_or_cuda_used": False,
                 "locked_holdout_accessed": False,
+                "training_target_kind": (
+                    "direct_answer"
+                    if rationale_config is None
+                    else rationale_config.training_target_kind
+                ),
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _command_build_rationale_corpus(args: argparse.Namespace) -> int:
+    train, exclusions, manifest = _load_gate_b_data_contract(args)
+    training_records = _records_for_ids(
+        train.records,
+        eligible_training_ids(manifest, args.fold, exclusions.ids),
+    )
+    config, config_file_sha256 = load_concise_rationale_config(
+        args.rationale_config
+    )
+    result = build_rationale_corpus(
+        args.source_jsonl,
+        training_records,
+        split_manifest=manifest,
+        fold=args.fold,
+        excluded_ids=exclusions.ids,
+        candidate_config_file_sha256=config_file_sha256,
+        output_jsonl=args.output_jsonl,
+        output_manifest=args.output_manifest,
+        config=config,
+    )
+    print(
+        json.dumps(
+            {
+                **asdict(result),
+                "training_target_kind": config.training_target_kind,
+                "leaderboard_or_test_used": False,
+                "locked_holdout_accessed": False,
+                "torch_or_cuda_used": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _command_audit_rationale_corpus(args: argparse.Namespace) -> int:
+    train, exclusions, manifest = _load_gate_b_data_contract(args)
+    training_records = _records_for_ids(
+        train.records,
+        eligible_training_ids(manifest, args.fold, exclusions.ids),
+    )
+    config, config_file_sha256 = load_concise_rationale_config(
+        args.rationale_config
+    )
+    result = audit_rationale_corpus(
+        args.rationale_corpus,
+        args.rationale_manifest,
+        training_records,
+        split_manifest=manifest,
+        fold=args.fold,
+        excluded_ids=exclusions.ids,
+        candidate_config_file_sha256=config_file_sha256,
+        output_path=args.output,
+        config=config,
+    )
+    print(
+        json.dumps(
+            {
+                **asdict(result),
+                "raw_rationale_serialized": False,
+                "leaderboard_or_test_used": False,
+                "locked_holdout_accessed": False,
+                "torch_or_cuda_used": False,
             },
             sort_keys=True,
         )
@@ -1396,6 +1521,12 @@ def _command_gate_b_train_fold(args: argparse.Namespace) -> int:
         train.records,
         eligible_validation_ids(manifest, args.fold, exclusions.ids),
     )
+    rationale_corpus, rationale_config = _load_optional_rationale_training_inputs(
+        args,
+        training_records=training_records,
+        split_manifest=manifest,
+        exclusions=exclusions,
+    )
     require_base_development_artifact(
         args.base_baseline_manifest,
         validation_records,
@@ -1419,6 +1550,8 @@ def _command_gate_b_train_fold(args: argparse.Namespace) -> int:
         gpu_smoke_artifact=args.gpu_smoke_report,
         output_dir=args.output_dir,
         gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+        rationale_corpus=rationale_corpus,
+        rationale_config=rationale_config,
         config=config,
     )
     print(json.dumps(asdict(result), sort_keys=True))
@@ -1707,6 +1840,48 @@ def _load_gate_b_data_contract(
         expected_bundle_sha256=args.expected_development_shard_sha256,
     )
     return evidence.dataset, exclusions, manifest
+
+
+def _load_optional_rationale_training_inputs(
+    args: argparse.Namespace,
+    *,
+    training_records: Sequence[MathRecord],
+    split_manifest: SplitManifest,
+    exclusions: TrainExclusionSet,
+) -> tuple[RationaleCorpusEvidence | None, ConciseRationaleConfig | None]:
+    names = (
+        "rationale_corpus",
+        "rationale_manifest",
+        "rationale_audit",
+        "rationale_config",
+    )
+    values = tuple(getattr(args, name, None) for name in names)
+    if all(value is None for value in values):
+        return None, None
+    if any(value is None for value in values):
+        missing = [name for name, value in zip(names, values, strict=True) if value is None]
+        raise ValueError(
+            "concise-rationale training inputs are all-or-none; "
+            f"missing={missing!r}"
+        )
+    corpus_path, manifest_path, audit_path, config_path = values
+    assert isinstance(corpus_path, Path)
+    assert isinstance(manifest_path, Path)
+    assert isinstance(audit_path, Path)
+    assert isinstance(config_path, Path)
+    config, config_file_sha256 = load_concise_rationale_config(config_path)
+    evidence = load_verified_rationale_corpus(
+        corpus_path,
+        manifest_path,
+        training_records,
+        split_manifest=split_manifest,
+        fold=args.fold,
+        excluded_ids=exclusions.ids,
+        candidate_config_file_sha256=config_file_sha256,
+        audit_path=audit_path,
+        config=config,
+    )
+    return evidence, config
 
 
 def _load_gate_b_preclaim_contract(

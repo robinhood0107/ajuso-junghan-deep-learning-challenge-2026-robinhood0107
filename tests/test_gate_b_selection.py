@@ -46,6 +46,7 @@ from deep_challenge.provenance import (
     validate_source_tree_manifest_artifact,
     write_json_atomic,
 )
+from deep_challenge.rationale_corpus import DEFAULT_CONCISE_RATIONALE_CONFIG
 from deep_challenge.splits import (
     SplitManifest,
     build_group_clusters,
@@ -187,6 +188,7 @@ def _fake_adapter_evidence(
     manifest: SplitManifest,
     records: tuple[MathRecord, ...],
     method_salt: str = "shared-method",
+    rationale: bool = False,
 ) -> AdapterArtifactEvidence:
     adapter_path = tmp_path / f"{label}.fold{fold}.adapter"
     adapter_path.mkdir()
@@ -204,6 +206,22 @@ def _fake_adapter_evidence(
     def digest(value: str) -> str:
         return hashlib.sha256(value.encode()).hexdigest()
 
+    target_evidence: dict[str, object] = {}
+    if rationale:
+        target_evidence = {
+            "training_target_kind": "verified_concise_rationale",
+            "rationale_candidate_config_sha256": (
+                DEFAULT_CONCISE_RATIONALE_CONFIG.sha256
+            ),
+            "rationale_candidate_config_file_sha256": "5" * 64,
+            "rationale_corpus_records_sha256": digest(
+                f"rationale-records:{fold}"
+            ),
+            "rationale_corpus_manifest_sha256": digest(
+                f"rationale-manifest:{fold}"
+            ),
+            "rationale_corpus_audit_sha256": digest(f"rationale-audit:{fold}"),
+        }
     return AdapterArtifactEvidence(
         path=str(adapter_path.resolve()),
         artifact_sha256=digest(f"artifact:{label}:{fold}"),
@@ -231,6 +249,7 @@ def _fake_adapter_evidence(
         source_manifest_sha256=digest(f"source-manifest:{method_salt}"),
         source_tree_sha256=digest(f"source-tree:{method_salt}"),
         source_file_count=1,
+        **target_evidence,
     )
 
 
@@ -244,6 +263,21 @@ def _install_fake_adapter_validator(
         return by_path[Path(path).resolve(strict=True)]
 
     monkeypatch.setattr(selection_module, "validate_adapter_artifact", validate)
+
+
+def test_direct_adapter_method_fingerprint_retains_v1_contract(tmp_path: Path) -> None:
+    manifest, records = _fixture()
+    adapter = _fake_adapter_evidence(
+        tmp_path,
+        label="qlora",
+        fold=0,
+        manifest=manifest,
+        records=records,
+    )
+
+    assert selection_module._adapter_method_fingerprint(adapter) == (
+        "91bf72f9f75c4c29355f833c7c2acc094faa57c601aaa14f17101233b6cae7b2"
+    )
 
 
 def _validation_records(
@@ -331,7 +365,10 @@ def _rewrite_probe_statistics(
 
 
 def _oof_comparison(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    rationale: bool = False,
 ) -> tuple[
     Path,
     SplitManifest,
@@ -355,6 +392,7 @@ def _oof_comparison(
             fold=fold,
             manifest=manifest,
             records=records,
+            rationale=rationale,
         )
         candidate = _write_run(
             tmp_path,
@@ -742,6 +780,70 @@ def test_cross_fold_comparison_pools_every_fold_and_freezes_deployment_fold(
     assert frozen["comparison_scope"] == "complete_out_of_fold_union"
     assert frozen["fold"] == 0
     assert frozen["primary"]["checkpoint_sha256"] == adapters[0].artifact_sha256
+    validated = validate_frozen_selection_methods(
+        freeze,
+        split_manifest=manifest,
+        train_file_sha256="1" * 64,
+        exclusions_file_sha256="2" * 64,
+        excluded_ids_sha256=hashlib.sha256(b"[]").hexdigest(),
+        split_artifact_sha256="3" * 64,
+        development_shard_sha256="4" * 64,
+        fold=0,
+    )
+    assert validated.primary_label == "qlora"
+
+
+def test_rationale_adapter_provenance_survives_oof_comparison_and_freeze(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    comparison, manifest, _, adapters = _oof_comparison(
+        tmp_path,
+        monkeypatch,
+        rationale=True,
+    )
+    payload = json.loads(comparison.read_text(encoding="utf-8"))
+    deployment_evidence = payload["runs"]["qlora"]["adapter_artifact"]
+    assert deployment_evidence == {
+        "path": adapters[0].path,
+        "artifact_sha256": adapters[0].artifact_sha256,
+        "manifest_sha256": adapters[0].manifest_sha256,
+        "checksums_sha256": adapters[0].checksums_sha256,
+        "training_target_kind": "verified_concise_rationale",
+        "rationale_candidate_config_sha256": (
+            DEFAULT_CONCISE_RATIONALE_CONFIG.sha256
+        ),
+        "rationale_candidate_config_file_sha256": "5" * 64,
+        "rationale_corpus_records_sha256": (
+            adapters[0].rationale_corpus_records_sha256
+        ),
+        "rationale_corpus_manifest_sha256": (
+            adapters[0].rationale_corpus_manifest_sha256
+        ),
+        "rationale_corpus_audit_sha256": adapters[0].rationale_corpus_audit_sha256,
+    }
+
+    source_manifest = tmp_path / "source.json"
+    source_manifest.write_text(
+        json.dumps({"tree_sha256": "c" * 64, "files": [{"path": "x"}]}) + "\n",
+        encoding="utf-8",
+    )
+    lockfile = tmp_path / "uv.lock"
+    lockfile.write_text("version = 1\n", encoding="utf-8")
+    freeze = tmp_path / "rationale-oof-freeze.json"
+    freeze_development_selection(
+        comparison,
+        primary_label="qlora",
+        fallback_label="base",
+        decision_note="Complete OOF evidence selected the rationale adapter.",
+        source_manifest_path=source_manifest,
+        lockfile_path=lockfile,
+        output_path=freeze,
+        now=lambda: datetime(2026, 8, 11, tzinfo=UTC),
+    )
+
+    frozen = json.loads(freeze.read_text(encoding="utf-8"))
+    assert frozen["primary"]["adapter_artifact"] == deployment_evidence
     validated = validate_frozen_selection_methods(
         freeze,
         split_manifest=manifest,
