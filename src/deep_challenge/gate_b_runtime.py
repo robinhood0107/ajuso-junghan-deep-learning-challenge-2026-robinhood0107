@@ -50,7 +50,7 @@ from .gpu_smoke import (
     SYNTHETIC_SMOKE_USER_PROMPT,
 )
 from .model_preflight import OFFICIAL_MODEL_ID, PINNED_WEIGHT_ARTIFACTS
-from .provenance import canonical_json_bytes, sha256_file
+from .provenance import SourceTreeArtifactEvidence, canonical_json_bytes, sha256_file
 from .splits import (
     SplitManifest,
     SplitPartition,
@@ -61,7 +61,7 @@ from .splits import (
 
 _TRAIN_ID_RE = re.compile(r"train-\d{6}\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
-_ADAPTER_MANIFEST_SCHEMA = "gate-b-qlora-adapter-v2"
+_ADAPTER_MANIFEST_SCHEMA = "gate-b-qlora-adapter-v3"
 _CHECKSUM_FILENAME = "CHECKSUMS.sha256"
 _MANIFEST_FILENAME = "manifest.json"
 GPU_EXECUTION_ACKNOWLEDGEMENT = "USE_GPU_AFTER_FINAL_SMOKE"
@@ -227,6 +227,9 @@ class AdapterArtifactEvidence:
     development_shard_sha256: str
     preflight_sha256: str
     gpu_smoke_sha256: str
+    source_manifest_sha256: str
+    source_tree_sha256: str
+    source_file_count: int
 
 
 class FoldTrainingRuntime(Protocol):
@@ -413,6 +416,7 @@ def train_qlora_fold(
     exclusions_file_sha256: str,
     split_artifact_sha256: str,
     development_shard_sha256: str,
+    source_manifest: SourceTreeArtifactEvidence,
     preflight_artifact: str | Path,
     gpu_smoke_artifact: str | Path,
     output_dir: str | Path,
@@ -428,6 +432,7 @@ def train_qlora_fold(
     """
 
     _require_gpu_acknowledgement(gpu_acknowledgement)
+    source_evidence = _validated_source_manifest_evidence(source_manifest)
     data_provenance = {
         "train_file_sha256": _required_sha256(
             train_file_sha256, "train_file_sha256"
@@ -498,6 +503,7 @@ def train_qlora_fold(
             gate=gate,
             result=result,
             data_provenance=data_provenance,
+            source_manifest=source_evidence,
             config=config,
         )
         staged = validate_adapter_artifact(export_dir, config=config)
@@ -603,6 +609,19 @@ def validate_adapter_artifact(
     gpu_smoke_sha256 = _required_sha256(
         manifest.get("gpu_smoke_sha256"), "adapter gpu_smoke_sha256"
     )
+    source_manifest_sha256 = _required_sha256(
+        manifest.get("source_manifest_sha256"), "adapter source_manifest_sha256"
+    )
+    source_tree_sha256 = _required_sha256(
+        manifest.get("source_tree_sha256"), "adapter source_tree_sha256"
+    )
+    source_file_count = manifest.get("source_file_count")
+    if (
+        isinstance(source_file_count, bool)
+        or not isinstance(source_file_count, int)
+        or source_file_count < 1
+    ):
+        raise GateBValidationError("adapter source_file_count must be positive")
     integer_fields: dict[str, int] = {}
     for field_name in ("fold", "training_count", "validation_count"):
         value = manifest.get(field_name)
@@ -672,6 +691,9 @@ def validate_adapter_artifact(
         development_shard_sha256=development_shard_sha256,
         preflight_sha256=preflight_sha256,
         gpu_smoke_sha256=gpu_smoke_sha256,
+        source_manifest_sha256=source_manifest_sha256,
+        source_tree_sha256=source_tree_sha256,
+        source_file_count=source_file_count,
     )
 
 
@@ -1003,6 +1025,12 @@ class TransformersNF4GenerationBackend:
             else self._adapter.artifact_sha256
         )
 
+    @property
+    def runtime_gate_evidence(self) -> RuntimeGateEvidence:
+        """Expose the exact validated B0 pair for private run-manifest binding."""
+
+        return self._gate
+
     def generate(self, request: GenerationRequest) -> GenerationResult:
         self._validate_request(request)
         if self._closed:
@@ -1316,6 +1344,37 @@ def _require_runtime_evidence(evidence: RuntimeGateEvidence, config: GateBConfig
         raise GateBPreflightRequiredError("runtime evidence has no bound GPU device name")
 
 
+def _validated_source_manifest_evidence(
+    value: SourceTreeArtifactEvidence,
+) -> SourceTreeArtifactEvidence:
+    """Require the source snapshot bytes that a training manifest will cite."""
+
+    if not isinstance(value, SourceTreeArtifactEvidence):
+        raise TypeError("source_manifest must be SourceTreeArtifactEvidence")
+    supplied = Path(value.path)
+    if supplied.is_symlink():
+        raise GateBValidationError("source manifest must not be a symbolic link")
+    source = supplied.resolve(strict=True)
+    if not source.is_file():
+        raise GateBValidationError("source manifest must be a regular file")
+    digest = sha256_file(source)
+    if digest != _required_sha256(value.sha256, "source manifest sha256"):
+        raise GateBValidationError("source manifest bytes changed after validation")
+    tree_sha256 = _required_sha256(value.tree_sha256, "source tree_sha256")
+    if (
+        isinstance(value.file_count, bool)
+        or not isinstance(value.file_count, int)
+        or value.file_count < 1
+    ):
+        raise GateBValidationError("source manifest file_count must be positive")
+    return SourceTreeArtifactEvidence(
+        path=str(source),
+        sha256=digest,
+        tree_sha256=tree_sha256,
+        file_count=value.file_count,
+    )
+
+
 def _validate_plan_binding(plan: FoldSFTPlan, config: GateBConfig) -> None:
     if not isinstance(plan, FoldSFTPlan):
         raise TypeError("plan must be FoldSFTPlan")
@@ -1599,6 +1658,7 @@ def _prepare_adapter_bundle(
     gate: RuntimeGateEvidence,
     result: RuntimeTrainingResult,
     data_provenance: Mapping[str, str],
+    source_manifest: SourceTreeArtifactEvidence,
     config: GateBConfig,
 ) -> None:
     if not any(root.iterdir()):
@@ -1625,6 +1685,9 @@ def _prepare_adapter_bundle(
         "config_sha256": config.sha256,
         "preflight_sha256": gate.preflight_sha256,
         "gpu_smoke_sha256": gate.smoke_sha256,
+        "source_manifest_sha256": source_manifest.sha256,
+        "source_tree_sha256": source_manifest.tree_sha256,
+        "source_file_count": source_manifest.file_count,
         "train_file_sha256": data_provenance["train_file_sha256"],
         "exclusions_file_sha256": data_provenance["exclusions_file_sha256"],
         "split_artifact_sha256": data_provenance["split_artifact_sha256"],

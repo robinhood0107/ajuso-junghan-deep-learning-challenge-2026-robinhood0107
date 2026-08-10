@@ -21,6 +21,9 @@ Accuracy가 높아도 정수 추출·CSV schema·offline cache 중 하나가 틀
   artifact digest, fold 간 공통 training-method fingerprint를 재검증한다.
 - `predictions.jsonl`/inference manifest는 raw completion, finish reason, input/output token 수, parser 결과,
   seed, prompt/checkpoint/config SHA, split/fold/group, latency, peak VRAM을 보존한다.
+- development v2 manifest는 source manifest/tree SHA, config-file byte SHA, B0 preflight/smoke
+  byte SHA, GPU device name, seed/prompt sequence digest, latency summary까지 결속한다. adapter
+  training은 이 private evidence를 재-hash한 fixed-base v2 manifest만 입력으로 받는다.
 - production validator와 별개로 `verify-submission-independent`가 primary data/submission
   모듈을 import하지 않는 최소 CSV parser로 header·ID·순서·정수를 교차검증한다.
 
@@ -158,14 +161,13 @@ NaN
 
 정답 reference 없이 parser가 반환하는 값만 먼저 테스트하는 fixture suite는 구현했다.
 실제 base/SFT 모델을 실행한 뒤에는 raw generation과 사람이 확정한 기대 parse를
-익명화해 golden regression corpus로 추가한다. 2026-08-10 old-source fold 0 diagnostic은
-atomic publish된 2,942행 bundle을 남겼고, private v2 audit은 19개
+익명화해 golden regression corpus로 추가한다. 2026-08-10 old-source와 당시-current-source v1
+fold 0 diagnostic은 각각 atomic publish된 2,942행 bundle을 남겼고, private audits는 19개
 status/source/reason-code outcome class를 확인했다. 여기서 선택한 boxed/final/hash/fallback
 구조만 안전한 synthetic fixture로 재현했으며 실제 completion, ID, question, reference
-answer, parsed value는 public code에 넣지 않았다. full CPU regression은 이 fixture를 포함해
-349 passed, 1 skipped였다. 이 diagnostic은 parser gate를 닫지만 attention-mask/cache 보강 전
-source이므로 다음 GPU 단계의 model selection 또는 QLoRA authorization은 여전히 허용하지
-않는다.
+answer, parsed value는 public code에 넣지 않았다. 당시-current-source v1 diagnostic도 B0/source/
+config-file byte binding이 없어 parser gate만 닫는다. 다음 GPU 단계의 model selection 또는
+QLoRA authorization은 새 v2 manifest를 가진 base run을 요구한다.
 
 `audit-parser-golden`은 이 작업의 private CPU-only 입력 검증 단계다. manifest checksum과
 JSONL line count, fold-validation/cross-validation partition, 각 row의 completion hash와

@@ -9,6 +9,7 @@ from deep_challenge.provenance import (
     build_source_tree_manifest,
     canonical_json_bytes,
     sha256_file,
+    validate_source_tree_manifest_artifact,
     write_json_atomic,
 )
 
@@ -64,6 +65,27 @@ def test_source_tree_manifest_can_exclude_its_own_output(tmp_path: Path) -> None
     second = build_source_tree_manifest(tmp_path, excluded_paths=(output,))
     assert first == second
     assert [entry.path for entry in second.files] == ["a.py"]
+
+
+def test_runtime_source_manifest_must_match_the_current_tree(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    module = source_root / "a.py"
+    module.write_text("a = 1\n", encoding="utf-8")
+    output = tmp_path / "source-manifest.json"
+    write_json_atomic(
+        output,
+        build_source_tree_manifest(source_root, excluded_paths=(output,)).as_dict(),
+    )
+
+    evidence = validate_source_tree_manifest_artifact(output, root=source_root)
+    assert evidence.path == str(output.resolve())
+    assert evidence.file_count == 1
+    assert evidence.tree_sha256
+
+    module.write_text("a = 2\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="does not match"):
+        validate_source_tree_manifest_artifact(output, root=source_root)
 
 
 def test_source_tree_manifest_rejects_symbolic_links(tmp_path: Path) -> None:

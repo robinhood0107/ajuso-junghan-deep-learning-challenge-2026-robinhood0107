@@ -27,7 +27,11 @@ from .answers import AnswerParseResult, parse_answer
 from .data import MathRecord
 from .inference import deterministic_seed
 from .model_preflight import OFFICIAL_MODEL_ID, OFFICIAL_REVISION
-from .provenance import canonical_json_bytes
+from .provenance import (
+    SourceTreeArtifactEvidence,
+    canonical_json_bytes,
+    sha256_file,
+)
 from .splits import (
     SplitManifest,
     SplitPartition,
@@ -442,6 +446,127 @@ class DevelopmentArtifactWriteResult:
     manifest_sha256: str
 
 
+@dataclass(frozen=True, slots=True)
+class DevelopmentExecutionEvidence:
+    """Immutable runtime/source binding stored beside one private development run.
+
+    The raw generation JSONL remains private, but its manifest must make the
+    exact B0 artifacts, source snapshot, configuration bytes, and observed GPU
+    identity auditable before the run can authorize QLoRA training.
+    """
+
+    source_manifest: SourceTreeArtifactEvidence
+    config_path: str
+    config_file_sha256: str
+    config_sha256: str
+    preflight_report_path: str
+    preflight_report_sha256: str
+    gpu_smoke_report_path: str
+    gpu_smoke_report_sha256: str
+    gpu_device_name: str
+
+    def as_dict(self) -> dict[str, object]:
+        """Return the serialized private-manifest representation."""
+
+        return {
+            "schema_version": "gate-b1-execution-evidence-v1",
+            "source_manifest": {
+                "path": self.source_manifest.path,
+                **self.source_manifest.as_dict(),
+            },
+            "config_file": {
+                "path": self.config_path,
+                "sha256": self.config_file_sha256,
+                "config_sha256": self.config_sha256,
+            },
+            "runtime_gate": {
+                "preflight_report": {
+                    "path": self.preflight_report_path,
+                    "sha256": self.preflight_report_sha256,
+                },
+                "gpu_smoke_report": {
+                    "path": self.gpu_smoke_report_path,
+                    "sha256": self.gpu_smoke_report_sha256,
+                },
+                "gpu_device_name": self.gpu_device_name,
+            },
+        }
+
+
+def create_development_execution_evidence(
+    *,
+    source_manifest: SourceTreeArtifactEvidence,
+    config_path: str | Path,
+    config_sha256: str,
+    preflight_report_path: str | Path,
+    preflight_report_sha256: str,
+    gpu_smoke_report_path: str | Path,
+    gpu_smoke_report_sha256: str,
+    gpu_device_name: str,
+) -> DevelopmentExecutionEvidence:
+    """Re-hash all runtime inputs that the already-created backend used.
+
+    ``source_manifest`` must have been validated against the current source
+    tree before backend creation.  The remaining B0/config files are re-hashed
+    here and must agree with the runtime gate, so a file replacement between
+    preflight validation and artifact publication fails closed.
+    """
+
+    if not isinstance(source_manifest, SourceTreeArtifactEvidence):
+        raise TypeError("source_manifest must be SourceTreeArtifactEvidence")
+    source_path, source_digest = _regular_file_identity(
+        source_manifest.path, "source manifest"
+    )
+    if source_digest != source_manifest.sha256:
+        raise GateBValidationError("source manifest bytes changed after validation")
+    _validated_sha256(source_manifest.tree_sha256, "source manifest tree_sha256")
+    if (
+        isinstance(source_manifest.file_count, bool)
+        or not isinstance(source_manifest.file_count, int)
+        or source_manifest.file_count < 1
+    ):
+        raise GateBValidationError("source manifest file_count must be positive")
+    config_file, config_digest = _regular_file_identity(config_path, "Gate B config")
+    expected_config = _validated_sha256(config_sha256, "config_sha256")
+    _validate_config_file_semantic_sha(config_file, expected_config)
+    preflight_file, preflight_digest = _regular_file_identity(
+        preflight_report_path, "model preflight report"
+    )
+    expected_preflight = _validated_sha256(
+        preflight_report_sha256, "preflight_report_sha256"
+    )
+    if preflight_digest != expected_preflight:
+        raise GateBValidationError("model preflight report bytes changed after runtime gate")
+    smoke_file, smoke_digest = _regular_file_identity(
+        gpu_smoke_report_path, "GPU smoke report"
+    )
+    expected_smoke = _validated_sha256(gpu_smoke_report_sha256, "gpu_smoke_report_sha256")
+    if smoke_digest != expected_smoke:
+        raise GateBValidationError("GPU smoke report bytes changed after runtime gate")
+    if (
+        not isinstance(gpu_device_name, str)
+        or not gpu_device_name.strip()
+        or gpu_device_name != gpu_device_name.strip()
+    ):
+        raise GateBValidationError("gpu_device_name must be a non-empty trimmed string")
+    return DevelopmentExecutionEvidence(
+        source_manifest=SourceTreeArtifactEvidence(
+            path=source_path,
+            sha256=source_digest,
+            tree_sha256=source_manifest.tree_sha256,
+            file_count=source_manifest.file_count,
+        ),
+        config_path=config_file,
+        config_file_sha256=config_digest,
+        config_sha256=expected_config,
+        preflight_report_path=preflight_file,
+        preflight_report_sha256=preflight_digest,
+        gpu_smoke_report_path=smoke_file,
+        gpu_smoke_report_sha256=smoke_digest,
+        gpu_device_name=gpu_device_name,
+    )
+
+
 class TransformersGenerationBackend:
     """Explicit placeholder for the real, target-host Transformers adapter."""
 
@@ -671,6 +796,7 @@ def write_development_artifacts(
     *,
     jsonl_path: str | Path,
     manifest_path: str | Path,
+    execution_evidence: DevelopmentExecutionEvidence,
 ) -> DevelopmentArtifactWriteResult:
     """Atomically publish no-overwrite JSONL records and a checksum manifest.
 
@@ -681,6 +807,9 @@ def write_development_artifacts(
     """
 
     materialized = _validated_baseline_run(records)
+    validated_execution_evidence = _validated_execution_evidence(
+        execution_evidence, materialized
+    )
     records_bytes = (
         "".join(f"{record.to_json_line()}\n" for record in materialized).encode("utf-8")
     )
@@ -690,6 +819,7 @@ def write_development_artifacts(
         records_filename=Path(jsonl_path).name,
         records_bytes=len(records_bytes),
         records_sha256=records_digest,
+        execution_evidence=validated_execution_evidence,
     )
     manifest_bytes = (
         json.dumps(
@@ -931,6 +1061,7 @@ def _run_manifest_payload(
     records_filename: str,
     records_bytes: int,
     records_sha256: str,
+    execution_evidence: DevelopmentExecutionEvidence,
 ) -> dict[str, object]:
     first = records[0]
     problem_ids = tuple(dict.fromkeys(record.problem_id for record in records))
@@ -944,7 +1075,7 @@ def _run_manifest_payload(
     ]
     samples_per_problem = len(records) // len(problem_ids)
     return {
-        "schema_version": "gate-b1-development-run-v1",
+        "schema_version": "gate-b1-development-run-v2",
         "records_file": records_filename,
         "records_bytes": records_bytes,
         "records_sha256": records_sha256,
@@ -972,7 +1103,132 @@ def _run_manifest_payload(
         "input_token_count_total": sum(record.input_token_count for record in records),
         "output_token_count_total": sum(record.output_token_count for record in records),
         "peak_vram_allocated_bytes_max": max(peaks) if peaks else None,
+        "execution_evidence": execution_evidence.as_dict(),
+        "generation_evidence": _generation_evidence_payload(records),
     }
+
+
+def _validated_execution_evidence(
+    value: DevelopmentExecutionEvidence,
+    records: Sequence[DevelopmentBaselineRecord],
+) -> DevelopmentExecutionEvidence:
+    if not isinstance(value, DevelopmentExecutionEvidence):
+        raise TypeError("execution_evidence must be DevelopmentExecutionEvidence")
+    if not records:  # pragma: no cover - baseline validation already rejects this
+        raise GateBValidationError("execution evidence requires at least one record")
+    first = records[0]
+    if value.config_sha256 != first.config_sha256:
+        raise GateBValidationError("execution evidence config_sha256 mismatches records")
+    for field_name in (
+        "config_file_sha256",
+        "preflight_report_sha256",
+        "gpu_smoke_report_sha256",
+    ):
+        _validated_sha256(getattr(value, field_name), f"execution evidence {field_name}")
+    for field_name in (
+        "config_path",
+        "preflight_report_path",
+        "gpu_smoke_report_path",
+        "gpu_device_name",
+    ):
+        field_value = getattr(value, field_name)
+        if (
+            not isinstance(field_value, str)
+            or not field_value.strip()
+            or field_value != field_value.strip()
+        ):
+            raise GateBValidationError(
+                f"execution evidence {field_name} must be a non-empty trimmed string"
+            )
+    source = value.source_manifest
+    if not isinstance(source, SourceTreeArtifactEvidence):
+        raise TypeError("execution evidence source_manifest is invalid")
+    _validated_sha256(source.sha256, "execution evidence source manifest sha256")
+    _validated_sha256(source.tree_sha256, "execution evidence source tree_sha256")
+    if (
+        isinstance(source.file_count, bool)
+        or not isinstance(source.file_count, int)
+        or source.file_count < 1
+    ):
+        raise GateBValidationError("execution evidence source manifest file_count is invalid")
+    if not isinstance(source.path, str) or not source.path.strip():
+        raise GateBValidationError("execution evidence source manifest path is invalid")
+    return value
+
+
+def _generation_evidence_payload(
+    records: Sequence[DevelopmentBaselineRecord],
+) -> dict[str, object]:
+    """Summarize seed/prompt/latency evidence without copying raw generations."""
+
+    ordered = tuple(sorted(records, key=lambda record: (record.problem_id, record.sample_index)))
+    latencies = tuple(record.latency_ms for record in ordered)
+    latency_total = math.fsum(latencies)
+    return {
+        "schema_version": "gate-b1-generation-evidence-v1",
+        "seed_sequence_sha256": hashlib.sha256(
+            canonical_json_bytes([record.seed for record in ordered])
+        ).hexdigest(),
+        "prompt_sha256_sequence_sha256": hashlib.sha256(
+            canonical_json_bytes([record.prompt_sha256 for record in ordered])
+        ).hexdigest(),
+        "latency_ms": {
+            "count": len(latencies),
+            "total": latency_total,
+            "min": min(latencies),
+            "max": max(latencies),
+            "mean": latency_total / len(latencies),
+        },
+    }
+
+
+def _regular_file_identity(path: str | Path, label: str) -> tuple[str, str]:
+    supplied = Path(path)
+    if supplied.is_symlink():
+        raise GateBValidationError(f"{label} must not be a symbolic link")
+    source = supplied.resolve(strict=True)
+    if not source.is_file():
+        raise GateBValidationError(f"{label} must be a regular file: {source}")
+    return str(source), sha256_file(source)
+
+
+def _validate_config_file_semantic_sha(path: str, expected_sha256: str) -> None:
+    """Ensure the post-generation config bytes still describe the runtime config."""
+
+    try:
+        payload = json.loads(
+            Path(path).read_text(encoding="utf-8", errors="strict"),
+            object_pairs_hook=_unique_config_json_object,
+            parse_constant=_reject_config_json_constant,
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise GateBValidationError(f"Gate B config file is invalid: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise GateBValidationError("Gate B config file must contain one JSON object")
+    stored_sha256 = payload.pop("config_sha256", None)
+    if not isinstance(stored_sha256, str):
+        raise GateBValidationError("Gate B config file is missing config_sha256")
+    try:
+        parsed = GateBConfig(**payload)
+    except (TypeError, GateBValidationError) as exc:
+        raise GateBValidationError(f"Gate B config file schema is invalid: {exc}") from exc
+    if stored_sha256 != parsed.sha256 or parsed.sha256 != expected_sha256:
+        raise GateBValidationError(
+            "Gate B config file semantic SHA does not match the runtime config"
+        )
+
+
+def _unique_config_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        payload[key] = value
+    return payload
+
+
+def _reject_config_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON numeric constant {value!r}")
 
 
 def _validated_artifact_targets(
@@ -1155,6 +1411,7 @@ __all__ = [
     "DecodingPolicy",
     "DevelopmentArtifactWriteResult",
     "DevelopmentBaselineRecord",
+    "DevelopmentExecutionEvidence",
     "DirectAnswerSFTExample",
     "EncodedSFTExample",
     "GateBArtifactExistsError",
@@ -1167,6 +1424,7 @@ __all__ = [
     "PINNED_MODEL_REVISION",
     "TransformersGenerationBackend",
     "build_direct_answer_sft_examples",
+    "create_development_execution_evidence",
     "encode_response_only_example",
     "run_development_baseline",
     "write_development_artifacts",

@@ -11,9 +11,12 @@ import deep_challenge.gate_b_holdout as holdout_module
 import deep_challenge.gate_b_selection as selection_module
 from deep_challenge.data import MathRecord
 from deep_challenge.gate_b import (
+    DEFAULT_GATE_B_CONFIG,
+    DevelopmentExecutionEvidence,
     GateBValidationError,
     GenerationRequest,
     GenerationResult,
+    create_development_execution_evidence,
     run_development_baseline,
     write_development_artifacts,
 )
@@ -31,7 +34,12 @@ from deep_challenge.gate_b_selection import (
     compare_cross_fold_development_runs,
     freeze_development_selection,
 )
-from deep_challenge.provenance import canonical_json_bytes
+from deep_challenge.provenance import (
+    build_source_tree_manifest,
+    canonical_json_bytes,
+    validate_source_tree_manifest_artifact,
+    write_json_atomic,
+)
 from deep_challenge.splits import (
     eligible_training_ids,
     eligible_validation_ids,
@@ -62,6 +70,47 @@ class _Backend:
 
 def _adapter_digest(fold: int) -> str:
     return hashlib.sha256(f"holdout-adapter:{fold}".encode()).hexdigest()
+
+
+def _execution_evidence(tmp_path: Path) -> DevelopmentExecutionEvidence:
+    source_root = tmp_path / "source"
+    source_root.mkdir(exist_ok=True)
+    (source_root / "runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
+    source_manifest_path = tmp_path / "source-manifest.json"
+    write_json_atomic(
+        source_manifest_path,
+        build_source_tree_manifest(source_root, excluded_paths=(source_manifest_path,)).as_dict(),
+    )
+    source_manifest = validate_source_tree_manifest_artifact(
+        source_manifest_path,
+        root=source_root,
+    )
+    config = tmp_path / "config.json"
+    preflight = tmp_path / "preflight.json"
+    smoke = tmp_path / "smoke.json"
+    config.write_text(
+        json.dumps(
+            {
+                **DEFAULT_GATE_B_CONFIG.as_dict(),
+                "config_sha256": DEFAULT_GATE_B_CONFIG.sha256,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    preflight.write_text("{}\n", encoding="utf-8")
+    smoke.write_text("{}\n", encoding="utf-8")
+    return create_development_execution_evidence(
+        source_manifest=source_manifest,
+        config_path=config,
+        config_sha256=DEFAULT_GATE_B_CONFIG.sha256,
+        preflight_report_path=preflight,
+        preflight_report_sha256=hashlib.sha256(preflight.read_bytes()).hexdigest(),
+        gpu_smoke_report_path=smoke,
+        gpu_smoke_report_sha256=hashlib.sha256(smoke.read_bytes()).hexdigest(),
+        gpu_device_name="NVIDIA Test GPU",
+    )
 
 
 def _fixture(
@@ -115,6 +164,7 @@ def _fixture(
                 generated,
                 jsonl_path=jsonl,
                 manifest_path=run_manifest,
+                execution_evidence=_execution_evidence(tmp_path),
             )
             adapter_path = None
             if method_kind == ADAPTER_METHOD_KIND:
@@ -156,6 +206,9 @@ def _fixture(
                     development_shard_sha256="4" * 64,
                     preflight_sha256="5" * 64,
                     gpu_smoke_sha256="6" * 64,
+                    source_manifest_sha256="7" * 64,
+                    source_tree_sha256="8" * 64,
+                    source_file_count=1,
                 )
                 adapter_by_path[adapter_dir.resolve()] = adapter
                 adapter_path = adapter_dir

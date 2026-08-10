@@ -2,11 +2,11 @@
 
 기준 시각: **2026-08-10 KST**
 대상 호스트: **WSL2 Ubuntu 24.04 + NVIDIA GeForce RTX 4070 SUPER 12GB**
-현재 판정: **CPU 준비 완료, current-source GPU preflight/final synthetic smoke green, B1 production 실행 대기**
+현재 판정: **CPU 준비 완료, GPU 환경은 검증됨, 새 v2 source의 B0/B1 재실행 대기**
 
 이 문서는 현재 코드의 CLI와 정확히 일치하는 실행 순서다. GPU가 필요한 명령은 맨
 뒤의 별도 절에만 둔다. 2026-08-10 이전 source final smoke와 별도로, training cache-off와
-eval KV-cache-on을 분리한 current source는 run tag `20260810T062500KST`에서 새 tagged smoke를
+eval KV-cache-on을 분리한 당시 source는 run tag `20260810T062500KST`에서 새 tagged smoke를
 green으로 닫았다.
 이후 실제 모델 실행도 다른 프로세스를 종료하거나 threshold를 완화하지 않고, 새 run마다 physical
 VRAM을 다시 검사한다.
@@ -49,6 +49,7 @@ SPLIT="$PROJECT/artifacts/analysis/splits-v4.json"
 DEV_SHARD="$PROJECT/artifacts/analysis/development-cv-v4"
 CONFIG="$PROJECT/configs/gate_b/rtx4070-super-12gb-direct-answer-v1.json"
 RUN_TAG=replace-with-new-unique-tag
+SOURCE_MANIFEST="$PROJECT/artifacts/analysis/source-manifest-gate-b-$RUN_TAG.json"
 ```
 
 여기서 `SPLIT_SHA`는 `splits-v4.json` 안의 논리 split SHA다. split JSON 파일 자체의
@@ -164,7 +165,7 @@ submission allowance를 read-only 확인했다. 다음은 아직 확인하지 �
 
 ## 5. B0 GPU 승인 증거와 새 run 직전 재검사
 
-2026-08-10 target-host preflight와 local synthetic smoke는 current source에서 run tag
+2026-08-10 target-host preflight와 local synthetic smoke는 당시 source에서 run tag
 `20260810T062500KST`로 green이다. 이 pair는 같은 tag의 production B1에만 bind하며, 다른
 run tag에는 재사용하지 않고 이 절의 새 `RUN_TAG` preflight와 smoke를 순서대로 다시 만든다.
 다른 GPU 프로세스를 종료하거나 선점하지 않으며, 모든 새 GPU run 직전에는 아래 두 조건을
@@ -180,7 +181,7 @@ nvidia-smi --query-gpu=name,memory.total,memory.used,memory.free,compute_cap,dri
 
 이전-source 비교 evidence는
 `artifacts/analysis/model-preflight-gpu-current-20260810T001500KST.json`와
-`artifacts/analysis/gpu-smoke-20260810T001500KST.json`에 있다. current-source production
+`artifacts/analysis/gpu-smoke-20260810T001500KST.json`에 있다. 당시-current-source production
 binding은 `model-preflight-gpu-ready-20260810T062500KST.json`(physical 912/11,086MiB,
 `training_ready=true`)와 `gpu-smoke-20260810T062500KST.json`(`status=green`)이다. GPU 값은
 계속 변하므로 snapshot 수치를 현재 실시간 값이라고 주장하지 않고, 실제 실행 여부는 위
@@ -223,6 +224,16 @@ smoke는 CUDA context를 만들기 **전** read-only `nvidia-smi`로 external us
 immutable threshold도 완화하지 않는다. 두 측정치는 green artifact의 runtime evidence에
 함께 남으며, 이후 training/inference gate도 이를 요구한다.
 
+새 B0 pair를 만들기 직전 source/config/tests/docs tree를 snapshot한다. 이 단계는 GPU를
+사용하지 않으며, 이후 B1 v2 manifest와 QLoRA adapter manifest가 이 file byte와 tree SHA를
+기록한다. source가 바뀌면 새 `RUN_TAG`와 새 output path를 사용해 다시 만든다.
+
+```bash
+"$GPU_CLI" source-manifest \
+  --root "$PROJECT" \
+  --output "$SOURCE_MANIFEST"
+```
+
 ## 6. Gate B1 — base direct-answer development 기준선
 
 GPU green 뒤 첫 모델 실행은 fold 0 base greedy 한 개뿐이다. 아래 `FOLD=0`을 그대로
@@ -235,7 +246,7 @@ OOF comparison에 재사용하지 않으며, 아래 명령은 보강된 source�
 parser audit 19개 outcome class를 남겼다. public regression은 safe synthetic structural
 case만 추가했고 raw output은 private artifact에 남겼다. 하지만 run source가
 attention-mask/eval-cache 보강 전이므로 위 aggregate는 production score도 selection evidence도
-아니다. 아래 current-source 명령의 새 B0 binding과 output target을 대체하지 않는다.
+아니다. 아래 새 v2 current-source 명령의 B0 binding과 output target을 대체하지 않는다.
 
 ```bash
 FOLD=0
@@ -259,14 +270,19 @@ mkdir -p "$RUN_DIR" "$CHECKPOINT_DIR"
   --preflight-report "$PREFLIGHT" \
   --gpu-smoke-report "$SMOKE" \
   --config "$CONFIG" \
+  --source-root "$PROJECT" \
+  --source-manifest "$SOURCE_MANIFEST" \
   --acknowledge-gpu-use \
   --output-jsonl "$RUN_DIR/base-direct-predictions.jsonl" \
   --output-manifest "$RUN_DIR/base-direct-manifest.json"
 ```
 
 저장되는 각 row에는 raw generation, parser 결과, seed, prompt/config/checkpoint SHA,
-token 수, latency, peak VRAM, fold/group이 들어간다. 실제 generation을 얻은 직후 parser
-golden regression corpus를 추가하고 전체 Ruff/pytest를 다시 통과시킨다.
+token 수, latency, peak VRAM, fold/group이 들어간다. v2 run manifest는 별도로 source
+manifest/tree SHA, config-file byte SHA, preflight/smoke byte SHA, GPU device name, seed/prompt
+sequence digest, latency summary를 결속한다. 하나라도 나중에 재검증되지 않으면 QLoRA 입력으로
+거부한다. 실제 generation을 얻은 직후 parser golden regression corpus를 추가하고 전체
+Ruff/pytest를 다시 통과시킨다.
 
 두 output이 atomic publish된 뒤에는 GPU를 다시 쓰지 않고 먼저 private parser audit을
 실행한다. 이 명령은 raw completion이나 train-derived ID/answer를 stdout이나 새 artifact에
@@ -314,6 +330,8 @@ ADAPTER_DIR="$CHECKPOINT_DIR/adapter-direct"
   --preflight-report "$PREFLIGHT" \
   --gpu-smoke-report "$SMOKE" \
   --config "$CONFIG" \
+  --source-root "$PROJECT" \
+  --source-manifest "$SOURCE_MANIFEST" \
   --base-baseline-manifest "$RUN_DIR/base-direct-manifest.json" \
   --output-dir "$ADAPTER_DIR" \
   --acknowledge-gpu-use
@@ -332,6 +350,8 @@ ADAPTER_DIR="$CHECKPOINT_DIR/adapter-direct"
   --preflight-report "$PREFLIGHT" \
   --gpu-smoke-report "$SMOKE" \
   --config "$CONFIG" \
+  --source-root "$PROJECT" \
+  --source-manifest "$SOURCE_MANIFEST" \
   --adapter "$ADAPTER_DIR" \
   --base-baseline-manifest "$RUN_DIR/base-direct-manifest.json" \
   --acknowledge-gpu-use \
@@ -340,8 +360,9 @@ ADAPTER_DIR="$CHECKPOINT_DIR/adapter-direct"
 ```
 
 adapter는 exact 36-layer Qwen LoRA tensor 504개, shape/dtype, tokenizer bytes와 semantic
-contract, split/fold/exclusion/training·validation payload SHA, preflight/smoke SHA를 검증한
-뒤 directory rename으로 publish한다. 불완전 shard나 다른 tokenizer는 거부한다.
+contract, split/fold/exclusion/training·validation payload SHA, preflight/smoke SHA와 source
+manifest/tree SHA를 검증한 뒤 directory rename으로 publish한다. 불완전 shard나 다른 tokenizer는
+거부한다.
 
 concise rationale는 별도 검증 corpus와 별도 immutable config를 만든 뒤 direct-answer와
 독립 실험으로만 추가한다. 현재 direct-answer artifact를 rationale 결과로 덮어쓰지 않는다.

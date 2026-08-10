@@ -11,8 +11,10 @@ import pytest
 
 from deep_challenge.data import MathRecord
 from deep_challenge.gate_b import (
+    DEFAULT_GATE_B_CONFIG,
     PINNED_MODEL_REVISION,
     DecodingPolicy,
+    DevelopmentExecutionEvidence,
     GateBArtifactExistsError,
     GateBConfig,
     GateBPreflightRequiredError,
@@ -21,11 +23,17 @@ from deep_challenge.gate_b import (
     GenerationResult,
     TransformersGenerationBackend,
     build_direct_answer_sft_examples,
+    create_development_execution_evidence,
     encode_response_only_example,
     run_development_baseline,
     write_development_artifacts,
 )
 from deep_challenge.model_preflight import OFFICIAL_MODEL_ID
+from deep_challenge.provenance import (
+    build_source_tree_manifest,
+    validate_source_tree_manifest_artifact,
+    write_json_atomic,
+)
 from deep_challenge.splits import (
     SplitManifest,
     eligible_training_ids,
@@ -62,6 +70,47 @@ def _split_manifest() -> SplitManifest:
 
 def _records_for_ids(ids: tuple[str, ...]) -> list[MathRecord]:
     return [_record(identifier) for identifier in ids]
+
+
+def _execution_evidence(tmp_path: Path) -> DevelopmentExecutionEvidence:
+    source_root = tmp_path / "source"
+    source_root.mkdir(exist_ok=True)
+    (source_root / "runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
+    source_manifest_path = tmp_path / "source-manifest.json"
+    write_json_atomic(
+        source_manifest_path,
+        build_source_tree_manifest(source_root, excluded_paths=(source_manifest_path,)).as_dict(),
+    )
+    source_manifest = validate_source_tree_manifest_artifact(
+        source_manifest_path,
+        root=source_root,
+    )
+    config = tmp_path / "config.json"
+    preflight = tmp_path / "preflight.json"
+    smoke = tmp_path / "smoke.json"
+    config.write_text(
+        json.dumps(
+            {
+                **DEFAULT_GATE_B_CONFIG.as_dict(),
+                "config_sha256": DEFAULT_GATE_B_CONFIG.sha256,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    preflight.write_text("{}\n", encoding="utf-8")
+    smoke.write_text("{}\n", encoding="utf-8")
+    return create_development_execution_evidence(
+        source_manifest=source_manifest,
+        config_path=config,
+        config_sha256=DEFAULT_GATE_B_CONFIG.sha256,
+        preflight_report_path=preflight,
+        preflight_report_sha256=hashlib.sha256(preflight.read_bytes()).hexdigest(),
+        gpu_smoke_report_path=smoke,
+        gpu_smoke_report_sha256=hashlib.sha256(smoke.read_bytes()).hexdigest(),
+        gpu_device_name="NVIDIA Test GPU",
+    )
 
 
 class _PrefixTokenizer:
@@ -473,9 +522,13 @@ def test_atomic_artifact_writer_roundtrips_checksum_and_refuses_overwrite(
     _, records, _ = _development_records(samples_per_problem=2)
     jsonl_path = tmp_path / "development.jsonl"
     manifest_path = tmp_path / "development.manifest.json"
+    evidence = _execution_evidence(tmp_path)
 
     written = write_development_artifacts(
-        records, jsonl_path=jsonl_path, manifest_path=manifest_path
+        records,
+        jsonl_path=jsonl_path,
+        manifest_path=manifest_path,
+        execution_evidence=evidence,
     )
 
     payload = jsonl_path.read_bytes()
@@ -488,13 +541,65 @@ def test_atomic_artifact_writer_roundtrips_checksum_and_refuses_overwrite(
     assert manifest_payload["record_count"] == len(records)
     assert manifest_payload["samples_per_problem"] == 2
     assert manifest_payload["parser_status_counts"]["conflict"] >= 1
+    assert manifest_payload["schema_version"] == "gate-b1-development-run-v2"
+    assert manifest_payload["execution_evidence"]["config_file"]["config_sha256"] == (
+        DEFAULT_GATE_B_CONFIG.sha256
+    )
+    assert manifest_payload["generation_evidence"]["latency_ms"]["count"] == len(records)
     assert hashlib.sha256(manifest_path.read_bytes()).hexdigest() == written.manifest_sha256
     assert not list(tmp_path.glob("*.tmp"))
     assert not list(tmp_path.glob(".gate-b-*.lock"))
 
     with pytest.raises(GateBArtifactExistsError, match="overwrite"):
         write_development_artifacts(
-            records, jsonl_path=jsonl_path, manifest_path=manifest_path
+            records,
+            jsonl_path=jsonl_path,
+            manifest_path=manifest_path,
+            execution_evidence=evidence,
+        )
+
+
+def test_execution_evidence_rejects_config_file_semantic_mismatch(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
+    source_manifest_path = tmp_path / "source-manifest.json"
+    write_json_atomic(
+        source_manifest_path,
+        build_source_tree_manifest(source_root, excluded_paths=(source_manifest_path,)).as_dict(),
+    )
+    source_manifest = validate_source_tree_manifest_artifact(
+        source_manifest_path,
+        root=source_root,
+    )
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps(
+            {
+                **DEFAULT_GATE_B_CONFIG.as_dict(),
+                "seed": DEFAULT_GATE_B_CONFIG.seed + 1,
+                "config_sha256": DEFAULT_GATE_B_CONFIG.sha256,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    preflight = tmp_path / "preflight.json"
+    smoke = tmp_path / "smoke.json"
+    preflight.write_text("{}\n", encoding="utf-8")
+    smoke.write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(GateBValidationError, match="semantic SHA"):
+        create_development_execution_evidence(
+            source_manifest=source_manifest,
+            config_path=config,
+            config_sha256=DEFAULT_GATE_B_CONFIG.sha256,
+            preflight_report_path=preflight,
+            preflight_report_sha256=hashlib.sha256(preflight.read_bytes()).hexdigest(),
+            gpu_smoke_report_path=smoke,
+            gpu_smoke_report_sha256=hashlib.sha256(smoke.read_bytes()).hexdigest(),
+            gpu_device_name="NVIDIA Test GPU",
         )
 
 
@@ -502,13 +607,17 @@ def test_atomic_artifact_writer_has_one_winner_under_race(tmp_path: Path) -> Non
     _, records, _ = _development_records()
     jsonl_path = tmp_path / "race.jsonl"
     manifest_path = tmp_path / "race.manifest.json"
+    evidence = _execution_evidence(tmp_path)
     barrier = threading.Barrier(2)
 
     def write_once() -> str:
         barrier.wait()
         try:
             write_development_artifacts(
-                records, jsonl_path=jsonl_path, manifest_path=manifest_path
+                records,
+                jsonl_path=jsonl_path,
+                manifest_path=manifest_path,
+                execution_evidence=evidence,
             )
         except GateBArtifactExistsError:
             return "exists"
@@ -529,10 +638,14 @@ def test_artifact_writer_rejects_missing_generation_without_publishing(tmp_path:
     _, records, _ = _development_records()
     jsonl_path = tmp_path / "incomplete.jsonl"
     manifest_path = tmp_path / "incomplete.manifest.json"
+    evidence = _execution_evidence(tmp_path)
 
     with pytest.raises(GateBValidationError, match="eligibility_ids_sha256"):
         write_development_artifacts(
-            records[:-1], jsonl_path=jsonl_path, manifest_path=manifest_path
+            records[:-1],
+            jsonl_path=jsonl_path,
+            manifest_path=manifest_path,
+            execution_evidence=evidence,
         )
     assert not jsonl_path.exists()
     assert not manifest_path.exists()

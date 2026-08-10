@@ -124,8 +124,30 @@ _RUN_MANIFEST_KEYS = frozenset(
         "input_token_count_total",
         "output_token_count_total",
         "peak_vram_allocated_bytes_max",
+        "execution_evidence",
+        "generation_evidence",
     }
 )
+_EXECUTION_EVIDENCE_KEYS = frozenset(
+    {"schema_version", "source_manifest", "config_file", "runtime_gate"}
+)
+_EXECUTION_SOURCE_KEYS = frozenset(
+    {"path", "file", "sha256", "tree_sha256", "file_count"}
+)
+_EXECUTION_CONFIG_KEYS = frozenset({"path", "sha256", "config_sha256"})
+_EXECUTION_RUNTIME_KEYS = frozenset(
+    {"preflight_report", "gpu_smoke_report", "gpu_device_name"}
+)
+_EXECUTION_RUNTIME_FILE_KEYS = frozenset({"path", "sha256"})
+_GENERATION_EVIDENCE_KEYS = frozenset(
+    {
+        "schema_version",
+        "seed_sequence_sha256",
+        "prompt_sha256_sequence_sha256",
+        "latency_ms",
+    }
+)
+_LATENCY_EVIDENCE_KEYS = frozenset({"count", "total", "min", "max", "mean"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -919,6 +941,9 @@ def _adapter_method_fingerprint(adapter: AdapterArtifactEvidence) -> str:
                 "development_shard_sha256": adapter.development_shard_sha256,
                 "preflight_sha256": adapter.preflight_sha256,
                 "gpu_smoke_sha256": adapter.gpu_smoke_sha256,
+                "source_manifest_sha256": adapter.source_manifest_sha256,
+                "source_tree_sha256": adapter.source_tree_sha256,
+                "source_file_count": adapter.source_file_count,
                 "response_only_labels": True,
                 "truncation": False,
                 "tensor_contract": "qwen2.5-3b-all-linear-lora-504",
@@ -1603,6 +1628,10 @@ def _load_development_run(
     if not path.is_file():
         raise GateBValidationError(f"development JSONL must be a regular file: {path}")
     manifest_path, run_manifest = _load_run_manifest(named.manifest_path)
+    _validate_execution_evidence(
+        run_manifest.get("execution_evidence"),
+        expected_config_sha256=DEFAULT_GATE_B_CONFIG.sha256,
+    )
     records_sha256 = sha256_file(path)
     records_size = path.stat().st_size
     if run_manifest.get("records_file") != path.name:
@@ -1693,7 +1722,7 @@ def _load_development_run(
     if len(checkpoint_values) != 1 or len(config_values) != 1:
         raise GateBValidationError(f"{label} has inconsistent run provenance")
     expected_manifest_values: dict[str, Any] = {
-        "schema_version": "gate-b1-development-run-v1",
+        "schema_version": "gate-b1-development-run-v2",
         "record_count": len(expected_ids),
         "problem_count": len(expected_ids),
         "samples_per_problem": 1,
@@ -1726,6 +1755,10 @@ def _load_development_run(
         raise GateBValidationError(
             f"{label} run manifest summary mismatch: {mismatched_manifest!r}"
         )
+    _validate_generation_evidence(
+        run_manifest.get("generation_evidence"),
+        tuple(rows[problem_id] for problem_id in expected_ids),
+    )
     return _ValidatedRun(
         label=label,
         path=path,
@@ -1906,9 +1939,155 @@ def _load_run_manifest(path: str | Path) -> tuple[Path, Mapping[str, Any]]:
         )
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise GateBValidationError(f"invalid development run manifest: {exc}") from exc
-    if not isinstance(payload, Mapping) or set(payload) != _RUN_MANIFEST_KEYS:
+    if (
+        not isinstance(payload, Mapping)
+        or set(payload) != _RUN_MANIFEST_KEYS
+        or payload.get("schema_version") != "gate-b1-development-run-v2"
+    ):
         raise GateBValidationError("development run manifest has an unexpected schema")
     return source, payload
+
+
+def _validate_execution_evidence(
+    value: object,
+    *,
+    expected_config_sha256: str,
+) -> None:
+    """Fail closed unless a run still binds to actual B0/source/config bytes."""
+
+    if not isinstance(value, Mapping) or set(value) != _EXECUTION_EVIDENCE_KEYS:
+        raise GateBValidationError("development run execution_evidence has an unexpected schema")
+    if value.get("schema_version") != "gate-b1-execution-evidence-v1":
+        raise GateBValidationError("development run execution_evidence schema is unsupported")
+
+    source = value.get("source_manifest")
+    if not isinstance(source, Mapping) or set(source) != _EXECUTION_SOURCE_KEYS:
+        raise GateBValidationError("development source manifest evidence is invalid")
+    source_path = _required_string(source.get("path"), "source manifest evidence path")
+    source_file = _required_string(source.get("file"), "source manifest evidence file")
+    if Path(source_file).name != source_file or source_file in {".", ".."}:
+        raise GateBValidationError("source manifest evidence file must be one safe basename")
+    source_actual = _regular_file_evidence(source_path, "source manifest")
+    if source_actual["path"] != source_path or source_actual["sha256"] != _required_sha256(
+        source.get("sha256"), "source manifest evidence sha256"
+    ):
+        raise GateBValidationError("source manifest evidence bytes changed after generation")
+    if source_file != Path(source_path).name:
+        raise GateBValidationError("source manifest evidence file does not match its path")
+    if source_actual["tree_sha256"] != _required_sha256(
+        source.get("tree_sha256"), "source manifest evidence tree_sha256"
+    ):
+        raise GateBValidationError("source manifest evidence tree digest changed")
+    source_file_count = source.get("file_count")
+    if (
+        isinstance(source_file_count, bool)
+        or not isinstance(source_file_count, int)
+        or source_file_count < 1
+        or source_actual["file_count"] != source_file_count
+    ):
+        raise GateBValidationError("source manifest evidence file_count changed")
+
+    config = value.get("config_file")
+    if not isinstance(config, Mapping) or set(config) != _EXECUTION_CONFIG_KEYS:
+        raise GateBValidationError("development config-file evidence is invalid")
+    _validate_execution_file_evidence(
+        config,
+        label="Gate B config",
+        expected_sha256_key="sha256",
+        expected_keys=_EXECUTION_CONFIG_KEYS,
+    )
+    if _required_sha256(config.get("config_sha256"), "config evidence config_sha256") != (
+        expected_config_sha256
+    ):
+        raise GateBValidationError("development config evidence is not bound to run config")
+
+    runtime = value.get("runtime_gate")
+    if not isinstance(runtime, Mapping) or set(runtime) != _EXECUTION_RUNTIME_KEYS:
+        raise GateBValidationError("development runtime-gate evidence is invalid")
+    _validate_execution_file_evidence(
+        runtime.get("preflight_report"),
+        label="model preflight report",
+        expected_sha256_key="sha256",
+    )
+    _validate_execution_file_evidence(
+        runtime.get("gpu_smoke_report"),
+        label="GPU smoke report",
+        expected_sha256_key="sha256",
+    )
+    _required_string(runtime.get("gpu_device_name"), "runtime-gate GPU device name")
+
+
+def _validate_execution_file_evidence(
+    value: object,
+    *,
+    label: str,
+    expected_sha256_key: str,
+    expected_keys: frozenset[str] = _EXECUTION_RUNTIME_FILE_KEYS,
+) -> None:
+    if not isinstance(value, Mapping) or set(value) != expected_keys:
+        raise GateBValidationError(f"{label} evidence has an unexpected schema")
+    path = _required_string(value.get("path"), f"{label} evidence path")
+    expected_sha256 = _required_sha256(
+        value.get(expected_sha256_key), f"{label} evidence sha256"
+    )
+    actual = _regular_file_evidence(path, label)
+    if actual["path"] != path or actual["sha256"] != expected_sha256:
+        raise GateBValidationError(f"{label} evidence bytes changed after generation")
+
+
+def _validate_generation_evidence(
+    value: object,
+    rows: Sequence[Mapping[str, Any]],
+) -> None:
+    """Recompute seed/prompt/latency summaries from validated private JSONL rows."""
+
+    if not isinstance(value, Mapping) or set(value) != _GENERATION_EVIDENCE_KEYS:
+        raise GateBValidationError("development generation_evidence has an unexpected schema")
+    if value.get("schema_version") != "gate-b1-generation-evidence-v1":
+        raise GateBValidationError("development generation_evidence schema is unsupported")
+    ordered = tuple(
+        sorted(rows, key=lambda row: (str(row["problem_id"]), int(row["sample_index"])))
+    )
+    expected_seed_sha = hashlib.sha256(
+        canonical_json_bytes([int(row["seed"]) for row in ordered])
+    ).hexdigest()
+    expected_prompt_sha = hashlib.sha256(
+        canonical_json_bytes([str(row["prompt_sha256"]) for row in ordered])
+    ).hexdigest()
+    if _required_sha256(value.get("seed_sequence_sha256"), "seed_sequence_sha256") != (
+        expected_seed_sha
+    ):
+        raise GateBValidationError("development seed evidence does not match rows")
+    if _required_sha256(
+        value.get("prompt_sha256_sequence_sha256"), "prompt_sha256_sequence_sha256"
+    ) != expected_prompt_sha:
+        raise GateBValidationError("development prompt evidence does not match rows")
+    latency = value.get("latency_ms")
+    if not isinstance(latency, Mapping) or set(latency) != _LATENCY_EVIDENCE_KEYS:
+        raise GateBValidationError("development latency evidence has an unexpected schema")
+    values = tuple(float(row["latency_ms"]) for row in ordered)
+    expected_latency = {
+        "count": len(values),
+        "total": math.fsum(values),
+        "min": min(values),
+        "max": max(values),
+        "mean": math.fsum(values) / len(values),
+    }
+    for field_name, expected in expected_latency.items():
+        actual = latency.get(field_name)
+        if field_name == "count":
+            if type(actual) is not int or actual != expected:
+                raise GateBValidationError("development latency count does not match rows")
+            continue
+        if (
+            isinstance(actual, bool)
+            or not isinstance(actual, (int, float))
+            or not math.isfinite(float(actual))
+            or float(actual) != expected
+        ):
+            raise GateBValidationError(
+                f"development latency evidence {field_name} does not match rows"
+            )
 
 
 def _regular_file_evidence(path: str | Path, label: str) -> dict[str, Any]:

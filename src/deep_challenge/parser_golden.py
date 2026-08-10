@@ -24,7 +24,7 @@ from .provenance import canonical_json_bytes, sha256_file
 
 PARSER_GOLDEN_AUDIT_SCHEMA = "gate-b-parser-golden-audit-v1"
 _DEVELOPMENT_RECORD_SCHEMA = "gate-b1-development-baseline-v2"
-_DEVELOPMENT_MANIFEST_SCHEMA = "gate-b1-development-run-v1"
+_DEVELOPMENT_MANIFEST_SCHEMA = "gate-b1-development-run-v2"
 _SAFE_PARSE_SOURCES = frozenset({"final_answer", "boxed", "hashes", "answer", "fallback"})
 _SAFE_PARSE_STATUSES = frozenset({"ok", "invalid", "conflict"})
 _SAFE_REASON_CODES = frozenset(
@@ -131,6 +131,11 @@ def _validate_manifest(manifest: dict[str, Any], records_file: Path) -> None:
         "eligibility_ids_sha256",
     ):
         _require_trimmed_string(manifest.get(field_name), f"development manifest {field_name}")
+    for field_name in ("execution_evidence", "generation_evidence"):
+        if not isinstance(manifest.get(field_name), dict):
+            raise ParserGoldenAuditError(
+                f"development manifest {field_name} is required for provenance-complete runs"
+            )
     for field_name in (
         "config_sha256",
         "checkpoint_sha256",

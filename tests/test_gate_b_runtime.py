@@ -42,7 +42,12 @@ from deep_challenge.gpu_smoke import (
     run_final_gpu_smoke,
 )
 from deep_challenge.model_preflight import OFFICIAL_MODEL_ID
-from deep_challenge.provenance import canonical_json_bytes
+from deep_challenge.provenance import (
+    build_source_tree_manifest,
+    canonical_json_bytes,
+    validate_source_tree_manifest_artifact,
+    write_json_atomic,
+)
 from deep_challenge.splits import (
     SplitManifest,
     eligible_training_ids,
@@ -117,6 +122,18 @@ def _data_provenance_args() -> dict[str, str]:
         "split_artifact_sha256": "3" * 64,
         "development_shard_sha256": "4" * 64,
     }
+
+
+def _source_manifest_evidence(tmp_path: Path):
+    source_root = tmp_path / "source"
+    source_root.mkdir(exist_ok=True)
+    (source_root / "runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
+    output = tmp_path / "source-manifest.json"
+    write_json_atomic(
+        output,
+        build_source_tree_manifest(source_root, excluded_paths=(output,)).as_dict(),
+    )
+    return validate_source_tree_manifest_artifact(output, root=source_root)
 
 
 def _ready_preflight() -> dict[str, object]:
@@ -507,6 +524,7 @@ def test_qlora_fold_training_publishes_complete_atomic_no_overwrite_bundle(
         fold=0,
         excluded_ids=excluded,
         **_data_provenance_args(),
+        source_manifest=_source_manifest_evidence(tmp_path),
         preflight_artifact=preflight,
         gpu_smoke_artifact=smoke,
         output_dir=output,
@@ -529,6 +547,9 @@ def test_qlora_fold_training_publishes_complete_atomic_no_overwrite_bundle(
     assert validated.validation_examples_sha256
     assert validated.preflight_sha256 == hashlib.sha256(preflight.read_bytes()).hexdigest()
     assert validated.gpu_smoke_sha256 == hashlib.sha256(smoke.read_bytes()).hexdigest()
+    assert validated.source_manifest_sha256
+    assert validated.source_tree_sha256
+    assert validated.source_file_count == 1
     saved_adapter_config = json.loads(
         (output / "adapter_config.json").read_text(encoding="utf-8")
     )
@@ -559,6 +580,7 @@ def test_qlora_fold_training_publishes_complete_atomic_no_overwrite_bundle(
             fold=0,
             excluded_ids=excluded,
             **_data_provenance_args(),
+            source_manifest=_source_manifest_evidence(tmp_path),
             preflight_artifact=preflight,
             gpu_smoke_artifact=smoke,
             output_dir=output,
@@ -669,6 +691,7 @@ def test_incomplete_training_export_is_rejected_and_never_published(
             fold=0,
             excluded_ids=(),
             **_data_provenance_args(),
+            source_manifest=_source_manifest_evidence(tmp_path),
             preflight_artifact=preflight,
             gpu_smoke_artifact=smoke,
             output_dir=output,
@@ -700,6 +723,7 @@ def test_training_requires_explicit_gpu_ack_before_runtime_factory(tmp_path: Pat
             fold=0,
             excluded_ids=(),
             **_data_provenance_args(),
+            source_manifest=_source_manifest_evidence(tmp_path),
             preflight_artifact=preflight,
             gpu_smoke_artifact=smoke,
             output_dir=tmp_path / "adapter",
@@ -954,6 +978,7 @@ def test_base_and_adapted_backend_factories_require_gate_and_do_not_load_model(
         fold=0,
         excluded_ids=(),
         **_data_provenance_args(),
+        source_manifest=_source_manifest_evidence(tmp_path),
         preflight_artifact=preflight,
         gpu_smoke_artifact=smoke,
         output_dir=tmp_path / "adapter",

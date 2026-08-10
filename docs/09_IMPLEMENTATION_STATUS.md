@@ -19,10 +19,10 @@
 | Gate B0 모델 파일 | **READY** | pinned tokenizer, index, 두 shard의 exact size/SHA/commit 확인 |
 | Gate B0 runtime packages | **CPU-hidden READY** | ext4 전용 환경에서 Torch/Transformers/Accelerate/PEFT/bitsandbytes/Triton 격리 import 성공 |
 | Gate B0 CPU/code readiness | **READY** | sealed development shard, real tokenizer SFT preflight, GPU runtime/training/inference/OOF selection/one-shot holdout/submission 경로 구현·회귀검증 |
-| Gate B0 GPU preflight | **READY (current source)** | `model-preflight-gpu-ready-20260810T062500KST.json`: pinned revision, full weights, CUDA/BF16/NF4 runtime, physical used/free 912/11,086MiB, `training_ready=true`, runtime blocker 없음. final smoke 전이라 preflight 자체의 `execution_ready=false`는 의도된 값이다. |
-| Gate B0 final GPU smoke | **READY (current source)** | `gpu-smoke-20260810T062500KST.json` green: local `2+3` only, pinned NF4 load, LoRA backward/`paged_adamw_8bit` 1 step, training cache-off/eval KV-cache-on generation/parser exact 5; competition data 0행. |
-| Gate B1 base direct-answer | **진단 완료 / current-source production 실행 대기** | old source fold 0 organizer-only base generation은 2,942행 중 1,210 exact match(41.1285%), parser `ok/conflict/invalid=2143/3/796`, finish `stop/length=2134/808`를 기록했다. attention-mask/cache 보강 전 run은 parser/latency/finish-reason 확인용이며 모델 선택·QLoRA·OOF 근거로 사용하지 않는다. |
-| Gate B2 QLoRA SFT | **미실행** | 보강된 source의 production B1 base artifact와 실제-generation parser golden gate 전에는 학습 금지 |
+| Gate B0 GPU preflight | **환경 READY / 새 source 재결속 대기** | `model-preflight-gpu-ready-20260810T062500KST.json`은 당시 source에서 pinned revision, full weights, CUDA/BF16/NF4 runtime, physical used/free 912/11,086MiB, `training_ready=true`를 입증했다. v2 provenance code가 추가됐으므로 새 source manifest와 새 tag의 preflight가 필요하다. |
+| Gate B0 final GPU smoke | **환경 READY / 새 source 재실행 대기** | `gpu-smoke-20260810T062500KST.json`은 당시 source에서 local `2+3` only, pinned NF4 load, LoRA backward/`paged_adamw_8bit` 1 step, cache-on generation/parser exact 5를 입증했다. 새 source B1 승인에는 새 smoke가 필요하다. |
+| Gate B1 base direct-answer | **진단 완료 / v2 rerun 대기** | `20260810T062500KST` 당시-current-source organizer-only fold 0 run은 1,210/2,942 EM (41.1285%), parser `2143/3/796`, finish `2134/808`를 실제로 기록했고 redacted parser audit도 통과했다. 그러나 v1 manifest에는 B0/source/config byte binding이 없어 v2 reader가 QLoRA/OOF 입력으로 거부한다. |
+| Gate B2 QLoRA SFT | **미실행** | 새 source manifest + 새 B0 pair에 bound된 v2 production B1 base artifact와 실제-generation parser golden gate 전에는 학습 금지 |
 | leaderboard prediction/submission | **미실행** | 모델 prediction 0건; leaderboard를 학습/API 입력에 쓰지 않음 |
 
 ### 실제 환경
@@ -34,14 +34,14 @@
 | GPU 전용 환경 | local ext4 `$GPU_ENV` (public repository에서 경로 제외) |
 | GPU runtime | Torch 2.13.0, Transformers 4.57.6, Accelerate 1.14.0, PEFT 0.20.0, bitsandbytes 0.50.0, Triton 3.7.1 |
 | GPU | NVIDIA GeForce RTX 4070 SUPER, 12,282MiB, compute capability 8.9 |
-| current GPU evidence | current-source B0 preflight 직전 physical used 912MiB/free 11,086MiB; smoke peak reserved 4,661,968,896 bytes, cleanup 후 physical used/free 908/11,090MiB. 값은 변동 가능하며 다른 프로세스는 중단하지 않음 |
+| latest GPU evidence | 당시 B0 preflight 직전 physical used 912MiB/free 11,086MiB; smoke peak reserved 4,661,968,896 bytes, cleanup 후 physical used/free 908/11,090MiB. 값은 변동 가능하며 새 run 직전에 재측정하고 다른 프로세스는 중단하지 않음 |
 | WSL memory | RAM 18,857,226,240 bytes, available 15,645,212,672; swap free 6,354,501,632 bytes |
 | 저장공간 | Windows C: 58,220,236,800 bytes free, WSL ext4 972,765,863,936 bytes free |
 | model cache | local `$MODEL_CACHE/snapshots/aa8e72537993ba99e69dfaafa59ed015b17504d1` (Git 제외) |
 
 weights/checkpoint/전용 venv는 C:가 아니라 WSL ext4에 둔다. GPU 전용 환경 설치와
 import 검사는 `CUDA_VISIBLE_DEVICES=''`에서 수행했다. 2026-08-09 첫 smoke attempt는
-CUDA context 뒤 model load 전에 fail-closed로 중단됐지만, guard 보강 뒤 2026-08-10 current-source
+CUDA context 뒤 model load 전에 fail-closed로 중단됐지만, guard 보강 뒤 2026-08-10 당시 source
 preflight와 local synthetic smoke는 run tag `20260810T062500KST`에서 green이다. 그 이전
 source로 organizer train의 fold 0 validation 2,942행에 한해 diagnostic generation을 한 번 실행했다. leaderboard/test 입력은
 학습·self-training·외부 API·모델 inference에 사용하지 않았다.
@@ -128,12 +128,15 @@ semantic config SHA는 `4530c14a4782c439ea3a8325b90d997793eda368b0371d765cb81069
 - `artifacts/analysis/parser-golden-20260810T002000KST-fold0.json` (initial redacted audit)
 - `artifacts/analysis/parser-golden-20260810T002000KST-fold0-v2.json` (reason-code allowlist
   correction 후 canonical redacted audit)
-- `artifacts/analysis/source-manifest-final-v4.json` (2026-08-09 source edits 뒤 재생성 예정)
+- `artifacts/analysis/parser-golden-20260810T062500KST-fold0-v3.json` (당시-current-source B1 v1
+  diagnostic의 raw-free parser audit; selection input이 아님)
+- `artifacts/analysis/source-manifest-final-v4.json` (역사적 Gate A snapshot; 새 Gate B
+  실행 입력으로 재사용하지 않음)
 - `artifacts/analysis/source-manifest-parser-golden-v1-20260810.json` (parser golden audit
   implementation·docs·tests를 포함한 current source tree, 64 files)
 - `artifacts/analysis/source-manifest-diagnostic-golden-v2-20260810.json` (diagnostic result,
   parser golden regression, Kaggle recheck documentation을 포함한 source tree, 64 files)
-- `artifacts/analysis/source-manifest-b0-green-v3-20260810.json` (current-source B0 green
+- `artifacts/analysis/source-manifest-b0-green-v3-20260810.json` (당시 source B0 green
   documentation을 포함한 source tree)
 - `artifacts/analysis/CHECKSUMS.sha256`
 
@@ -150,20 +153,22 @@ LoRA optimizer step으로 확증했다. smoke raw generation은 local prompt의
 development baseline을 허용하지만 leaderboard/test prediction을 허용하는 근거는 아니다.
 
 `model-preflight-gpu-ready-20260810T062500KST.json`과
-`gpu-smoke-20260810T062500KST.json`은 training cache-off/eval KV-cache-on current source에
+`gpu-smoke-20260810T062500KST.json`은 training cache-off/eval KV-cache-on 당시 source에
 bound된 B0 pair다. 전자는 `training_ready=true`, runtime blocker 없음이며 final smoke가 아직
 필요하므로 preflight 단독 `execution_ready=false`가 의도된 값이다. 후자는 local synthetic
-`2+3`만으로 그 final gate를 green으로 닫았다. 이 pair는 같은 tag의 organizer-only production
-B1을 허용하지만 leaderboard/test prediction, QLoRA 승격, method selection을 단독으로 허용하지
-않는다.
+`2+3`만으로 그 final gate를 green으로 닫았다. 이 pair로 당시-current-source B1이 실제 종료했지만,
+당시 manifest v1은 B0/source/config file byte를 atomically bind하지 않았다. v2 runtime guard
+이후에는 새 source manifest와 새 B0 pair를 만들고 B1을 재실행한다.
 
-2026-08-10에 시작한 fold 0 base direct-answer GPU generation은 atomic JSONL/manifest pair로
-정상 완료됐다. old source는 `attention_mask`와 eval KV-cache 보강 전 이미 import됐으므로,
-1,210/2,942 exact match(41.1285%), 989,549 output token, max allocated VRAM
-2,193,992,192 bytes라는 aggregate는 raw generation, parser 상태, latency, finish reason을
-확인하는 **진단 artifact**로만 보존한다. 동일 data/split/config 계약에서 보강된 source와
-`20260810T062500KST` B0 pair에 bound된 새 versioned output target으로 production baseline이
-성공하기 전에는 QLoRA, OOF 비교, primary/fallback 선택을 시작하지 않는다.
+fold 0 base direct-answer GPU generation은 old source (`20260810T002000KST`)와 당시 current source
+(`20260810T062500KST`)에서 각각 atomic JSONL/manifest pair로 정상 종료했다. 후자
+run도 1,210/2,942 exact match(41.1285%), 989,549 output token, max allocated VRAM
+2,193,992,192 bytes를 기록했다. 둘 다 raw generation, parser 상태, latency, finish reason을
+확인하는 **진단 artifact**로 보존한다. 특히 current run은 schema
+`gate-b1-development-run-v1`이라 raw JSONL에는 seed/prompt/checkpoint/config semantic SHA가
+있어도 B0 report byte SHA, source-tree manifest, config-file byte SHA, run-level seed/prompt/
+latency digest가 없다. `gate-b1-development-run-v2`는 이를 필수화하고 v1 input을 거부한다.
+따라서 새 B0/v2 B1이 성공하기 전에는 QLoRA, OOF 비교, primary/fallback 선택을 시작하지 않는다.
 
 실제 JSONL/manifest 쌍이 atomic publish된 뒤에는 CUDA를 쓰지 않는
 `audit-parser-golden`으로 bundle checksum, fold-validation/cross-validation partition,
@@ -183,9 +188,9 @@ CPU-only SFT preflight v3는 fold 0 training 11,794행, validation 2,942행, uni
 ### 최신 전체 회귀
 
 - `uv run ruff check .`: **pass**
-- `CUDA_VISIBLE_DEVICES='' ... uv run pytest -s -q`: **349 passed, 1 skipped** (2026-08-10
-  actual-output-derived parser golden regression 포함 재실행)
-- branch coverage: **79%** (6,518 statements, 2,284 branches)
+- `CUDA_VISIBLE_DEVICES='' ... uv run pytest -s -q`: **352 passed, 1 skipped** (2026-08-10
+  v2 provenance/config-byte regression 포함 재실행)
+- branch coverage: **78%** (7,146 statements, 2,556 branches)
 - skip 1건은 기본 CPU `.venv`에 PyTorch가 없어 실제 PEFT 0.20 serialization
   compatibility test를 건너뛴 것이다. 같은 구조의 real safetensors 파일에 대한
   extra tensor/wrong shape/wrong dtype/incomplete index 음성 회귀는 CPU에서 통과했다.
@@ -514,12 +519,17 @@ uv run pytest -s -q
 uv run pytest -s --cov=deep_challenge --cov-report=term-missing -q
 ```
 
-결과:
+2026-08-10 v2 provenance guard까지 반영한 현재 결과:
 
 - Ruff: pass
-- pytest: **172 passed**
-- branch coverage 포함 total: **89%**
-- 주요 모듈 coverage: quality 99%, audit 96%, submission/evaluation 93%, inference 92%, data 91%
+- pytest: **352 passed, 1 skipped** (`torch`가 없는 기본 CPU 환경의 실제-runtime test 1개만 skip)
+- current branch coverage: **78%** (7,146 statements, 2,556 branches)
+- public-repo guard: pass
+- canonical `CHECKSUMS.sha256`: pass
+
+초기 Gate A 기준선의 branch coverage 포함 total은 **89%**였고, 당시 주요 모듈 coverage는
+quality 99%, audit 96%, submission/evaluation 93%, inference 92%, data 91%였다. 이 coverage
+수치는 v2 provenance 변경 뒤 재측정한 값으로 오해하지 않는다.
 
 Codex desktop의 임시 pytest capture 경로가 정리되는 환경 문제가 간헐적으로 있어 최종 증거 명령은 `-s`를 사용했다. 이는 application test 실패가 아니며 두 번의 전체 run이 통과했다.
 
@@ -538,7 +548,11 @@ Codex desktop의 임시 pytest capture 경로가 정리되는 환경 문제가 �
 11. generation hash case·metadata·trace provenance 충돌
 12. holdout size-first 편향
 
-## 11. 재현 명령
+## 11. 역사적 Gate A 재현 명령
+
+아래 명령과 output 이름은 최초 Gate A 검증 기록이다. 현재 Gate B 실행에는
+`docs/10_GATE_B_CPU_READY_RUNBOOK.md`의 no-overwrite tag와 v2 source/B0 binding 명령을
+사용한다.
 
 ```bash
 PROJECT=/absolute/path/to/deepleaning
@@ -591,16 +605,18 @@ uv run deep-challenge validate-submission \
 
 공식 sample submission이 `ID` 대문자를 요구하면 두 명령 모두 `--id-column ID`로 고정한다.
 
-## 12. canonical artifact
+## 12. 역사적 canonical artifact
 
-현재 사용할 artifact는 다음 네 개다.
+최초 Gate A 시점에 사용한 artifact는 다음 네 개다.
 
 - `artifacts/analysis/data-audit-v3.json`
 - `artifacts/analysis/splits-v4.json`
 - `artifacts/analysis/tokenizer-profile-v3.json`
 - `artifacts/analysis/model-preflight-v4.json`
 
-`source-manifest-final.json`과 checksum 목록은 문서 수정이 끝난 후 다시 생성한다. 같은 폴더의 이전 v1–v3 중간 artifact는 정의 drift를 추적하기 위한 superseded trace이며 새 실험 입력으로 사용하지 않는다.
+현재 권위 artifact 목록은 이 문서 상단의 “현재 canonical 분석 artifact” 절과
+`artifacts/analysis/CHECKSUMS.sha256`이다. 아래 이름과 이전 v1–v3 중간 artifact는 정의
+drift를 추적하는 역사적 trace이며 새 실험 입력으로 사용하지 않는다.
 
 ## 13. 다음 구현 게이트
 
@@ -614,10 +630,15 @@ uv run deep-challenge validate-submission \
 
 ### Gate B1 — base baseline
 
-- pinned base greedy/direct/concise-CoT를 development probe에서 실행
-- 실제 raw generation golden parser corpus 생성
-- latency/VRAM/token budget 기록
-- locked holdout 접근 0회 확인
+- 첫 pass는 pinned base greedy/direct-answer 한 경로만 사용한다. concise rationale은 별도
+  규칙·품질 gate 전에는 시작하지 않는다.
+- v2 manifest는 raw JSONL의 generation/parser/seed/prompt/checkpoint/config/VRAM/latency와
+  별도로 source manifest/tree SHA, config-file byte SHA, B0 preflight/smoke byte SHA, GPU name,
+  seed/prompt sequence digest, latency summary를 결속해야 한다.
+- `require_base_development_artifact`는 이 referenced private evidence file을 다시 hash한다.
+  변경·누락·v1 schema는 QLoRA authorization 전에 fail-closed다.
+- 실제 raw generation 뒤 redacted parser golden corpus와 public safe-synthetic regression을
+  추가하고 전체 Ruff/pytest를 통과한다. locked holdout 접근은 계속 0회여야 한다.
 
 ### Gate B2 — QLoRA SFT
 
@@ -642,9 +663,16 @@ uv run deep-challenge validate-submission \
 
 ## 14. 남은 외부 blocker
 
-- 영상에는 자막 stream/동봉 `.srt`/`.vtt`가 없어 음성 전체 전사는 검증하지 못했다. 화면 13개 slide 구간과 전체 frame decode는 완료했다.
-- Kaggle 비로그인 요청은 login으로 전환됐고 Chrome bridge는 현재 WSL local-URI 제약으로 연결되지 않았다. 사용자 제공 본문과 영상은 분석했지만 최신 authenticated Rules를 확인했다고 말하지 않는다.
-- final test CSV와 sample submission은 로컬에 없다.
-- 실제 model weight/GPU가 없어 base score, SFT gain, leaderboard score는 아직 0개의 관측값이다.
+- authenticated Kaggle API listing에는 sample submission CSV가 없으므로 실제 sample row order와
+  파일 SHA는 아직 독립 확인하지 못했다. 현재 Rules/Evaluation contract의 logical header는
+  `ID,answer`로 기록돼 있다.
+- Python/SymPy tool inference, teacher-generated rationale의 실제 사용 범위, same-base
+  multi-adapter/checkpoint 결합은 운영진의 명시 답변 전 off다.
+- final test CSV는 아직 공개되지 않았고, leaderboard/test prediction·submission upload는
+  primary/fallback freeze, one-shot holdout, 사용자의 명시 upload 요청 전까지 실행하지 않는다.
+- GPU/model은 준비됐고 diagnostic base score는 실제 2개 run에서 관측됐다. 하지만 **selection
+  eligible v2 B1 score, QLoRA gain, complete OOF result, locked-holdout score, leaderboard score는
+  모두 아직 0개**다.
 
-이 blocker들은 계획·model-free 기반의 실패가 아니라 Gate B에서 새 authority/환경이 필요한 항목이다. 기존 사용자 파일 `NUL`은 수정·삭제하지 않았다.
+이 blocker들은 Gate A의 실패가 아니라 규칙 authority 또는 후속 immutable evidence가 필요한
+조건이다. 기존 사용자 파일 `NUL`은 수정·삭제하지 않았다.

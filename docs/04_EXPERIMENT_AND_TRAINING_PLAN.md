@@ -22,17 +22,18 @@
 - 공개·동등 접근 외부 데이터와 상용 API의 training-data/rationale 생성은 허용된다.
   leaderboard/test 입력은 금지다. Python/SymPy TIR과 same-base multi-adapter/checkpoint
   결합은 명시 답변 전 off다.
-- RTX 4070 SUPER 12GB의 current-source B0 preflight와 local synthetic NF4 smoke는 run tag
+- RTX 4070 SUPER 12GB의 당시-current-source B0 preflight와 local synthetic NF4 smoke는 run tag
   `20260810T062500KST`에서 green이다. preflight는 `training_ready=true`이고 smoke가 final
   kernel/NF4/cache-on gate를 닫았다. 같은 tag의 production B1 직전과 각 후속 GPU run 직전에도
   free VRAM 10GiB 이상과 pre-existing used VRAM 1GiB 이하를 다시 관측한다. leaderboard/test
   prediction은 여전히 freeze 이후에만 허용한다.
-- 보강 전 source의 fold 0 fixed-base diagnostic은 2,942 validation generation 중
-  1,210 exact match(41.1285%)를 기록하고 redacted parser audit 19개 outcome class를
-  만들었다. 이 run은 attention-mask/cache 보강 전의 parser·latency 관찰용이라 QLoRA,
-  OOF, method selection, holdout으로 승격하지 않는다. 실제 output에서 고른 safe
-  structural parser regression만 public code에 추가했고 production baseline은 새 B0 뒤에
-  별도 tag로 다시 실행한다.
+- fold 0 fixed-base diagnostic은 old source와 당시 current source에서 각각 2,942 validation
+  generation 중 1,210 exact match(41.1285%)를 기록했고 redacted parser audit 19개 outcome
+  class를 만들었다. 당시-current-source `20260810T062500KST` output도 manifest schema v1이라
+  B0/source/config-file byte binding과 run-level seed/prompt/latency digest가 없다. 따라서
+  둘 다 QLoRA, OOF, method selection, holdout으로 승격하지 않는다. 실제 output에서 고른 safe
+  structural parser regression만 public code에 추가했고 production baseline은 새 B0와 v2
+  provenance manifest로 별도 tag에 다시 실행한다.
 - fold 0 base/direct-answer를 첫 probe로 실행하고 실제 generation parser golden을 고정한
   뒤, 같은 base→QLoRA 순서를 fold 1~4에 반복한다. `compare-development-oof`는 모든
   label×fold run을 강제하고 전체 OOF union에서 paired cluster bootstrap, exact McNemar,
@@ -147,6 +148,10 @@ hypothesis:
 parent_run:
 git_sha: # Git 저장소일 때
 source_tree_sha256: # Git이 아닐 때 필수
+source_manifest_sha256:
+config_file_sha256:
+preflight_report_sha256:
+gpu_smoke_report_sha256:
 rules_snapshot:
 data_manifest_sha256:
 fold_manifest_sha256:
@@ -175,6 +180,11 @@ W&B/TensorBoard를 사용해도 로컬 JSONL/CSV 원장이 권위 원본이어�
 `source_tree_manifest.json`을 함께 기록한다. 전자는 공개 코드 revision을, 후자는
 uncommitted 상태까지 포함한 source/config/test/document tree를 식별한다. raw data,
 artifact, credential, model/checkpoint는 어느 쪽에도 포함하지 않는다.
+
+Gate B development v2 manifest는 위 항목을 단순 사용자가 입력한 문자열로 보관하지 않는다.
+source manifest가 현재 source tree와 일치하는지 먼저 확인하고, B0 preflight/smoke와 config file을
+runtime backend가 검증한 SHA로 다시 hash한다. QLoRA authorization은 해당 private files가 나중에도
+같은 byte인지 재검증하므로 v1 또는 누락 evidence는 fail-closed다.
 
 ## 5. Phase 0 — 규칙·데이터·평가 잠금
 
@@ -617,7 +627,7 @@ development 전체를 다시 학습하는 `F-evidence` refit과 former holdout�
 WSL RAM은 약 17.56GiB, swap은 8GiB다. NVIDIA RTX 4070 SUPER 12,282MiB와
 WSL CUDA bridge는 존재한다. 2026-08-09 첫 smoke attempt는 model load 전 guard에서
 중단됐지만, external occupancy와 CUDA-context overhead를 분리하도록 guard를 보강했다.
-2026-08-10 current-source target-host preflight와 local synthetic smoke는 run tag
+2026-08-10 당시-current-source target-host preflight와 local synthetic smoke는 run tag
 `20260810T062500KST`에서 pinned NF4 base load, LoRA backward/optimizer step,
 training cache-off/eval KV-cache-on generation/parser까지 green으로 확인했다. 이 evidence는
 같은 tag의 organizer-only B1을 허용하지만 leaderboard/test prediction은 여전히 허용하지 않으며,

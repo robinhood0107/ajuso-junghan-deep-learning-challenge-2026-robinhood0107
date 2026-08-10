@@ -67,7 +67,7 @@ PYTHONPATH=src python3 -m deep_challenge.public_repo_guard --all
 | B0.1 | Kaggle rules/data snapshot | API token 존재 | page/file/limit hash, sample 부재 기록 | slug/auth 실패 |
 | B0.2 | GPU preflight | model/runtime/VRAM 충족 | 새 no-overwrite preflight JSON, `training_ready=true` | GPU used >1,024MiB 또는 free <10,240MiB |
 | B0.3 | final synthetic smoke | B0.2 green | `status=green`; only local `2+3` prompt | parser/load/backward/VRAM failure |
-| B1.0 | fold 0 base direct-answer | B0.3 green | JSONL + manifest + raw generation/provenance | invalid parser/artifact |
+| B1.0 | fold 0 base direct-answer | B0.3 green | JSONL + **v2 provenance manifest** + raw generation | invalid parser/artifact or any source/B0/config hash mismatch |
 | B1.1 | parser golden corpus | B1.0 real generations | added regression tests + full CPU suite | conflict is hidden or test fails |
 | B2.0 | fold 0 answer-only QLoRA | same-fold base manifest | exact adapter bundle/checksum/manifest | train IDs or provenance mismatch |
 | B1/B2.1 | folds 1–4 repeat | fold 0 regression green | five base + five adapter OOF runs | any fold incomplete |
@@ -122,13 +122,32 @@ R1과 R2는 완료됐다. v2 audit은 19개 outcome class만 기록하고 raw co
 직렬화하지 않았으며, 그 class를 safe synthetic boxed/final/hash/fallback regression으로
 고정했다. 이 완료는 production model-score gate가 아니라 parser behavior gate다.
 
-R4도 완료됐다. current-source B0 pair는 run tag `20260810T062500KST`의
+R4도 당시 source에서 완료됐다. 그 B0 pair는 run tag `20260810T062500KST`의
 `model-preflight-gpu-ready-20260810T062500KST.json` (SHA-256
 `1c88007e3c714c036907a4dc4c0592b31d0f52d931cd1e412e212f814bc5f603`)와
 `gpu-smoke-20260810T062500KST.json` (SHA-256
 `98b35fe8a471cab16438b20ac9055d7835f641cd9d8923f4f901916bec2613f0`)이다. preflight의
-`training_ready=true`와 smoke의 `status=green`은 같은 tag의 R5를 허용하지만, 다른 tag나
-leaderboard/test prediction에는 재사용하지 않는다.
+`training_ready=true`와 smoke의 `status=green`은 당시 R5 시작을 허용했다. 그러나 그때의
+development manifest는 v1이라 B0/source/config byte binding이 없어 selection evidence가 될 수
+없다. 아래 R5.1의 v2 guard 뒤에는 새 source manifest와 새 B0 pair로 다시 시작하며, 이 pair를
+다른 tag나 leaderboard/test prediction에 재사용하지 않는다.
+
+### 3.1.1 20260810T062500KST 당시-current-source B1의 제한된 진단 결과
+
+`artifacts/gate_b/20260810T062500KST/fold-0/`의 fixed-base direct-answer run은 원자적
+JSONL/manifest 쌍으로 정상 종료했고, 2,942개 중 1,210 exact match
+(`0.4112848402447315`)였다. parser 상태는 `ok=2143`, `conflict=3`, `invalid=796`이고,
+최대 allocated VRAM은 2,193,992,192 bytes였다. 새 redacted audit
+`artifacts/analysis/parser-golden-20260810T062500KST-fold0-v3.json`
+(SHA-256 `78576ddccc8e2b500b2a63ad8f5f6b26a9485ca1fd704c5dc47aaa2490247e1b`)도 19개
+structural outcome class를 raw-free로 검증했다.
+
+하지만 이 run의 manifest schema는 `gate-b1-development-run-v1`이다. 실행 당시에는
+raw completion, parser/seed/prompt/checkpoint/config semantic SHA, VRAM, latency가 JSONL에
+있었지만 B0 report byte SHA, source-tree manifest, config-file byte SHA, run-level seed/prompt/
+latency digest를 하나의 fail-closed manifest에 묶지 않았다. 따라서 **실제 관측 점수이지만
+QLoRA authorization, OOF comparison, method selection, freeze에는 사용 금지**다. v2 artifact
+reader는 이를 의도적으로 거부한다.
 
 ### 3.2 전체 백로그와 의존 관계
 
@@ -139,13 +158,15 @@ leaderboard/test prediction에는 재사용하지 않는다.
    통과했다. selection evidence로는 봉인한다.
 2. **R2 (완료, CPU):** private parser audit v2와 raw-free structural regression을 추가했다.
    conflict는 여전히 fail-visible이다.
-3. **R3 (완료, CPU):** Ruff, full `pytest -s -q` (349 passed, 1 skipped), public-repo guard,
+3. **R3 (완료, CPU):** Ruff, full `pytest -s -q` (352 passed, 1 skipped), public-repo guard,
    canonical checksum을 통과했고 docs 04/05/07/09/10/11을 현재 evidence로 갱신했다.
-4. **R4 (완료, GPU):** GPU `used/free=912/11,086MiB`의 새 관측값에서 current-source
+4. **R4 (완료, GPU):** GPU `used/free=912/11,086MiB`의 새 관측값에서 당시 source
    preflight와 cache-on synthetic smoke를 `20260810T062500KST`로 실행했고 green pair를 만들었다.
-5. **R5 (진행 중, GPU):** R4에 bound된 current-source fold 0 base direct-answer baseline을 새
-   no-overwrite output으로 실행하고, parser golden gate와 R3가 성공했는지 확인한다.
-6. **R6 (GPU):** 같은 fold 0 base manifest에 bound된 organizer-only answer-only QLoRA를
+5. **R5 (진행 중, CPU → GPU):** R5.1에서 source manifest/B0/config byte를 strict v2
+   development manifest에 결속하는 code/test guard를 완료한다. R5.2에서 새 source manifest,
+   새 B0 pair, 새 no-overwrite fold 0 fixed-base output을 실행하고 parser golden gate를 통과한다.
+   v1 output은 진단 보존만 한다.
+6. **R6 (GPU):** 같은 fold 0 **v2** base manifest에 bound된 organizer-only answer-only QLoRA를
    학습하고 adapter bundle, shard completeness, tokenizer/config/data provenance를 검증한다.
 7. **R7 (GPU):** fold 0 adapter generation을 실행해 동일 validation partition에서 base와
    비교 가능한 pair를 만든다.
@@ -178,6 +199,8 @@ PROJECT=/absolute/path/to/deepleaning
 DATA_DIR="$PROJECT/deep-learning-challenge-2026"
 GPU_ENV=/absolute/path/to/deep-challenge-gpu-venv
 REVISION=aa8e72537993ba99e69dfaafa59ed015b17504d1
+RUN_TAG=replace-with-new-unique-tag
+SOURCE_MANIFEST="artifacts/analysis/source-manifest-gate-b-$RUN_TAG.json"
 
 cd "$PROJECT"
 nvidia-smi --query-gpu=name,memory.total,memory.used,memory.free,compute_cap,driver_version \
@@ -189,6 +212,16 @@ Only when the just-observed values satisfy `used <= 1024MiB` and
 [`10_GATE_B_CPU_READY_RUNBOOK.md`](10_GATE_B_CPU_READY_RUNBOOK.md). Never reuse
 an existing preflight or smoke output path. The smoke artifact is the only
 permitted first CUDA workload and contains no organizer/leaderboard/test prompt.
+
+Before B0, create and retain the source snapshot that the later B1 v2 manifest will
+re-hash. This command is CPU-only and the output is excluded from the source tree
+itself.
+
+```bash
+"$GPU_ENV/bin/deep-challenge" source-manifest \
+  --root "$PROJECT" \
+  --output "$SOURCE_MANIFEST"
+```
 
 ## 5. Per-step Git record
 

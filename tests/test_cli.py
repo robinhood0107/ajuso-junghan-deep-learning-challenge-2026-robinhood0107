@@ -11,13 +11,17 @@ import deep_challenge.cli as cli_module
 from deep_challenge.cli import main
 from deep_challenge.gate_b import DEFAULT_GATE_B_CONFIG, GenerationResult
 from deep_challenge.gate_b_prediction import PredictionArtifactWriteResult
-from deep_challenge.gate_b_runtime import TrainingArtifact
+from deep_challenge.gate_b_runtime import RuntimeGateEvidence, TrainingArtifact
 from deep_challenge.gate_b_selection import (
     HOLDOUT_ACCESS_ACKNOWLEDGEMENT,
     GateBSelectionWriteResult,
 )
 from deep_challenge.model_preflight import OFFICIAL_MODEL_ID, OFFICIAL_REVISION
-from deep_challenge.provenance import canonical_json_bytes
+from deep_challenge.provenance import (
+    build_source_tree_manifest,
+    canonical_json_bytes,
+    write_json_atomic,
+)
 
 
 def _write_csv(path: Path, rows: list[list[str]]) -> None:
@@ -142,6 +146,44 @@ def _gate_b_cli_fixture(tmp_path: Path) -> tuple[list[str], Path, Path, Path]:
         ).hexdigest(),
     ]
     return contract, train, exclusions, split
+
+
+def _gate_b_runtime_source_args(
+    tmp_path: Path,
+) -> tuple[list[str], Path, Path, RuntimeGateEvidence]:
+    source_root = tmp_path / "runtime-source"
+    source_root.mkdir(exist_ok=True)
+    (source_root / "runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
+    source_manifest = tmp_path / "runtime-source-manifest.json"
+    write_json_atomic(
+        source_manifest,
+        build_source_tree_manifest(source_root, excluded_paths=(source_manifest,)).as_dict(),
+    )
+    preflight = tmp_path / "preflight.json"
+    smoke = tmp_path / "smoke.json"
+    preflight.write_text("{}\n", encoding="utf-8")
+    smoke.write_text("{}\n", encoding="utf-8")
+    runtime_gate = RuntimeGateEvidence(
+        preflight_path=str(preflight.resolve()),
+        preflight_sha256=hashlib.sha256(preflight.read_bytes()).hexdigest(),
+        smoke_path=str(smoke.resolve()),
+        smoke_sha256=hashlib.sha256(smoke.read_bytes()).hexdigest(),
+        model_id=OFFICIAL_MODEL_ID,
+        revision=OFFICIAL_REVISION,
+        config_sha256=DEFAULT_GATE_B_CONFIG.sha256,
+        device_name="NVIDIA Test GPU",
+    )
+    return (
+        [
+            "--source-root",
+            str(source_root),
+            "--source-manifest",
+            str(source_manifest),
+        ],
+        preflight,
+        smoke,
+        runtime_gate,
+    )
 
 
 def test_audit_and_source_manifest_commands(tmp_path: Path) -> None:
@@ -740,6 +782,10 @@ def test_gate_b_gpu_clis_fail_before_reading_files_without_ack(
             [
                 "--development-shard",
                 str(tmp_path / "unread-development-shard"),
+                "--source-root",
+                str(tmp_path / "unread-source-root"),
+                "--source-manifest",
+                str(tmp_path / "unread-source-manifest.json"),
             ]
         )
         common.extend(
@@ -759,6 +805,10 @@ def test_gate_b_gpu_clis_fail_before_reading_files_without_ack(
             [
                 "--development-shard",
                 str(tmp_path / "unread-development-shard"),
+                "--source-root",
+                str(tmp_path / "unread-source-root"),
+                "--source-manifest",
+                str(tmp_path / "unread-source-manifest.json"),
             ]
         )
         common.extend(
@@ -1077,9 +1127,14 @@ def test_gate_b_base_development_uses_backend_checkpoint_digest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     contract, _, _, _ = _gate_b_cli_fixture(tmp_path)
+    source_args, preflight, smoke, runtime_gate = _gate_b_runtime_source_args(tmp_path)
 
     class Backend:
         checkpoint_sha256 = "d" * 64
+
+        @property
+        def runtime_gate_evidence(self) -> RuntimeGateEvidence:
+            return runtime_gate
 
         def generate(self, _request: object) -> GenerationResult:
             return GenerationResult("Final answer: 1", "stop", 10, 3, 123)
@@ -1100,11 +1155,12 @@ def test_gate_b_base_development_uses_backend_checkpoint_digest(
                 "gate-b-development",
                 *contract,
                 "--preflight-report",
-                str(tmp_path / "not-read-preflight.json"),
+                str(preflight),
                 "--gpu-smoke-report",
-                str(tmp_path / "not-read-smoke.json"),
+                str(smoke),
                 "--config",
                 str(_locked_gate_b_config()),
+                *source_args,
                 "--output-jsonl",
                 str(records),
                 "--output-manifest",
@@ -1118,12 +1174,18 @@ def test_gate_b_base_development_uses_backend_checkpoint_digest(
         json.loads(line)["checkpoint_sha256"]
         for line in records.read_text(encoding="utf-8").splitlines()
     } == {"d" * 64}
+    run_manifest = json.loads(manifest.read_text(encoding="utf-8"))
+    assert run_manifest["schema_version"] == "gate-b1-development-run-v2"
+    assert run_manifest["execution_evidence"]["runtime_gate"]["gpu_device_name"] == (
+        "NVIDIA Test GPU"
+    )
 
 
 def test_gate_b_training_checks_base_before_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     contract, _, _, _ = _gate_b_cli_fixture(tmp_path)
+    source_args, _, _, _ = _gate_b_runtime_source_args(tmp_path)
     ordered: list[str] = []
 
     def require_base(*_args: object, **_kwargs: object) -> None:
@@ -1155,6 +1217,7 @@ def test_gate_b_training_checks_base_before_runtime(
                 str(tmp_path / "not-read-smoke.json"),
                 "--config",
                 str(_locked_gate_b_config()),
+                *source_args,
                 "--base-baseline-manifest",
                 str(tmp_path / "base.manifest.json"),
                 "--output-dir",

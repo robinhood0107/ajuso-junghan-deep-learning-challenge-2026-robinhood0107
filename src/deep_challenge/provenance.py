@@ -58,6 +58,32 @@ class SourceTreeManifest:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class SourceTreeArtifactEvidence:
+    """Verified immutable source-manifest evidence for a runtime invocation.
+
+    ``path`` remains available to the local, private experiment manifest so a
+    later selection gate can re-hash the exact source snapshot.  Public-facing
+    summaries should use :meth:`as_dict`, which intentionally carries no source
+    root or other machine-specific directory information.
+    """
+
+    path: str
+    sha256: str
+    tree_sha256: str
+    file_count: int
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return the portable, non-path portion of this evidence."""
+
+        return {
+            "file": Path(self.path).name,
+            "sha256": self.sha256,
+            "tree_sha256": self.tree_sha256,
+            "file_count": self.file_count,
+        }
+
+
 def sha256_file(path: str | Path, *, chunk_size: int = 1024 * 1024) -> str:
     """Hash a file without loading it entirely into memory."""
 
@@ -154,6 +180,48 @@ def build_source_tree_manifest(
     )
 
 
+def validate_source_tree_manifest_artifact(
+    path: str | Path,
+    *,
+    root: str | Path,
+) -> SourceTreeArtifactEvidence:
+    """Bind a source-manifest file to the source tree visible to this process.
+
+    The command that creates a source manifest excludes its own output.  This
+    verifier does the same and compares the complete structured payload rather
+    than trusting a caller-supplied tree digest.  A stale source snapshot,
+    symlinked evidence file, duplicate JSON key, or altered file inventory is a
+    hard failure before a CUDA command can begin.
+    """
+
+    supplied = Path(path)
+    if supplied.is_symlink():
+        raise ValueError(f"source manifest refuses symbolic links: {supplied}")
+    source = supplied.resolve(strict=True)
+    if not source.is_file():
+        raise ValueError(f"source manifest must be a regular file: {source}")
+    try:
+        payload = json.loads(
+            source.read_text(encoding="utf-8", errors="strict"),
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_json_constant,
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid source manifest: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("source manifest must contain one JSON object")
+
+    expected = build_source_tree_manifest(root, excluded_paths=(source,)).as_dict()
+    if payload != expected:
+        raise ValueError("source manifest does not match the current source tree")
+    return SourceTreeArtifactEvidence(
+        path=str(source),
+        sha256=sha256_file(source),
+        tree_sha256=expected["tree_sha256"],
+        file_count=len(expected["files"]),
+    )
+
+
 def _manifest_file_digest(path: Path, root: Path) -> FileDigest:
     """Hash one regular file through a no-follow descriptor with race checks."""
 
@@ -233,3 +301,16 @@ def write_json_atomic(path: str | Path, value: Any) -> None:
     finally:
         if temporary_name is not None:
             Path(temporary_name).unlink(missing_ok=True)
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON numeric constant {value!r}")

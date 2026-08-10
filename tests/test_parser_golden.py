@@ -53,7 +53,7 @@ def _write_bundle(tmp_path: Path, completions: list[str]) -> tuple[Path, Path]:
     records.write_bytes(records_bytes)
     manifest = tmp_path / "development.manifest.json"
     payload = {
-        "schema_version": "gate-b1-development-run-v1",
+        "schema_version": "gate-b1-development-run-v2",
         "records_file": records.name,
         "records_bytes": len(records_bytes),
         "records_sha256": hashlib.sha256(records_bytes).hexdigest(),
@@ -75,6 +75,8 @@ def _write_bundle(tmp_path: Path, completions: list[str]) -> tuple[Path, Path]:
         "parser_status_counts": dict(
             sorted(Counter(parse_answer(value).status for value in completions).items())
         ),
+        "execution_evidence": {},
+        "generation_evidence": {},
     }
     manifest.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
     return records, manifest

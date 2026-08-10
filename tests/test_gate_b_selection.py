@@ -11,9 +11,12 @@ import pytest
 import deep_challenge.gate_b_selection as selection_module
 from deep_challenge.data import MathRecord
 from deep_challenge.gate_b import (
+    DEFAULT_GATE_B_CONFIG,
+    DevelopmentExecutionEvidence,
     GateBValidationError,
     GenerationRequest,
     GenerationResult,
+    create_development_execution_evidence,
     run_development_baseline,
     write_development_artifacts,
 )
@@ -35,6 +38,11 @@ from deep_challenge.gate_b_selection import (
     require_base_development_artifact,
     validate_frozen_selection_methods,
     validate_locked_holdout_access,
+)
+from deep_challenge.provenance import (
+    build_source_tree_manifest,
+    validate_source_tree_manifest_artifact,
+    write_json_atomic,
 )
 from deep_challenge.splits import (
     SplitManifest,
@@ -80,6 +88,47 @@ def _fixture() -> tuple[SplitManifest, tuple[MathRecord, ...]]:
     return manifest, records
 
 
+def _execution_evidence(tmp_path: Path) -> DevelopmentExecutionEvidence:
+    source_root = tmp_path / "source"
+    source_root.mkdir(exist_ok=True)
+    (source_root / "runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
+    source_manifest_path = tmp_path / "source-manifest.json"
+    write_json_atomic(
+        source_manifest_path,
+        build_source_tree_manifest(source_root, excluded_paths=(source_manifest_path,)).as_dict(),
+    )
+    source_manifest = validate_source_tree_manifest_artifact(
+        source_manifest_path,
+        root=source_root,
+    )
+    config = tmp_path / "config.json"
+    preflight = tmp_path / "preflight.json"
+    smoke = tmp_path / "smoke.json"
+    config.write_text(
+        json.dumps(
+            {
+                **DEFAULT_GATE_B_CONFIG.as_dict(),
+                "config_sha256": DEFAULT_GATE_B_CONFIG.sha256,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    preflight.write_text("{}\n", encoding="utf-8")
+    smoke.write_text("{}\n", encoding="utf-8")
+    return create_development_execution_evidence(
+        source_manifest=source_manifest,
+        config_path=config,
+        config_sha256=DEFAULT_GATE_B_CONFIG.sha256,
+        preflight_report_path=preflight,
+        preflight_report_sha256=hashlib.sha256(preflight.read_bytes()).hexdigest(),
+        gpu_smoke_report_path=smoke,
+        gpu_smoke_report_sha256=hashlib.sha256(smoke.read_bytes()).hexdigest(),
+        gpu_device_name="NVIDIA Test GPU",
+    )
+
+
 def _write_run(
     tmp_path: Path,
     *,
@@ -123,6 +172,7 @@ def _write_run(
         generated,
         jsonl_path=records_path,
         manifest_path=manifest_path,
+        execution_evidence=_execution_evidence(tmp_path),
     )
     return NamedDevelopmentRun(label, records_path, manifest_path)
 
@@ -176,6 +226,9 @@ def _fake_adapter_evidence(
         development_shard_sha256="4" * 64,
         preflight_sha256=digest(f"preflight:{method_salt}"),
         gpu_smoke_sha256=digest(f"smoke:{method_salt}"),
+        source_manifest_sha256=digest(f"source-manifest:{method_salt}"),
+        source_tree_sha256=digest(f"source-tree:{method_salt}"),
+        source_file_count=1,
     )
 
 
@@ -774,6 +827,23 @@ def test_base_development_artifact_is_required_by_exact_checkpoint(
             fold=0,
             excluded_ids=(),
             expected_checkpoint_sha256="f" * 64,
+        )
+
+
+def test_base_development_artifact_rejects_changed_b0_evidence(tmp_path: Path) -> None:
+    manifest, records = _fixture()
+    base = _write_run(tmp_path, label="base", manifest=manifest, all_records=records)
+    validation = _validation_records(manifest, records)
+    (tmp_path / "preflight.json").write_text('{"changed": true}\n', encoding="utf-8")
+
+    with pytest.raises(GateBValidationError, match="model preflight report evidence bytes"):
+        require_base_development_artifact(
+            base.manifest_path,
+            validation,
+            split_manifest=manifest,
+            fold=0,
+            excluded_ids=(),
+            expected_checkpoint_sha256=BASE_MODEL_CHECKPOINT_SHA256,
         )
 
 

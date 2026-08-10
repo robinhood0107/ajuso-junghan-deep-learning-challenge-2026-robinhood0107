@@ -33,6 +33,7 @@ from .development_shard import (
 from .gate_b import (
     DEFAULT_GATE_B_CONFIG,
     GateBConfig,
+    create_development_execution_evidence,
     run_development_baseline,
     write_development_artifacts,
 )
@@ -41,6 +42,7 @@ from .gate_b_prediction import run_frozen_evaluation_inference
 from .gate_b_runtime import (
     BASE_MODEL_CHECKPOINT_SHA256,
     GPU_EXECUTION_ACKNOWLEDGEMENT,
+    RuntimeGateEvidence,
     create_adapted_development_backend,
     create_base_development_backend,
     train_qlora_fold,
@@ -65,6 +67,7 @@ from .provenance import (
     build_source_tree_manifest,
     canonical_json_bytes,
     sha256_file,
+    validate_source_tree_manifest_artifact,
     write_json_atomic,
 )
 from .quality import (
@@ -155,6 +158,13 @@ def _add_gpu_runtime_gate(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="required explicit acknowledgement; this command creates a CUDA workload",
     )
+
+
+def _add_current_source_provenance(parser: argparse.ArgumentParser) -> None:
+    """Require a source snapshot that still matches the local source tree."""
+
+    parser.add_argument("--source-root", required=True, type=Path)
+    parser.add_argument("--source-manifest", required=True, type=Path)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -271,6 +281,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_required_gate_b_data_contract(development)
     _add_gpu_runtime_gate(development)
+    _add_current_source_provenance(development)
     development.add_argument("--output-jsonl", required=True, type=Path)
     development.add_argument("--output-manifest", required=True, type=Path)
     development.add_argument("--adapter", type=Path)
@@ -296,6 +307,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_required_gate_b_data_contract(train_fold)
     _add_gpu_runtime_gate(train_fold)
+    _add_current_source_provenance(train_fold)
     train_fold.add_argument("--base-baseline-manifest", required=True, type=Path)
     train_fold.add_argument("--output-dir", required=True, type=Path)
     train_fold.set_defaults(handler=_command_gate_b_train_fold)
@@ -1187,6 +1199,10 @@ def _command_gate_b_sft_preflight(args: argparse.Namespace) -> int:
 def _command_gate_b_development(args: argparse.Namespace) -> int:
     _require_gpu_cli_acknowledgement(args.acknowledge_gpu_use)
     config = _load_locked_gate_b_config(args.config)
+    source_manifest = validate_source_tree_manifest_artifact(
+        args.source_manifest,
+        root=args.source_root,
+    )
     _require_new_development_targets(args.output_jsonl, args.output_manifest)
     train, exclusions, manifest = _load_gate_b_data_contract(args)
     validation_records = _records_for_ids(
@@ -1233,6 +1249,14 @@ def _command_gate_b_development(args: argparse.Namespace) -> int:
             config=config,
         )
         run_kind = "verified_adapter"
+    execution_evidence = _capture_development_execution_evidence(
+        backend,
+        source_manifest=source_manifest,
+        config_path=args.config,
+        config=config,
+        preflight_report=args.preflight_report,
+        gpu_smoke_report=args.gpu_smoke_report,
+    )
     try:
         def report_progress(completed: int, total: int) -> None:
             if completed == 1 or completed == total or completed % 25 == 0:
@@ -1265,6 +1289,7 @@ def _command_gate_b_development(args: argparse.Namespace) -> int:
             records,
             jsonl_path=args.output_jsonl,
             manifest_path=args.output_manifest,
+            execution_evidence=execution_evidence,
         )
     finally:
         backend.close()
@@ -1311,6 +1336,10 @@ def _command_audit_parser_golden(args: argparse.Namespace) -> int:
 def _command_gate_b_train_fold(args: argparse.Namespace) -> int:
     _require_gpu_cli_acknowledgement(args.acknowledge_gpu_use)
     config = _load_locked_gate_b_config(args.config)
+    source_manifest = validate_source_tree_manifest_artifact(
+        args.source_manifest,
+        root=args.source_root,
+    )
     train, exclusions, manifest = _load_gate_b_data_contract(args)
     training_records = _records_for_ids(
         train.records,
@@ -1338,6 +1367,7 @@ def _command_gate_b_train_fold(args: argparse.Namespace) -> int:
         exclusions_file_sha256=exclusions.manifest.sha256,
         split_artifact_sha256=sha256_file(args.split_artifact),
         development_shard_sha256=args.expected_development_shard_sha256,
+        source_manifest=source_manifest,
         preflight_artifact=args.preflight_report,
         gpu_smoke_artifact=args.gpu_smoke_report,
         output_dir=args.output_dir,
@@ -1574,6 +1604,34 @@ def _require_gpu_cli_acknowledgement(acknowledged: bool) -> None:
         raise ValueError(
             "--acknowledge-gpu-use is required before any Gate B CUDA command"
         )
+
+
+def _capture_development_execution_evidence(
+    backend: object,
+    *,
+    source_manifest: object,
+    config_path: Path,
+    config: GateBConfig,
+    preflight_report: Path,
+    gpu_smoke_report: Path,
+):
+    """Bind a development manifest to the exact B0 gate used by its backend."""
+
+    runtime_gate = getattr(backend, "runtime_gate_evidence", None)
+    if not isinstance(runtime_gate, RuntimeGateEvidence):
+        raise RuntimeError(
+            "development backend must expose validated RuntimeGateEvidence for publication"
+        )
+    return create_development_execution_evidence(
+        source_manifest=source_manifest,
+        config_path=config_path,
+        config_sha256=config.sha256,
+        preflight_report_path=preflight_report,
+        preflight_report_sha256=runtime_gate.preflight_sha256,
+        gpu_smoke_report_path=gpu_smoke_report,
+        gpu_smoke_report_sha256=runtime_gate.smoke_sha256,
+        gpu_device_name=runtime_gate.device_name,
+    )
 
 
 def _load_locked_gate_b_config(path: Path) -> GateBConfig:
