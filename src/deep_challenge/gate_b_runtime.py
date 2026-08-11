@@ -74,6 +74,7 @@ _RATIONALE_ADAPTER_MANIFEST_SCHEMA = "gate-b-qlora-adapter-v4"
 _CHECKSUM_FILENAME = "CHECKSUMS.sha256"
 _MANIFEST_FILENAME = "manifest.json"
 _TRAINING_RESUME_CONTRACT_SCHEMA = "gate-b-qlora-training-resume-v1"
+_TRAINING_RESUME_CONTRACT_V2_SCHEMA = "gate-b-qlora-training-resume-v2"
 _TRAINING_RESUME_CONTRACT_FILENAME = "resume-contract.json"
 _TRAINING_RESUME_STARTED_FILENAME = "training-started.json"
 _TRAINING_RESUME_LOCK_FILENAME = ".training-resume.lock"
@@ -1835,12 +1836,24 @@ def _prepare_training_resume_context(
             "resume_dir and output_dir must be disjoint to protect checkpoints"
         )
 
+    contract_schema = _TRAINING_RESUME_CONTRACT_V2_SCHEMA
+    contract_path = root / _TRAINING_RESUME_CONTRACT_FILENAME
+    if root.exists() and contract_path.exists():
+        existing = _training_resume_contract_payload_from_root(root)
+        existing_schema = existing.get("schema_version")
+        if existing_schema not in {
+            _TRAINING_RESUME_CONTRACT_SCHEMA,
+            _TRAINING_RESUME_CONTRACT_V2_SCHEMA,
+        }:
+            raise GateBValidationError("training resume contract schema is unsupported")
+        contract_schema = str(existing_schema)
     expected = _training_resume_contract_payload(
         plan=plan,
         gate=gate,
         data_provenance=data_provenance,
         source_manifest=source_manifest,
         config=config,
+        schema_version=contract_schema,
     )
     if root.exists():
         if root.is_symlink() or not root.is_dir():
@@ -1889,12 +1902,32 @@ def _training_resume_contract_payload(
     data_provenance: Mapping[str, str],
     source_manifest: SourceTreeArtifactEvidence,
     config: GateBConfig,
+    schema_version: str = _TRAINING_RESUME_CONTRACT_V2_SCHEMA,
 ) -> dict[str, object]:
     """Return the immutable evidence contract for retained Trainer state."""
 
     _validate_plan_binding(plan, config)
+    if schema_version not in {
+        _TRAINING_RESUME_CONTRACT_SCHEMA,
+        _TRAINING_RESUME_CONTRACT_V2_SCHEMA,
+    }:
+        raise GateBValidationError("training resume contract schema is unsupported")
+    split_payload: dict[str, object] = {
+        "version": plan.split_version,
+        "sha256": plan.split_sha256,
+        "source_groups_sha256": plan.source_groups_sha256,
+        "fold": plan.fold,
+        "excluded_ids_sha256": plan.excluded_ids_sha256,
+        "training_ids_sha256": plan.training_ids_sha256,
+        "validation_ids_sha256": plan.validation_ids_sha256,
+        "training_examples_sha256": plan.training_examples_sha256,
+        "validation_examples_sha256": plan.validation_examples_sha256,
+    }
+    if schema_version == _TRAINING_RESUME_CONTRACT_V2_SCHEMA:
+        split_payload["training_count"] = len(plan.training_ids)
+        split_payload["validation_count"] = len(plan.validation_ids)
     payload: dict[str, object] = {
-        "schema_version": _TRAINING_RESUME_CONTRACT_SCHEMA,
+        "schema_version": schema_version,
         "model_id": OFFICIAL_MODEL_ID,
         "revision": PINNED_MODEL_REVISION,
         "base_model_checkpoint_sha256": BASE_MODEL_CHECKPOINT_SHA256,
@@ -1914,19 +1947,7 @@ def _training_resume_contract_payload(
             "file_count": source_manifest.file_count,
         },
         "data_provenance": dict(sorted(data_provenance.items())),
-        "split": {
-            "version": plan.split_version,
-            "sha256": plan.split_sha256,
-            "source_groups_sha256": plan.source_groups_sha256,
-            "fold": plan.fold,
-            "excluded_ids_sha256": plan.excluded_ids_sha256,
-            "training_count": len(plan.training_ids),
-            "training_ids_sha256": plan.training_ids_sha256,
-            "validation_ids_sha256": plan.validation_ids_sha256,
-            "validation_count": len(plan.validation_ids),
-            "training_examples_sha256": plan.training_examples_sha256,
-            "validation_examples_sha256": plan.validation_examples_sha256,
-        },
+        "split": split_payload,
         "training_target": {
             "kind": plan.training_target_kind,
             "candidate_config_sha256": plan.rationale_candidate_config_sha256,
@@ -2371,10 +2392,8 @@ def _validate_adapter_against_resume_contract(
         "source_groups_sha256": split.get("source_groups_sha256"),
         "fold": split.get("fold"),
         "excluded_ids_sha256": split.get("excluded_ids_sha256"),
-        "training_count": split.get("training_count"),
         "training_ids_sha256": split.get("training_ids_sha256"),
         "training_examples_sha256": split.get("training_examples_sha256"),
-        "validation_count": split.get("validation_count"),
         "validation_ids_sha256": split.get("validation_ids_sha256"),
         "validation_examples_sha256": split.get("validation_examples_sha256"),
         "train_file_sha256": data_provenance.get("train_file_sha256"),
@@ -2403,6 +2422,9 @@ def _validate_adapter_against_resume_contract(
         ),
         "rationale_corpus_audit_sha256": training_target.get("corpus_audit_sha256"),
     }
+    if contract.get("schema_version") == _TRAINING_RESUME_CONTRACT_V2_SCHEMA:
+        expected["training_count"] = split.get("training_count")
+        expected["validation_count"] = split.get("validation_count")
     mismatched = [
         field_name
         for field_name, expected_value in expected.items()
