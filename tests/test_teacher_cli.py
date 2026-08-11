@@ -10,8 +10,18 @@ import pytest
 import deep_challenge.cli as cli_module
 from deep_challenge.cli import main
 from deep_challenge.data import load_train_csv
+from deep_challenge.provenance import (
+    build_source_tree_manifest,
+    validate_source_tree_manifest_artifact,
+)
+from deep_challenge.teacher_harness import (
+    run_harness_live,
+    run_harness_replay,
+    synthetic_fixture_rows,
+)
 from deep_challenge.teacher_rationale import (
     CodexCommandResult,
+    TeacherExecutionConfig,
     build_teacher_prompt,
     load_teacher_plan,
 )
@@ -46,6 +56,24 @@ def _teacher_pilot_v3_config_path() -> Path:
         / "configs"
         / "gate_b"
         / "codex-gpt-5.6-sol-teacher-pilot-v3.json"
+    )
+
+
+def _teacher_pilot_v4_config_path() -> Path:
+    return (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "gate_b"
+        / "codex-gpt-5.6-sol-teacher-pilot-v4.json"
+    )
+
+
+def _harness_config_path() -> Path:
+    return (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "gate_b"
+        / "codex-gpt-5.6-sol-teacher-harness-v1.json"
     )
 
 
@@ -193,6 +221,96 @@ def _logical_audit_event_stream_for_prompt(prompt: str) -> str:
                 "usage": {"input_tokens": 19, "output_tokens": 7},
             },
         )
+    )
+
+
+def _qualified_v4_harness_arguments(
+    tmp_path: Path,
+) -> tuple[list[str], Path, str]:
+    """Create private, answer-free qualified evidence for one v4 CLI test."""
+
+    source_root = tmp_path / "frozen-source"
+    source_root.mkdir()
+    (source_root / "frozen.py").write_text("VALUE = 4\n", encoding="utf-8")
+    source_manifest = tmp_path / "source-manifest.json"
+    source_manifest.write_text(
+        json.dumps(build_source_tree_manifest(source_root).as_dict()),
+        encoding="utf-8",
+    )
+    source_evidence = validate_source_tree_manifest_artifact(
+        source_manifest,
+        root=source_root,
+    )
+    harness_config, harness_file_sha256, profile = (
+        cli_module._load_locked_codex_teacher_harness_config(_harness_config_path())
+    )
+    teacher_config, teacher_file_sha256 = cli_module._load_locked_codex_teacher_config(
+        _teacher_pilot_v4_config_path()
+    )
+    replay_report = tmp_path / "replay.json"
+    run_harness_replay(
+        replay_report,
+        harness_config_sha256=cli_module._teacher_config_sha256(harness_config),
+        harness_config_file_sha256=harness_file_sha256,
+        teacher_config_sha256=cli_module._teacher_config_sha256(teacher_config),
+        teacher_config_file_sha256=teacher_file_sha256,
+        prompt_policy=cli_module._teacher_prompt_policy_from_config(teacher_config),
+        profile=profile,
+    )
+    binary = tmp_path / "codex-v4"
+    binary.write_text("synthetic v4 Codex binary\n", encoding="utf-8")
+    version = "codex-cli v4 synthetic"
+    expected_answers = {
+        row.problem_id: row.expected_answer for row in synthetic_fixture_rows()
+    }
+
+    def runner(command: tuple[str, ...]) -> CodexCommandResult:
+        return CodexCommandResult(
+            stdout=_event_stream_for_prompt(command[-1], expected_answers),
+            stderr="",
+            returncode=0,
+            latency_ms=1,
+        )
+
+    live_plan_dir = tmp_path / "private-live-plan"
+    live_report = tmp_path / "live.json"
+    live = run_harness_live(
+        live_plan_dir,
+        live_report,
+        harness_config_sha256=cli_module._teacher_config_sha256(harness_config),
+        harness_config_file_sha256=harness_file_sha256,
+        teacher_config_sha256=cli_module._teacher_config_sha256(teacher_config),
+        teacher_config_file_sha256=teacher_file_sha256,
+        prompt_policy=cli_module._teacher_prompt_policy_from_config(teacher_config),
+        execution=TeacherExecutionConfig(
+            codex_binary=str(binary),
+            codex_cli_version=version,
+            reasoning_effort="high",
+            seed=20_260_731,
+        ),
+        profile=profile,
+        source_manifest=source_evidence,
+        command_runner=runner,
+        working_directory=tmp_path,
+    )
+    assert live.qualified
+    return (
+        [
+            "--harness-config",
+            str(_harness_config_path()),
+            "--harness-replay-report",
+            str(replay_report),
+            "--harness-live-report",
+            str(live_report),
+            "--harness-live-plan-dir",
+            str(live_plan_dir),
+            "--harness-source-root",
+            str(source_root),
+            "--harness-source-manifest",
+            str(source_manifest),
+        ],
+        binary,
+        version,
     )
 
 
@@ -576,6 +694,232 @@ def test_teacher_pilot_v3_profile_hashes_cross_loads_and_worker_gate(
         == 2
     )
     assert "differs from the locked no-API profile" in capsys.readouterr().err
+
+
+def test_teacher_pilot_v4_requires_reverified_harness_authorization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config_path = _teacher_pilot_v4_config_path()
+    config, file_sha256 = cli_module._load_locked_codex_teacher_config(config_path)
+    assert cli_module._teacher_config_sha256(config) == (
+        "7a7f3e117a3f454c21dd9721ae432b9da6c0813e3b806a19af7f1d9a34d8adef"
+    )
+    assert file_sha256 == "063881f7d72a96e25202736a8fe729a0d64271376019b281094a5350c92a0d97"
+    assert config["initial_chunk_size"] == 32
+    assert config["repair_chunk_size"] == 16
+    assert config["max_attempts"] == 3
+    assert config["initial_reasoning_effort"] == "high"
+    assert config["repair_reasoning_effort"] == "xhigh"
+    assert cli_module._teacher_prompt_policy_from_config(config).sha256 == (
+        "8de961862f2cabf245753ee276d4b833d8917934d4ba84fa8f9caa20a64ab924"
+    )
+
+    contract, _ = _teacher_contract(tmp_path, row_count=400)
+    capsys.readouterr()
+    harness_args, binary, version = _qualified_v4_harness_arguments(tmp_path)
+    monkeypatch.setattr(
+        cli_module,
+        "_probe_codex_chatgpt_cli",
+        lambda: (str(binary), version),
+    )
+    plan_dir = tmp_path / "private-teacher-pilot-v4"
+    command = [
+        "gate-b-teacher-plan",
+        *contract,
+        "--teacher-config",
+        str(config_path),
+        "--pilot-size",
+        "128",
+        "--output-dir",
+        str(plan_dir),
+    ]
+
+    assert main(command) == 2
+    assert "requires harness config" in capsys.readouterr().err
+    assert not plan_dir.exists()
+
+    assert main([*command, *harness_args]) == 0
+    created = json.loads(capsys.readouterr().out)
+    plan = load_teacher_plan(plan_dir)
+    assert plan.label == "codex-gpt-5.6-sol-teacher-pilot-v4"
+    assert plan.version == "pilot-v4"
+    assert plan.prompt_policy.prompt_version == "gate-b-codex-teacher-prompt-v4"
+    assert len(plan.chunks) == 4
+    assert all(len(chunk.problem_ids) == 32 for chunk in plan.chunks)
+    assert "no duplicate or omitted IDs" in build_teacher_prompt(plan, 0)
+    assert created["harness_authorization_payload_sha256"] is not None
+    sidecar = plan_dir / "harness-authorization-v1.json"
+    assert sidecar.is_file()
+
+    status_command = [
+        "gate-b-teacher-status",
+        "--plan-dir",
+        str(plan_dir),
+        "--teacher-config",
+        str(config_path),
+    ]
+    assert main(status_command) == 2
+    assert "requires harness config" in capsys.readouterr().err
+    assert main([*status_command, *harness_args]) == 0
+    assert "unique expression" not in capsys.readouterr().out
+
+    original_sidecar = sidecar.read_bytes()
+    sidecar.write_bytes(b"{}")
+    assert main([*status_command, *harness_args]) == 2
+    assert "harness authorization" in capsys.readouterr().err
+    sidecar.write_bytes(original_sidecar)
+
+    for foreign_config in (
+        _teacher_config_path(),
+        _teacher_pilot_v2_config_path(),
+        _teacher_pilot_v3_config_path(),
+    ):
+        assert (
+            main(
+                [
+                    "gate-b-teacher-status",
+                    "--plan-dir",
+                    str(plan_dir),
+                    "--teacher-config",
+                    str(foreign_config),
+                ]
+            )
+            == 2
+        )
+        assert "does not match" in capsys.readouterr().err
+
+
+def test_teacher_pilot_v4_initial_threshold_failure_blocks_all_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contract, train = _teacher_contract(tmp_path, row_count=400)
+    capsys.readouterr()
+    harness_args, binary, version = _qualified_v4_harness_arguments(tmp_path)
+    monkeypatch.setattr(
+        cli_module,
+        "_probe_codex_chatgpt_cli",
+        lambda: (str(binary), version),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_prepare_isolated_codex_home",
+        lambda working_directory: working_directory,
+    )
+    config_path = _teacher_pilot_v4_config_path()
+    plan_dir = tmp_path / "private-teacher-pilot-v4"
+    assert (
+        main(
+            [
+                "gate-b-teacher-plan",
+                *contract,
+                "--teacher-config",
+                str(config_path),
+                "--pilot-size",
+                "128",
+                "--output-dir",
+                str(plan_dir),
+                *harness_args,
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    answers = {
+        record.id: record.answer
+        for record in load_train_csv(train)
+        if record.answer is not None
+    }
+    calls: list[tuple[str, ...]] = []
+
+    def wrong_runner(
+        command: tuple[str, ...],
+        *,
+        timeout_seconds: int,
+        isolated_codex_home: Path | None = None,
+    ) -> CodexCommandResult:
+        del timeout_seconds, isolated_codex_home
+        calls.append(command)
+        wrong_answers = {problem_id: answer + 1 for problem_id, answer in answers.items()}
+        return CodexCommandResult(
+            stdout=_event_stream_for_prompt(command[-1], wrong_answers),
+            stderr="",
+            returncode=0,
+            latency_ms=1,
+        )
+
+    monkeypatch.setattr(cli_module, "_run_codex_teacher_command", wrong_runner)
+    run_command = [
+        "gate-b-teacher-run",
+        "--plan-dir",
+        str(plan_dir),
+        "--teacher-config",
+        str(config_path),
+        "--acknowledge-codex-teacher",
+        "--max-invocations",
+        "4",
+        "--max-workers",
+        "1",
+        *harness_args,
+    ]
+    short_initial_command = list(run_command)
+    short_initial_command[
+        short_initial_command.index("--max-invocations") + 1
+    ] = "2"
+    assert main(short_initial_command) == 2
+    assert "requires exactly --max-invocations 4" in capsys.readouterr().err
+    assert not calls
+    assert main(run_command) == 0
+    assert len(calls) == 4
+    capsys.readouterr()
+
+    source_jsonl = tmp_path / "must-not-exist.jsonl"
+    source_manifest = tmp_path / "must-not-exist.manifest.json"
+    finalize_command = [
+        "gate-b-teacher-finalize",
+        *contract,
+        "--teacher-config",
+        str(config_path),
+        "--plan-dir",
+        str(plan_dir),
+        "--pilot-size",
+        "128",
+        "--output-jsonl",
+        str(source_jsonl),
+        "--output-manifest",
+        str(source_manifest),
+        *harness_args,
+    ]
+    assert main(finalize_command) == 1
+    finalized = json.loads(capsys.readouterr().out)
+    failure = finalized["initial_threshold_failure"]
+    assert failure["accepted_problem_count"] == 0
+    assert failure["minimum_initial_accepted_count"] == 103
+    assert failure["failure_category"] == "initial_exact_match_below_threshold"
+    assert not source_jsonl.exists()
+    assert not source_manifest.exists()
+
+    def unexpected_runner(*_args: object, **_kwargs: object) -> CodexCommandResult:
+        pytest.fail("v4 threshold failure must block every later teacher call")
+
+    monkeypatch.setattr(cli_module, "_run_codex_teacher_command", unexpected_runner)
+    assert main(run_command) == 2
+    assert "initial threshold failed" in capsys.readouterr().err
+    assert (
+        main(
+            [
+                "gate-b-teacher-status",
+                "--plan-dir",
+                str(plan_dir),
+                "--teacher-config",
+                str(config_path),
+                *harness_args,
+            ]
+        )
+        == 0
+    )
+    status = json.loads(capsys.readouterr().out)
+    assert status["initial_threshold_failure"] == failure
+    assert "unique expression" not in json.dumps(status)
 
 
 def test_teacher_cli_rejects_nonzero_fold_and_config_drift(

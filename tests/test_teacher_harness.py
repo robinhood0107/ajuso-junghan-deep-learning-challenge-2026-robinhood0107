@@ -26,10 +26,12 @@ from deep_challenge.teacher_harness import (
     classify_codex_result,
     create_harness_authorization,
     diagnose_teacher_ledger,
+    require_harness_live_execution_matches,
     run_harness_live,
     run_harness_replay,
     synthetic_fixture_rows,
     synthetic_fixture_sha256,
+    validate_harness_evidence,
     verify_harness_authorization,
 )
 from deep_challenge.teacher_rationale import (
@@ -409,6 +411,26 @@ def test_live_harness_runs_exactly_two_chunks_and_authorization_revalidates(
         prompt_policy=_policy(),
         profile=_profile(),
     )
+    validated_payload_sha = validate_harness_evidence(
+        replay_report=replay_report,
+        live_report=live_report,
+        live_plan_dir=tmp_path / "private-live-plan",
+        **_hashes(),
+        prompt_policy=_policy(),
+        source_manifest=_source_evidence(tmp_path),
+    )
+    require_harness_live_execution_matches(live_report, execution=execution)
+    other_binary = tmp_path / "different-codex"
+    other_binary.write_text("other synthetic binary\n", encoding="utf-8")
+    with pytest.raises(TeacherHarnessValidationError, match="execution"):
+        require_harness_live_execution_matches(
+            live_report,
+            execution=TeacherExecutionConfig(
+                codex_binary=str(other_binary),
+                codex_cli_version=execution.codex_cli_version,
+                reasoning_effort="high",
+            ),
+        )
     authorization = tmp_path / "authorization.json"
     payload_sha = create_harness_authorization(
         authorization,
@@ -419,6 +441,7 @@ def test_live_harness_runs_exactly_two_chunks_and_authorization_revalidates(
         prompt_policy=_policy(),
         source_manifest=_source_evidence(tmp_path),
     )
+    assert payload_sha == validated_payload_sha
     original_replay = replay_report.read_bytes()
     replay_payload = json.loads(original_replay)
     replay_payload["classifications"][0]["stage"] = "nonzero"

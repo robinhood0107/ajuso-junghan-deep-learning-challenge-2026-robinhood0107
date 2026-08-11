@@ -279,6 +279,13 @@ def test_pilot_authorization_receipt_is_raw_free_immutable_and_reverified(
             "pilot-v3",
             "953d62e283d5237f29b2145b5ed513246d737acd7ec40879450d7bcc8d08402b",
         ),
+        (
+            "gate-b-codex-teacher-prompt-v4",
+            "3029e9297bdda504e0f48e1ce4d57e363e5d3a5342edf18253b11c4f75ecd8a7",
+            "codex-gpt-5.6-sol-teacher-pilot-v4",
+            "pilot-v4",
+            "8de961862f2cabf245753ee276d4b833d8917934d4ba84fa8f9caa20a64ab924",
+        ),
     ),
 )
 def test_policy_bound_pilot_authorization_and_sidecar_bind_prompt_policy(

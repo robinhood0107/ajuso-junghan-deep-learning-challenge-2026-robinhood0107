@@ -18,9 +18,12 @@ submission 정책을 바꾸지 않는다. live canary도 bank, corpus, GPU artif
   - 64 fixed synthetic rows, 32/32 chunks, 2 invocations, worker 1, high effort,
     attempts 1, retry/repair/bank output 0.
 - Fixture SHA-256: `bc314a24ec872edf26bae13e296fb8fd500f80bcf6c00023518844d1b407e3b7`.
-- The first live candidate is allowlisted `teacher-pilot-v3` only; historic v1/v2
-  cannot start a fresh harness run. PR #4 may add v4 only after v4 itself binds
-  qualified v1 replay/live evidence.
+- Historic v1/v2/v3/v4 ledgers cannot start a fresh organizer-data run. v4
+  completed its own qualified replay/live evidence and immutable authorization,
+  then terminally failed the bounded organizer pilot at 79/128. It is forensic
+  evidence only, not an operational candidate. A fresh v3 canary, a v4 rerun,
+  or an edited report is not an approved substitute; a new prompt version needs
+  a newly designed versioned harness and explicit approval first.
 - Live source must have a fresh `source-manifest` and plan/report paths must not
   exist. Both runtime paths must be below excluded `artifacts/`, so a successful
   run cannot invalidate the frozen source tree.
@@ -68,7 +71,7 @@ PROJECT=/mnt/c/Users/pjjpj/Desktop/deepleaning
 cd "$PROJECT"
 RUN_TAG=YYYYMMDDTHHMMSSKST
 HARNESS_CONFIG="$PROJECT/configs/gate_b/codex-gpt-5.6-sol-teacher-harness-v1.json"
-TEACHER_CONFIG="$PROJECT/configs/gate_b/codex-gpt-5.6-sol-teacher-pilot-v3.json"
+TEACHER_CONFIG="$PROJECT/configs/gate_b/codex-gpt-5.6-sol-teacher-pilot-v4.json"
 SOURCE_MANIFEST="$PROJECT/artifacts/analysis/source-manifest-teacher-harness-v1-$RUN_TAG.json"
 REPLAY_REPORT="$PROJECT/artifacts/analysis/gate-b-teacher-harness-replay-v1-$RUN_TAG.json"
 LIVE_PLAN="$PROJECT/artifacts/gate_b/codex-teacher-harness-v1-$RUN_TAG"
@@ -119,8 +122,8 @@ uv run deep-challenge gate-b-teacher-harness-live \
 - Exit `0`: qualified. Both chunks are 32/32, all 64 targets are locally valid,
   unique, canonical-order, and tool/unsafe/unclassified count is zero.
 - Exit `1`: the command completed normally but the profile failed. Preserve only
-  its raw-free report/count/hash; do not retry, repair, resume, create a bank,
-  or create a v4 config.
+  its raw-free report/count/hash; do not retry, repair, resume, create an
+  organizer-data plan/run, or create v5.
 - Exit `2`: input, provenance, or execution contract failure. Correct the
   contract on a new clean snapshot and generate a new manifest/run tag.
 
@@ -135,9 +138,11 @@ raw-free report without modifying any ledger file. It is the only permitted
 operation for the historic v3 failure evidence:
 
 ```bash
+V3_FORENSIC_CONFIG="$PROJECT/configs/gate_b/codex-gpt-5.6-sol-teacher-pilot-v3.json"
+
 uv run deep-challenge gate-b-teacher-diagnose \
   --plan-dir "$V3_PRIVATE_PLAN" \
-  --teacher-config "$TEACHER_CONFIG" \
+  --teacher-config "$V3_FORENSIC_CONFIG" \
   --output "$V3_DIAGNOSTIC_REPORT"
 ```
 
@@ -146,11 +151,11 @@ redacted classification `stage=output_structure`, `code=cardinality_mismatch`,
 `requested_count=32`, `returned_count=33`, and `duplicate_count=1`. The source
 ledger's complete file digest is compared before and after diagnosis.
 
-## PR #4 gate
+## PR #4 gate and recorded outcome
 
-PR #4 may add `teacher-pilot-v4` only if this replay and live report are both
-qualified and reverified with the private live plan into the harness-authorization
-sidecar. The v4 planner must reverify that sidecar before creating its own 128-row
-plan. A failed v4
-pilot preserves raw-free counts/hash/category only, creates no v5, and locks
-full bank, corpus, audit, GPU, holdout, leaderboard, and submission work.
+The v4 organizer-data planner was allowed only after its own replay and live report
+were both qualified and reverified with the private live plan into the
+harness-authorization sidecar. It rechecked that sidecar before each plan, run,
+status, finalization, audit, and receipt operation. The actual v4 pilot failed at
+79/128, preserves raw-free counts/hash/category only, creates no v5, and locks full
+bank, corpus, audit, GPU, holdout, leaderboard, and submission work.

@@ -63,8 +63,9 @@ _TRAIN_ID_RE = re.compile(r"train-\d{6}\Z")
 _TEACHER_PROMPT_V1 = "gate-b-codex-teacher-prompt-v1"
 _TEACHER_PROMPT_V2 = "gate-b-codex-teacher-prompt-v2"
 _TEACHER_PROMPT_V3 = "gate-b-codex-teacher-prompt-v3"
+_TEACHER_PROMPT_V4 = "gate-b-codex-teacher-prompt-v4"
 _POLICY_BOUND_TEACHER_PROMPTS = frozenset(
-    {_TEACHER_PROMPT_V2, _TEACHER_PROMPT_V3}
+    {_TEACHER_PROMPT_V2, _TEACHER_PROMPT_V3, _TEACHER_PROMPT_V4}
 )
 
 
