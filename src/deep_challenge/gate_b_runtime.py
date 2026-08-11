@@ -2071,6 +2071,11 @@ def _training_resume_contract_payload_from_root(
     _, payload, _ = _load_json_artifact(
         root / _TRAINING_RESUME_CONTRACT_FILENAME, "training resume contract"
     )
+    if payload.get("schema_version") not in {
+        _TRAINING_RESUME_CONTRACT_SCHEMA,
+        _TRAINING_RESUME_CONTRACT_V2_SCHEMA,
+    }:
+        raise GateBValidationError("training resume contract schema is unsupported")
     stored_digest = _required_sha256(
         payload.get("contract_sha256"), "training resume contract sha256"
     )

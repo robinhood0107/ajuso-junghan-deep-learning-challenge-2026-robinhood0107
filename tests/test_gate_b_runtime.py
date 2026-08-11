@@ -960,6 +960,24 @@ def test_qlora_training_resume_preserves_historical_v1_contract(
     historical["split"].pop("validation_count")
     historical.pop("contract_sha256")
     historical_sha256 = hashlib.sha256(canonical_json_bytes(historical)).hexdigest()
+
+    def normalize_hashes(value: object) -> object:
+        if isinstance(value, dict):
+            return {key: normalize_hashes(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [normalize_hashes(item) for item in value]
+        if (
+            isinstance(value, str)
+            and len(value) == 64
+            and all(character in "0123456789abcdef" for character in value)
+        ):
+            return "0" * 64
+        return value
+
+    assert (
+        hashlib.sha256(canonical_json_bytes(normalize_hashes(historical))).hexdigest()
+        == "d40164cdbf535df9d2d3bfae9a4ef081bca05624010d62b80da6b83e0b96a22b"
+    )
     historical["contract_sha256"] = historical_sha256
     contract_path.write_text(
         json.dumps(historical, sort_keys=True, indent=2) + "\n", encoding="utf-8"
@@ -973,6 +991,21 @@ def test_qlora_training_resume_preserves_historical_v1_contract(
         marker.write_text(
             json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8"
         )
+
+    unknown = dict(historical)
+    unknown["schema_version"] = "gate-b-qlora-training-resume-v3"
+    unknown.pop("contract_sha256")
+    unknown["contract_sha256"] = hashlib.sha256(
+        canonical_json_bytes(unknown)
+    ).hexdigest()
+    contract_path.write_text(
+        json.dumps(unknown, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    with pytest.raises(GateBValidationError, match="schema is unsupported"):
+        read_training_resume_status(resume_dir)
+    contract_path.write_text(
+        json.dumps(historical, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
 
     resumed = _ResumableTrainingRuntime()
     artifact = train_qlora_fold(
