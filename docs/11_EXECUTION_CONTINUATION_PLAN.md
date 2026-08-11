@@ -6,10 +6,11 @@
 이어가기 위한 실행 원장이다. 상태 값이 바뀌는 GPU 사용량이나 Kaggle 제출 한도는 이
 문서의 숫자를 재사용하지 않고 해당 명령 직전 다시 관측한다.
 
-> **현재 실행 override:** v1/v2/v3은 forensic ledger이고 새 run/resume 대상이 아니다.
-> harness v1은 merged code이며, next operational candidate인 v4는
-> [`14_GATE_B_TEACHER_V4_RUNBOOK.md`](14_GATE_B_TEACHER_V4_RUNBOOK.md)의 fresh v4
-> replay/live authorization을 통과하기 전 organizer-data plan/run을 시작하지 않는다.
+> **현재 실행 override:** v1/v2/v3/v4은 forensic ledger이고 새 run/resume 대상이 아니다.
+> v4는 qualified synthetic replay/live authorization 뒤 initial 79/128 threshold failure로
+> terminal marker를 기록했다. [`15_GATE_B_TEACHER_V4_FAILURE_RECORD.md`](15_GATE_B_TEACHER_V4_FAILURE_RECORD.md)
+> 이외의 teacher, audit, bank, corpus, GPU 경로는 모두 잠겨 있으며 새 harness 설계·명시 승인
+> 전에는 v5 config를 만들지 않는다.
 
 ## 1. 공개 저장소 경계
 
@@ -75,7 +76,7 @@ PYTHONPATH=src python3 -m deep_challenge.public_repo_guard --all
 | B1.0 | fold 0 base direct-answer | B0.3 green | `20260810T234907KST` JSONL + **v2 provenance manifest**, 1,653/2,942 | invalid parser/artifact or any source/B0/config hash mismatch |
 | B1.1 | parser golden corpus | B1.0 real generations | added regression tests + full CPU suite | conflict is hidden or test fails |
 | B2.0 | fold 0 answer-only QLoRA | same-fold base manifest | 627/2,942; significant harm로 candidate 중단 | train IDs or provenance mismatch |
-| B2.1 | concise-rationale CPU gate | **harness v1 merged / organizer-data teacher BLOCKED:** v3 initial 52/128 | v4-qualified replay/live authorization 뒤 v4 128행 pilot만 별도 검토 | v1/v2/v3 resume, v4 organizer plan 조기 시작, initial <103/128 |
+| B2.1 | concise-rationale CPU gate | **terminal BLOCKED:** v4 initial 79/128 | raw-free v4 evidence만 보존 | v1/v2/v3/v4 resume, repair, v5 allowlist 조기 추가, initial <103/128 |
 | B2.2 | fold 0 rationale QLoRA probe | B2.1와 새 source/B0 green | adapter v4 + generation + paired harm screen | corpus/adapter binding mismatch 또는 significant harm |
 | B1/B2.3 | folds 1–4 repeat | fold 0 harm screen authorizes exact candidate | five base + five candidate OOF runs | any fold incomplete or method fingerprint drift |
 | B2.4 | complete OOF comparison | all five folds | grouped paired bootstrap, exact McNemar, Holm | single fold/reused run/mixed method |
@@ -319,32 +320,37 @@ rationale adapter, GPU generation과 모델 점수는 아직 없다. 다음 GPU 
 14. **R9-B3 (완료, CPU):** v1 prompt bytes와 역사 schema를 유지한 policy-bound 호환
     refactor를 먼저 분리 커밋했다. v3는 derive-then-independent-verify prompt와 별도
     config/schema/label/version을 추가하고 기존 generic plan/run/status/finalize를 재사용한다.
-    전체 CPU suite 457 passed/1 skipped, checksum/public guard와 Ruff가 green이다. 이 변경을
+    전체 CPU suite 469 passed/1 skipped, checksum/public guard와 Ruff가 green이다. 이 변경을
     committed source로 고정한 뒤에만 새 128행 live pilot을 실행한다.
 15. **R9-B4 (완료, live CPU fail-closed):** 같은 seed와 deterministic fold-0 training
     128행을 32×4, worker 1로 실행했다. initial 4호출 중 parsed 2/failed 2, local 승인
     52/128·거부 12·pending 76이었다. 103/128 미만이므로 repair invocation 0으로 즉시
     종료했고 source JSONL/manifest도 만들지 않았다. raw-free final SHA는
     `6b5014b3da16fb31a1334ba101ffa1e6031a1aaac8db0369ac7b9ae81790f5e7`이다.
-16. **R9-C (blocked, CPU→GPU):** R9-B4가 green이 아니므로 logical audit, authorization,
+16. **R9-B5 (완료, harness-gated v4 terminal failure):** committed source `68ff7d4`에서
+    offline replay와 explicit synthetic 2×32 canary를 qualified로 닫고 immutable authorization을
+    결속했다. 같은 deterministic 128행 initial 4×32·worker 1은 parsed 3/failed 1,
+    local 승인 79/128로 103/128 gate에 미달했다. marker payload/file SHA와 status SHA는
+    `docs/15_GATE_B_TEACHER_V4_FAILURE_RECORD.md`에 기록했으며 repair 0, source JSONL/manifest
+    0이다. 이 ledger는 재개하지 않는다.
+17. **R9-C (blocked, CPU→GPU):** R9-B4와 R9-B5가 green이 아니므로 logical audit, authorization,
     full 11,794행 bank, corpus/SFT preflight, source manifest/B0 pair, fold 0 rationale QLoRA,
-    adapter generation, paired harm screen을 실행하지 않는다. synthetic harness v1 CPU path는
-    merged code다. v4 config는 synthetic candidate로만 존재하며, v4-qualified replay/live
-    authorization 전에는 v4 organizer-data plan/run을 시작하지 않는다.
-17. **R9-D (조건부 GPU):** R9-C가 `candidate_full_oof_authorized=true`일 때만 folds 1--4의
+    adapter generation, paired harm screen을 실행하지 않는다. 새 versioned synthetic harness의
+    설계·명시 승인 전에는 v5 config/allowlist도 만들지 않는다.
+18. **R9-D (조건부 GPU):** R9-C가 `candidate_full_oof_authorized=true`일 때만 folds 1--4의
     fold별 corpus/adapter/base/generation을 완성하고 complete OOF grouped paired bootstrap,
     exact McNemar, Holm을 수행한다.
-18. **R10 (CPU):** development evidence만으로 primary/fallback을 freeze하고 one-shot
+19. **R10 (CPU):** development evidence만으로 primary/fallback을 freeze하고 one-shot
     holdout claim 전의 immutable method/route/config checkpoint binding을 검증한다.
-19. **R11 (GPU):** R10 이후에만 locked holdout을 정확히 한 번 평가한다. claim을 만든 뒤
+20. **R11 (GPU):** R10 이후에만 locked holdout을 정확히 한 번 평가한다. claim을 만든 뒤
     실패해도 접근권은 소비되므로 재시도 판단은 별도 기록한다.
-20. **R12 (GPU):** holdout 후 고정된 policy로 filtered leaderboard만 예측한다. 이 데이터는
+21. **R12 (GPU):** holdout 후 고정된 policy로 filtered leaderboard만 예측한다. 이 데이터는
     학습, self-training seed, prompt 개선, 외부 API 입력에 절대 쓰지 않는다.
-21. **R13 (CPU):** strict submission writer와 independent validator를 모두 통과시키고
+22. **R13 (CPU):** strict submission writer와 independent validator를 모두 통과시키고
     `ID,answer`, row order, checksum, invalid/missing=0인지 확인한다.
-22. **R14 (외부 권한):** Kaggle upload는 사용자의 명시 요청이 있을 때만 수행한다. upload
+23. **R14 (외부 권한):** Kaggle upload는 사용자의 명시 요청이 있을 때만 수행한다. upload
     전에는 final run manifest와 local submission checksum을 다시 대조한다.
-23. **R15 (CPU):** 각 완료 phase마다 source manifest와 canonical `CHECKSUMS.sha256`를
+24. **R15 (CPU):** 각 완료 phase마다 source manifest와 canonical `CHECKSUMS.sha256`를
     갱신하고, raw artifact 없이 public code/docs만 guard 검증·commit·push한다.
 
 R4--R9는 R3의 parser/test gate를 우회할 수 없고, R11--R14는 R9-D--R10의 complete OOF
@@ -378,11 +384,10 @@ teacher JSONL, logical audit, bank/corpus/preflight/GPU는 시작하지 않았�
 ledger/tag를 재개하지 않으며 Kaggle token은 대회 metadata 확인용이지 teacher credential이
 아니다.
 
-다음 safe task는 `docs/14_GATE_B_TEACHER_V4_RUNBOOK.md`에 따라 v4 code를 committed clean
-source에서 CPU 검증하고, fresh manifest를 만든 뒤 v4 offline replay와 explicit 2×32 synthetic
-live canary를 qualified로 닫는 것이다. replay/live authorization 전에는 v4 organizer-data
-plan/run을 만들거나 teacher를 호출하지 않는다. 아래 source-manifest 명령은 그 no-overwrite
-pattern을 따른다.
+v4 execution은 이미 terminal failure로 끝났다. 다음 safe task는 raw-free evidence와 public
+guard를 보존하는 것이며, 새 versioned synthetic live-eval harness를 설계·명시 승인하기 전에는
+v4 명령을 새 tag로 실행하거나 v5 organizer-data plan/run을 만들지 않는다. 아래 historical
+source-manifest 명령은 forensic no-overwrite pattern 설명일 뿐 실행 지시가 아니다.
 
 ```bash
 test ! -e "$SOURCE_MANIFEST"

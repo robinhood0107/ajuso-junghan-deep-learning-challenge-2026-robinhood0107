@@ -2,13 +2,14 @@
 
 기준 시각: **2026-08-11 KST**
 대상 호스트: **WSL2 Ubuntu 24.04 + NVIDIA GeForce RTX 4070 SUPER 12GB**
-현재 판정: **parser v2 current-source base 완료, answer-only QLoRA 중단, teacher-pilot-v3 initial threshold fail-closed·후속 teacher/GPU 잠금**
+현재 판정: **parser v2 current-source base 완료, answer-only QLoRA 중단, teacher-pilot-v4 terminal threshold failure·후속 teacher/GPU 잠금**
 
-> **현재 실행 override:** 이 문서의 3.1절 v3 명령은 `20260811T153322KST` forensic
-> transcript이며 새 tag로 실행하거나 resume하지 않는다. v4 candidate의 synthetic freeze,
-> replay/live qualification, immutable sidecar, 128행 pilot은
-> [`14_GATE_B_TEACHER_V4_RUNBOOK.md`](14_GATE_B_TEACHER_V4_RUNBOOK.md)만 따른다. v4
-> organizer-data teacher는 그 런북의 v4-specific synthetic gate 전까지 잠겨 있다.
+> **현재 실행 override:** 이 문서의 모든 teacher 명령은 historical/forensic record다. v4는
+> qualified synthetic replay·live canary 뒤 initial 79/128 threshold failure로 terminal marker를
+> 기록했다. 새 tag 실행, resume, repair, audit, receipt, bank, corpus, GPU를 하지 않는다.
+> 공개-safe raw-free binding과 stop 조건은
+> [`15_GATE_B_TEACHER_V4_FAILURE_RECORD.md`](15_GATE_B_TEACHER_V4_FAILURE_RECORD.md)를
+> 권위 원본으로 한다. 새 versioned harness 설계와 명시 승인 전에는 v5도 만들지 않는다.
 
 이 문서는 현재 코드의 CLI와 정확히 일치하는 실행 순서다. GPU가 필요한 명령은 맨
 뒤의 별도 절에만 둔다. 2026-08-10 이전 source final smoke와 별도로, training cache-off와
@@ -85,11 +86,12 @@ prompt-template/prompt-policy SHA는 각각
 evidence 전용으로 남긴다. failed `teacher-pilot-v2` config와 ledger도 forensic evidence
 전용이며 새 v3 plan/status/finalize 입력으로 쓰지 않는다.
 v3 config도 `20260811T153322KST` 한 번의 고정 pilot에서 실패 evidence가 됐다. 이 config로
-새 plan을 만들거나 기존 plan을 resume하지 않는다. v4 config는 separate policy-bound
-candidate이며, v4-specific qualified replay, qualified 2×32 live canary, immutable authorization
-sidecar 전에는 organizer-data plan/run을 만들 수 없다. harness와 no-overwrite source-freeze
-순서는 `docs/13_SYNTHETIC_TEACHER_HARNESS_V1.md` 및
-`docs/14_GATE_B_TEACHER_V4_RUNBOOK.md`를 따른다.
+새 plan을 만들거나 기존 plan을 resume하지 않는다. v4 config도 qualified replay·qualified 2×32
+live canary와 immutable authorization 뒤 `20260811T191118KST` bounded pilot에서 terminal
+failure가 됐다. v4-specific source-freeze 순서와 실제 stop evidence는
+`docs/13_SYNTHETIC_TEACHER_HARNESS_V1.md`, `docs/14_GATE_B_TEACHER_V4_RUNBOOK.md`,
+`docs/15_GATE_B_TEACHER_V4_FAILURE_RECORD.md`에 보존하며, 어느 v4 organizer-data plan/run도
+새로 만들거나 resume하지 않는다.
 
 현재 canonical 사실은 다음과 같다.
 

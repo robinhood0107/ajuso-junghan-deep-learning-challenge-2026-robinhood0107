@@ -18,12 +18,12 @@ submission 정책을 바꾸지 않는다. live canary도 bank, corpus, GPU artif
   - 64 fixed synthetic rows, 32/32 chunks, 2 invocations, worker 1, high effort,
     attempts 1, retry/repair/bank output 0.
 - Fixture SHA-256: `bc314a24ec872edf26bae13e296fb8fd500f80bcf6c00023518844d1b407e3b7`.
-- Historic v1/v2/v3 ledgers cannot start a fresh organizer-data run. The only
-  next operational candidate is policy-bound `teacher-pilot-v4`: its config may
-  be committed for synthetic qualification, but its organizer-data plan is
-  forbidden until its *own* qualified replay/live evidence is reverified and
-  bound into the immutable authorization sidecar. A fresh v3 canary is not an
-  approved substitute for v4 evidence.
+- Historic v1/v2/v3/v4 ledgers cannot start a fresh organizer-data run. v4
+  completed its own qualified replay/live evidence and immutable authorization,
+  then terminally failed the bounded organizer pilot at 79/128. It is forensic
+  evidence only, not an operational candidate. A fresh v3 canary, a v4 rerun,
+  or an edited report is not an approved substitute; a new prompt version needs
+  a newly designed versioned harness and explicit approval first.
 - Live source must have a fresh `source-manifest` and plan/report paths must not
   exist. Both runtime paths must be below excluded `artifacts/`, so a successful
   run cannot invalidate the frozen source tree.
@@ -151,11 +151,11 @@ redacted classification `stage=output_structure`, `code=cardinality_mismatch`,
 `requested_count=32`, `returned_count=33`, and `duplicate_count=1`. The source
 ledger's complete file digest is compared before and after diagnosis.
 
-## PR #4 gate
+## PR #4 gate and recorded outcome
 
-The v4 organizer-data planner may proceed only if its own replay and live report
-are both qualified and reverified with the private live plan into the
-harness-authorization sidecar. It rechecks that sidecar before each plan, run,
-status, finalization, audit, and receipt operation. A failed v4 pilot preserves
-raw-free counts/hash/category only, creates no v5, and locks full bank, corpus,
-audit, GPU, holdout, leaderboard, and submission work.
+The v4 organizer-data planner was allowed only after its own replay and live report
+were both qualified and reverified with the private live plan into the
+harness-authorization sidecar. It rechecked that sidecar before each plan, run,
+status, finalization, audit, and receipt operation. The actual v4 pilot failed at
+79/128, preserves raw-free counts/hash/category only, creates no v5, and locks full
+bank, corpus, audit, GPU, holdout, leaderboard, and submission work.

@@ -2,9 +2,16 @@
 
 기준 시각: **2026-08-11 KST**
 
-`teacher-pilot-v4`의 실행 계약이다. v1/v2/v3 ledger는 forensic evidence이며 plan, run,
+`teacher-pilot-v4`의 실행 계약 기록이다. v1/v2/v3/v4 ledger는 forensic evidence이며 plan, run,
 resume, repair에 쓰지 않는다. 고정 Qwen base/revision, split, holdout, inference와 Kaggle
 submission 정책은 바꾸지 않는다.
+
+> **실제 결과 override:** run tag `20260811T191118KST`에서 offline replay와 fixed synthetic
+> 2×32 live canary는 qualified였지만, bounded 128행 initial 4×32·worker 1은 local 승인
+> **79/128**로 103/128 threshold에 미달했다. terminal marker가 기록됐고 source JSONL/manifest,
+> repair, audit, receipt, bank, corpus, GPU output은 없다. 아래 명령은 historical
+> implementation record이며 재실행하지 않는다. raw-free evidence와 v5 no-go 조건은
+> [`15_GATE_B_TEACHER_V4_FAILURE_RECORD.md`](15_GATE_B_TEACHER_V4_FAILURE_RECORD.md)를 따른다.
 
 v4는 v3 prompt에 아래 한 문장만 더한다. JSON suffix와 output validator는 byte-identical하다.
 

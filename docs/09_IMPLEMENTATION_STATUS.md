@@ -23,7 +23,7 @@
 | Gate B0 final GPU smoke | **READY / 다음 GPU workload 전 재실행** | `gpu-smoke-20260810T234907KST.json`은 local `2+3` only, pinned NF4 load, LoRA backward/optimizer step, cache-on generation을 green으로 닫았다. 다음 source에서는 같은 smoke를 새 no-overwrite tag로 다시 실행한다. |
 | Gate B1 base direct-answer | **current-source v2 완료** | `20260810T234907KST` organizer-only fold 0 run은 parser v2 stored/current 일치 상태로 1,653/2,942 EM (56.1863%), parser `2705/3/234`, finish `2134/808`을 atomic 기록했다. records/manifest와 raw-free parser audit v6 checksum을 검증했다. |
 | Gate B2 QLoRA SFT | **fold 0 완료 / candidate 중단** | 첫 시도 `20260810T192204KST`는 tokenizer byte drift를 publish 전에 fail-closed로 거부했다. 수정 뒤 `20260810T210605KST` 재시도는 738/738 step, runtime 5,171.3711초, loss 0.4800419로 완료했고 exact pinned tokenizer와 504 LoRA tensor를 검증한 adapter를 atomic publish했다. adapter EM은 627/2,942(21.3120%)로 base보다 -19.8165%p여서 나머지 fold를 중단했다. |
-| concise-rationale candidate | **v1/v2/v3 fail-closed / harness v1 merged / v4 synthetic gate 대기** | v1은 111/128 승인·17 exhaustion, v2는 106/128 승인·7 exhaustion으로 종료됐다. v3 `20260811T153322KST`는 동일 128행 initial 4호출 중 parsed 2/failed 2였고 local 승인 52/128로 103/128 gate에 미달해 repair 없이 종료했다. 세 ledger는 재개하지 않는다. v4는 cardinality/ID/order 사전 확인 한 문장만 추가한 policy-bound candidate이며, v4-qualified replay·fixed 2×32 canary·immutable authorization 전에는 organizer-data plan/run을 계속 잠근다. source bank, logical audit, canonical corpus, rationale QLoRA, 새 generation과 모델 점수는 없다. |
+| concise-rationale candidate | **v1/v2/v3/v4 fail-closed / teacher·GPU 후속 잠금** | v1은 111/128 승인·17 exhaustion, v2는 106/128 승인·7 exhaustion, v3는 52/128 승인으로 종료됐다. v4 `20260811T191118KST`는 qualified replay·2×32 live canary 뒤 동일 128행 initial을 4×32·worker 1로 실행했지만 parsed 3/failed 1, local 승인 79/128로 103/128 gate에 미달했다. immutable terminal marker가 repair와 이후 teacher run을 거부하며 source JSONL/manifest도 없다. raw-free hash는 `docs/15_GATE_B_TEACHER_V4_FAILURE_RECORD.md`에만 보존한다. source bank, logical audit, canonical corpus, rationale QLoRA, 새 generation과 모델 점수는 없다. |
 | parser v2 | **current-source 재현 완료** | 기존 immutable raw의 CPU rescore는 진단 전용이지만, `20260810T234907KST`에서 새 generation을 atomic publish해 1,653/2,942와 conflict 3건을 selection-eligible stored parse로 재현했다. |
 | leaderboard prediction/submission | **미실행** | 모델 prediction 0건; leaderboard를 학습/API 입력에 쓰지 않음 |
 
@@ -366,8 +366,8 @@ leaderboard/test, locked holdout을 사용하지 않는다. 실제 teacher corpu
 ### 최신 전체 회귀
 
 - `uv run ruff check .`: **pass**
-- `CUDA_VISIBLE_DEVICES='' uv run pytest -s -q`: **457 passed, 1 skipped** (2026-08-11
-  v1/v2 호환과 teacher-pilot-v3 prompt/config/receipt/sidecar regression까지 포함한 재실행)
+- `CUDA_VISIBLE_DEVICES='' uv run pytest -s -q`: **469 passed, 1 skipped** (2026-08-11;
+  v1/v2/v3/v4 prompt/config/receipt/sidecar 및 harness regression 포함)
 - `CUDA_VISIBLE_DEVICES='' uv run coverage run --branch -m pytest -s -q` 뒤
   `uv run coverage report`: **79%** (8,099 statements, 2,928 branches)
 - skip 1건은 기본 CPU `.venv`에 PyTorch가 없어 실제 PEFT 0.20 serialization
@@ -830,10 +830,10 @@ drift를 추적하는 역사적 trace이며 새 실험 입력으로 사용하지
 - 이 exact candidate의 fold 1--4 반복은 중단한다. 다음 candidate는
   `qlora-concise-rationale-v1`로 분리했으며 CPU corpus/audit/SFT-preflight/adapter provenance
   경로까지 구현했다.
-- v3 teacher pilot의 initial 52/128 threshold 실패로 production teacher JSONL, logical audit,
-  full bank, corpus/GPU 진입은 잠겼다. v4 config는 synthetic candidate로만 존재하며, v4의
-  qualified replay/live report와 immutable authorization이 확인될 때까지 organizer-data
-  plan/run은 금지한다.
+- v4 teacher pilot도 initial 79/128 threshold 실패로 terminal marker를 기록했다. production
+  teacher JSONL, logical audit, full bank, corpus/GPU 진입은 계속 잠겼고 v1/v2/v3/v4 ledger는
+  모두 forensic evidence다. 새 versioned synthetic live-eval harness의 설계·명시 승인 전에는
+  v5 config/allowlist를 만들지 않는다.
 - production teacher JSONL은 exact fold-training ID 전체를 덮고 각 row가 organizer reference,
   current parser, canonical final marker, teacher/prompt/generation/raw SHA, reference answer가
   teacher prompt에서 숨겨졌다는 명시적 false flag, training-only/no-tool/no-test/no-holdout를
