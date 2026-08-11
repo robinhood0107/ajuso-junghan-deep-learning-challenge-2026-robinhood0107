@@ -134,6 +134,8 @@ manifest와 preflight/smoke, 직전 read-only VRAM 조건, versioned no-overwrit
     filtered leaderboard 제출까지 그대로 실행할 명령과 중단 조건
 11. [지속 실행 체크리스트와 공개 저장소 경계](docs/11_EXECUTION_CONTINUATION_PLAN.md)
     중단 후 재개 순서, GPU·holdout·submission gate, Git 공개 제외 대상을 고정
+12. [새 세션 시작용 상세 handoff prompt](docs/12_NEW_SESSION_START_PROMPT.md)
+    새 세션에 그대로 붙여넣는 시작 지시문, 현재 snapshot, CPU/GPU 진입·중단 조건
 
 ## 절대 하지 않을 것
 
