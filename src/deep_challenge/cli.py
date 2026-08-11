@@ -189,10 +189,38 @@ _LOCKED_CODEX_TEACHER_PILOT_V2_CONFIG: dict[str, object] = {
     "prompt_template_sha256": "743fb09547055475a8d73856859e9f068d6332cdb2a2bcd9802052c3d5b917b0",
 }
 
+# V3 changes one quality variable only: the teacher must derive and then
+# independently verify each signed integer before emitting the unchanged JSON
+# contract.  Scheduling, isolation, retry, and no-tool boundaries remain v2-identical.
+_LOCKED_CODEX_TEACHER_PILOT_V3_CONFIG: dict[str, object] = {
+    "schema_version": "gate-b-codex-teacher-pilot-config-v3",
+    "label": "codex-gpt-5.6-sol-teacher-pilot-v3",
+    "version": "pilot-v3",
+    "provider": "chatgpt_codex_cli",
+    "model_id": "gpt-5.6-sol",
+    "model_revision": "gpt-5.6-sol",
+    "initial_reasoning_effort": "high",
+    "repair_reasoning_effort": "xhigh",
+    "seed": 20_260_731,
+    "initial_chunk_size": 32,
+    "repair_chunk_size": 16,
+    "max_attempts": 3,
+    "pilot_size": 128,
+    "max_concurrent_workers": 2,
+    "reference_answer_in_prompt": False,
+    "allow_tool_use": False,
+    "network_scope": "training_only",
+    "prompt_version": "gate-b-codex-teacher-prompt-v3",
+    "prompt_template_sha256": "cf56fc2c021410337f8be8f5f519912eabf6390aa8892ecd92cac1ced6175c72",
+}
+
 _LOCKED_CODEX_TEACHER_CONFIGS = {
     str(_LOCKED_CODEX_TEACHER_CONFIG["schema_version"]): _LOCKED_CODEX_TEACHER_CONFIG,
     str(_LOCKED_CODEX_TEACHER_PILOT_V2_CONFIG["schema_version"]): (
         _LOCKED_CODEX_TEACHER_PILOT_V2_CONFIG
+    ),
+    str(_LOCKED_CODEX_TEACHER_PILOT_V3_CONFIG["schema_version"]): (
+        _LOCKED_CODEX_TEACHER_PILOT_V3_CONFIG
     ),
 }
 

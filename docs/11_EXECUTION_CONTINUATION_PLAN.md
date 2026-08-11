@@ -70,7 +70,7 @@ PYTHONPATH=src python3 -m deep_challenge.public_repo_guard --all
 | B1.0 | fold 0 base direct-answer | B0.3 green | `20260810T234907KST` JSONL + **v2 provenance manifest**, 1,653/2,942 | invalid parser/artifact or any source/B0/config hash mismatch |
 | B1.1 | parser golden corpus | B1.0 real generations | added regression tests + full CPU suite | conflict is hidden or test fails |
 | B2.0 | fold 0 answer-only QLoRA | same-fold base manifest | 627/2,942; significant harm로 candidate 중단 | train IDs or provenance mismatch |
-| B2.1 | concise-rationale CPU gate | fresh `teacher-pilot-v2` question-only Codex ledger + training-only private teacher rows | 32-row initial chunks/worker 1, pilot/full bank, local exact-match finalization, answer-hidden logic audit, canonical corpus+manifest, raw-free audit, SFT preflight v4 | tool/error/schema/ID/reference/provenance mismatch, retry exhaustion, audit threshold miss |
+| B2.1 | concise-rationale CPU gate | fresh `teacher-pilot-v3` question-only Codex ledger + training-only private teacher rows | 32-row initial chunks/worker 1, pilot/full bank, local exact-match finalization, answer-hidden logic audit, canonical corpus+manifest, raw-free audit, SFT preflight v4 | initial <103/128, tool/error/schema/ID/reference/provenance mismatch, retry exhaustion, audit threshold miss |
 | B2.2 | fold 0 rationale QLoRA probe | B2.1와 새 source/B0 green | adapter v4 + generation + paired harm screen | corpus/adapter binding mismatch 또는 significant harm |
 | B1/B2.3 | folds 1–4 repeat | fold 0 harm screen authorizes exact candidate | five base + five candidate OOF runs | any fold incomplete or method fingerprint drift |
 | B2.4 | complete OOF comparison | all five folds | grouped paired bootstrap, exact McNemar, Holm | single fold/reused run/mixed method |
@@ -311,23 +311,32 @@ rationale adapter, GPU generation과 모델 점수는 아직 없다. 다음 GPU 
     106/128 승인·7 exhaustion으로 종료됐다. prompt/template-policy SHA와 input-as-untrusted-
     data instruction은 유지됐고 tool/error/schema transport failure는 없었다. raw-free result
     artifact만 남기며 logical audit, full bank, corpus/SFT preflight, GPU로 승격하지 않는다.
-14. **R9-C (blocked, GPU):** R9-B2가 green이 아니므로 source manifest/B0 pair, fold 0
-    rationale QLoRA, adapter generation, paired harm screen을 실행하지 않는다. 다음 실제
-    teacher 시도는 separate v3 prompt/config/tests와 새 tag가 승인된 뒤에만 검토한다.
-15. **R9-D (조건부 GPU):** R9-C가 `candidate_full_oof_authorized=true`일 때만 folds 1--4의
+14. **R9-B3 (완료, CPU):** v1 prompt bytes와 역사 schema를 유지한 policy-bound 호환
+    refactor를 먼저 분리 커밋했다. v3는 derive-then-independent-verify prompt와 별도
+    config/schema/label/version을 추가하고 기존 generic plan/run/status/finalize를 재사용한다.
+    전체 CPU suite 457 passed/1 skipped, checksum/public guard와 Ruff가 green이다. 이 변경을
+    committed source로 고정한 뒤에만 새 128행 live pilot을 실행한다.
+15. **R9-B4 (조건부, live CPU):** 같은 seed와 deterministic fold-0 training 128행을 32×4,
+    worker 1로 실행한다. 첫 finalize가 103/128 미만이면 즉시 종료하고, 그 이상이면 rejected
+    row만 xhigh/16행 이하, wave당 최대 2호출로 repair한다. exhaustion 하나면 남은 teacher
+    call을 모두 거부한다. 성공은 128/128과 0 exhausted/retryable/unassessed를 동시에 요구한다.
+16. **R9-C (조건부, CPU→GPU):** R9-B4의 complete bank와 64→60 audit/authorization이
+    green일 때만 별도 비용 확인 뒤 full 11,794행 bank, source manifest/B0 pair, fold 0
+    rationale QLoRA, adapter generation, paired harm screen을 실행한다.
+17. **R9-D (조건부 GPU):** R9-C가 `candidate_full_oof_authorized=true`일 때만 folds 1--4의
     fold별 corpus/adapter/base/generation을 완성하고 complete OOF grouped paired bootstrap,
     exact McNemar, Holm을 수행한다.
-16. **R10 (CPU):** development evidence만으로 primary/fallback을 freeze하고 one-shot
+18. **R10 (CPU):** development evidence만으로 primary/fallback을 freeze하고 one-shot
     holdout claim 전의 immutable method/route/config checkpoint binding을 검증한다.
-17. **R11 (GPU):** R10 이후에만 locked holdout을 정확히 한 번 평가한다. claim을 만든 뒤
+19. **R11 (GPU):** R10 이후에만 locked holdout을 정확히 한 번 평가한다. claim을 만든 뒤
     실패해도 접근권은 소비되므로 재시도 판단은 별도 기록한다.
-18. **R12 (GPU):** holdout 후 고정된 policy로 filtered leaderboard만 예측한다. 이 데이터는
+20. **R12 (GPU):** holdout 후 고정된 policy로 filtered leaderboard만 예측한다. 이 데이터는
     학습, self-training seed, prompt 개선, 외부 API 입력에 절대 쓰지 않는다.
-19. **R13 (CPU):** strict submission writer와 independent validator를 모두 통과시키고
+21. **R13 (CPU):** strict submission writer와 independent validator를 모두 통과시키고
     `ID,answer`, row order, checksum, invalid/missing=0인지 확인한다.
-20. **R14 (외부 권한):** Kaggle upload는 사용자의 명시 요청이 있을 때만 수행한다. upload
+22. **R14 (외부 권한):** Kaggle upload는 사용자의 명시 요청이 있을 때만 수행한다. upload
     전에는 final run manifest와 local submission checksum을 다시 대조한다.
-21. **R15 (CPU):** 각 완료 phase마다 source manifest와 canonical `CHECKSUMS.sha256`를
+23. **R15 (CPU):** 각 완료 phase마다 source manifest와 canonical `CHECKSUMS.sha256`를
     갱신하고, raw artifact 없이 public code/docs만 guard 검증·commit·push한다.
 
 R4--R9는 R3의 parser/test gate를 우회할 수 없고, R11--R14는 R9-D--R10의 complete OOF
@@ -345,7 +354,7 @@ DATA_DIR="$PROJECT/deep-learning-challenge-2026"
 GPU_ENV=/absolute/path/to/deep-challenge-gpu-venv
 REVISION=aa8e72537993ba99e69dfaafa59ed015b17504d1
 RUN_TAG=replace-with-new-unique-tag
-SOURCE_MANIFEST="$PROJECT/artifacts/analysis/source-manifest-gate-b-$RUN_TAG.json"
+SOURCE_MANIFEST="$PROJECT/artifacts/analysis/source-manifest-gate-b-teacher-pilot-v3-$RUN_TAG.json"
 
 cd "$PROJECT"
 uv sync --extra model --group dev
@@ -355,14 +364,16 @@ cd artifacts/analysis && sha256sum -c CHECKSUMS.sha256 && cd "$PROJECT"
 ```
 
 fresh `teacher-pilot-v2` plan은 `20260811T132301KST`에 실행됐지만 106/128 승인·7 exhaustion으로
-fail-closed됐다. 따라서 production teacher JSONL, logical audit, bank/corpus/preflight/GPU로
-넘어가지 않는다. 다음 safe task는 raw-free aggregate와 synthetic failure mode만 사용해 별도
-v3 prompt/config/test candidate를 설계하는 것이며, 기존 v2 ledger/tag를 재개하지 않는다.
+fail-closed됐다. 따라서 그 ledger에서 production teacher JSONL, logical audit,
+bank/corpus/preflight/GPU로 넘어가지 않는다. v3는 raw-free aggregate와 synthetic failure
+mode만 사용해 별도 prompt/config/tests로 구현하며 기존 v2 ledger/tag를 재개하지 않는다.
 Kaggle token은 대회 metadata 확인용이지 teacher credential이 아니다.
 
-v3 candidate가 CPU gate를 통과해 새 actual teacher 호출이 승인될 때에만 source/config/docs를
-frozen 상태로 확인한 뒤 새 source snapshot을 만든다. `source-manifest`는 atomic replacement를
-쓰므로 기존 path를 절대 재사용하지 않는다.
+v3 candidate의 전체 CPU gate가 green일 때에만 code/config/tests/docs를 frozen 상태로 확인한
+뒤 새 source snapshot과 unique run tag를 만든다. `source-manifest`는 atomic replacement를
+쓰므로 기존 path를 절대 재사용하지 않는다. 동일 128행 initial은 정확히
+`--max-invocations 4 --max-workers 1`, repair wave는 최대
+`--max-invocations 2 --max-workers 1`이며 매 wave 뒤 finalize한다.
 
 ```bash
 test ! -e "$SOURCE_MANIFEST"
@@ -371,7 +382,8 @@ uv run deep-challenge source-manifest \
   --output "$SOURCE_MANIFEST"
 ```
 
-R9-B가 green이고 rationale QLoRA를 실제 시작할 때만 먼저 다음 read-only 관측을 한다.
+R9-B4와 64→60 audit/authorization이 green이고 rationale QLoRA를 실제 시작할 때만 먼저
+다음 read-only 관측을 한다.
 
 ```bash
 nvidia-smi --query-gpu=name,memory.total,memory.used,memory.free,compute_cap,driver_version \

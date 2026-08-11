@@ -262,26 +262,51 @@ def test_pilot_authorization_receipt_is_raw_free_immutable_and_reverified(
         )
 
 
-def test_v2_pilot_authorization_and_full_bank_sidecar_bind_prompt_policy(
+@pytest.mark.parametrize(
+    ("prompt_version", "template_sha256", "label", "version", "policy_sha256"),
+    (
+        (
+            "gate-b-codex-teacher-prompt-v2",
+            "743fb09547055475a8d73856859e9f068d6332cdb2a2bcd9802052c3d5b917b0",
+            "codex-gpt-5.6-sol-teacher-pilot-v2",
+            "pilot-v2",
+            "5ed785c9a02bc84298ed8186681b2b21a80da50d9af4591da0c1586a28e387b3",
+        ),
+        (
+            "gate-b-codex-teacher-prompt-v3",
+            "cf56fc2c021410337f8be8f5f519912eabf6390aa8892ecd92cac1ced6175c72",
+            "codex-gpt-5.6-sol-teacher-pilot-v3",
+            "pilot-v3",
+            "953d62e283d5237f29b2145b5ed513246d737acd7ec40879450d7bcc8d08402b",
+        ),
+    ),
+)
+def test_policy_bound_pilot_authorization_and_sidecar_bind_prompt_policy(
     tmp_path: Path,
+    prompt_version: str,
+    template_sha256: str,
+    label: str,
+    version: str,
+    policy_sha256: str,
 ) -> None:
     policy = TeacherPromptPolicy(
-        prompt_version="gate-b-codex-teacher-prompt-v2",
-        prompt_template_sha256="743fb09547055475a8d73856859e9f068d6332cdb2a2bcd9802052c3d5b917b0",
+        prompt_version=prompt_version,
+        prompt_template_sha256=template_sha256,
     )
+    assert policy.sha256 == policy_sha256
     records, plan_dir, source, source_manifest, audit_dir = _finalized_pilot(
         tmp_path,
         chunk_size=32,
-        label="codex-gpt-5.6-sol-teacher-pilot-v2",
-        version="pilot-v2",
+        label=label,
+        version=version,
         prompt_policy=policy,
     )
     receipt = create_teacher_pilot_authorization(
         tmp_path / "pilot-authorization.json",
         contract=_contract(
             records,
-            teacher_plan_label="codex-gpt-5.6-sol-teacher-pilot-v2",
-            teacher_plan_version="pilot-v2",
+            teacher_plan_label=label,
+            teacher_plan_version=version,
             prompt_policy=policy,
         ),
         pilot_plan_dir=plan_dir,

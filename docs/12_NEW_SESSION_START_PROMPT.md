@@ -28,9 +28,9 @@ rationale bank를 만든 뒤, 고정 Qwen base에 QLoRA SFT하는 경로다.
 
 중요한 현재 결론은 다음과 같다.
 
-- CPU 구현은 상당 부분 끝났지만 첫 128문제 teacher pilot은 fail-closed됐다.
-- 이 실패 pilot을 재개하거나 고쳐 쓰지 않는다. current safe-command contract에 맞는 새
-  versioned prompt/config/ledger에서 다시 시작해야 한다.
+- historic v1과 fresh v2의 128문제 teacher pilot은 모두 fail-closed됐다.
+- 두 실패 pilot을 재개하거나 고쳐 쓰지 않는다. v3는 같은 128행에서 독립 검증 문구만
+  바꾼 새 versioned prompt/config/ledger로 실행한다.
 - 새 pilot, source bank, logical audit, corpus/SFT preflight가 모두 green이 되기 전에는
   GPU rationale 학습을 시작하지 않는다.
 - leaderboard/test/locked holdout은 teacher, 학습, prompt 개선, self-training seed에 절대
@@ -72,12 +72,12 @@ gh pr view 1 --json url,state,isDraft,baseRefName,headRefName,mergeable,reviewDe
 
 2026-08-11 snapshot은 다음과 같지만 반드시 다시 확인한다.
 
-- branch: `agent/gate-b-no-api-teacher`
-- commit: `4ca3c25ab6a83ad4fa49ef91dbe3d4abea416e00`
-- origin branch와 local branch가 동일하고 working tree가 clean이었다.
-- draft PR #1:
+- PR #1은 2026-08-11에 squash merge됐고 merged `main` SHA는
+  `f9a5e9f18f65701f8b1e5b0e02817c45bbc538ca`였다.
+- v3 작업 branch는 `agent/gate-b-teacher-v3`이며 위 main에서 시작했다.
+- v1/v2 policy-bound 호환 refactor commit은 `8e09131`이다.
+- merged PR #1:
   `https://github.com/robinhood0107/ajuso-junghan-deep-learning-challenge-2026-robinhood0107/pull/1`
-- PR은 `main` 대상, OPEN/DRAFT/MERGEABLE이었다.
 - repository license는 GNU General Public License v3.0이다.
 
 PR 상태가 달라졌다면 최신 상태를 문서화한다. PR merge는 read-only 확인이 아니므로 현재
@@ -125,10 +125,11 @@ rg --files \
 14. `.gitignore`
 15. `LICENSE`
 16. `pyproject.toml`
-17. `configs/gate_b/codex-gpt-5.6-sol-teacher-pilot-v2.json`
-18. `configs/gate_b/codex-gpt-5.6-sol-teacher-v1.json` (historic forensic evidence only)
-19. `configs/gate_b/rtx4070-super-12gb-direct-answer-v1.json`
-20. `configs/gate_b/rtx4070-super-12gb-concise-rationale-v1.json`
+17. `configs/gate_b/codex-gpt-5.6-sol-teacher-pilot-v3.json`
+18. `configs/gate_b/codex-gpt-5.6-sol-teacher-pilot-v2.json` (failed forensic evidence only)
+19. `configs/gate_b/codex-gpt-5.6-sol-teacher-v1.json` (historic forensic evidence only)
+20. `configs/gate_b/rtx4070-super-12gb-direct-answer-v1.json`
+21. `configs/gate_b/rtx4070-super-12gb-concise-rationale-v1.json`
 
 그 다음 현재 작업과 직접 관련된 source/test를 읽는다.
 
@@ -329,16 +330,17 @@ fresh pilot-v2 snapshot:
 historic v1와 fresh v2 artifact 모두 실패 evidence로만 보존한다. 다음 실험은 새
 prompt/config/version/tag와 새 immutable ledger를 사용한다.
 
-6. 다음 실제 개발 목표: teacher candidate v3 설계
-=============================================
+6. 다음 실제 개발 목표: teacher candidate v3 검증·동결·live pilot
+=========================================================
 
 GPU 없이 다음을 수행한다.
 
-1. current v1/v2 prompt builder, schema, event validator, finalizer, authorization test를 읽는다.
-2. raw ledger를 재해석하지 말고, 공개-safe aggregate 실패 사실과 synthetic cases만
-   이용해 general prompt 개선안을 설계한다.
-3. v1/v2 config나 artifact를 덮어쓰지 않는다. 새 config가 필요하면 별도 v3 filename/schema로
-   추가하고 semantic/file SHA를 새로 계산한다.
+1. v1 prompt bytes와 plan/receipt/sidecar 역사 schema가 그대로인지 synthetic regression으로
+   확인한다. v2 이상 policy-bound profile은 prompt-policy SHA를 필수로 유지하고 unknown
+   prompt version은 fail-closed한다.
+2. raw ledger를 재해석하지 않고 공개-safe aggregate 실패 사실과 synthetic cases만 사용한다.
+3. v1/v2 config나 artifact를 덮어쓰지 않는다. v3는 별도
+   `codex-gpt-5.6-sol-teacher-pilot-v3.json` filename/schema/label/version을 사용한다.
 4. 아래 safety fields와 실행 정책은 완화하지 않는다.
    - provider: ChatGPT-login Codex CLI
    - model: `gpt-5.6-sol`
@@ -363,8 +365,15 @@ GPU 없이 다음을 수행한다.
 8. event error, command/MCP/web/tool call, unexpected item, schema violation, missing/duplicate/extra
    ID, truncation, non-integer final, marker conflict는 chunk failure다.
 
+v3의 고정 hash는 다음과 같다.
+
+- config semantic SHA: `deafe380e20079ef5e5fb2917c9f91d7a235d1135a23c64dcbd4ea7dddd38613`
+- config file SHA: `54a2e31e716edfdd3d5a5d22a2d5124da14f552b4ceeab31fdf7c5ea11ddba01`
+- prompt template SHA: `cf56fc2c021410337f8be8f5f519912eabf6390aa8892ecd92cac1ced6175c72`
+- prompt policy SHA: `953d62e283d5237f29b2145b5ed513246d737acd7ec40879450d7bcc8d08402b`
+
 새 candidate의 변경 이유와 expected failure mode를 docs에 기록하고, 전체 CPU verification을
-통과하기 전 actual teacher를 호출하지 않는다.
+통과한 committed source를 새 manifest로 동결하기 전 actual teacher를 호출하지 않는다.
 
 7. 매 구현 묶음의 mandatory CPU 검증
 ====================================
@@ -393,7 +402,7 @@ git diff --check
 
 - dependency sync success
 - Ruff pass
-- `454 passed, 1 skipped`
+- `457 passed, 1 skipped`
 - skip 1은 default CPU `.venv`에 PyTorch가 없기 때문
 - canonical checksum pass
 - public repository guard pass
@@ -414,10 +423,11 @@ pilot scope:
 
 - fold: 0 only
 - exact source: fold 0 `training_ids(0)`에서 deterministic stable-hash stratified 128 rows
-- initial chunks: locked config 기준
+- initial chunks: 32×4; `--max-invocations 4 --max-workers 1`
 - worker: exactly 1
 - unattempted work: high reasoning
-- only locally rejected repair rows: xhigh reasoning, bounded repair chunks
+- only locally rejected repair rows: xhigh reasoning, 최대 16행; wave당 최대 2 invocation
+- every repair wave: canonical chunk/ID order 뒤 반드시 다시 finalize
 - no arbitrary ID input
 - no holdout or validation rows
 - no leaderboard/test rows
@@ -427,14 +437,16 @@ pilot scope:
 - reference answer in prompt: 0
 - tool invocation: 0
 - event/schema/ID/order/provenance violation: 0
-- initial exact-match rate: at least 80%
+- first-finalize initial accepted: at least 103/128; 미달이면 repair 없이 즉시 종료
 - all 128 accepted within at most 3 attempts per problem
 - source bank finalizer complete
 - no exhausted row
 
-한 조건이라도 실패하면 full v1 bank와 GPU candidate를 시작하지 않는다. partial source를 쓰지
-않고 raw-free failure artifact와 blocker만 남긴다. prompt를 수정하면 같은 output path를
-덮어쓰지 말고 새 version/tag에서 처음부터 다시 pilot한다.
+한 조건이라도 실패하면 full v1 bank와 GPU candidate를 시작하지 않는다. exhaustion이 하나라도
+생기면 남은 retryable row에도 teacher를 더 호출하지 않는다. partial source를 쓰지 않고
+raw-free failure artifact와 blocker만 남긴다. prompt를 수정하면 같은 output path를 덮어쓰지
+말고 새 version/tag에서 처음부터 다시 pilot한다. 이 동일 128행 비교는 development prompt
+gate이며 일반화 성능 증거로 주장하지 않는다.
 
 9. logical audit와 pilot authorization
 =====================================
@@ -486,6 +498,10 @@ historic pilot의 no-cache retry-heavy profile을 단순 비례하면:
 ====================================
 
 pilot receipt가 green일 때만 fold 0 `training_ids(0)` 11,794 rows의 full v1 plan을 만든다.
+
+32행 initial chunk 기준 최소 호출 수는 `ceil(11,794/32)=369`이며 repair는 별도다. 현재
+quota/예상 비용을 먼저 제시하고 사용자의 별도 확인을 받기 전에는 full bank run을 시작하지
+않는다.
 
 - question당 teacher generation은 한 번만 승인 bank에 추가한다.
 - complete verified chunk만 resume 때 건너뛴다.
@@ -722,7 +738,7 @@ artifact가 current code를 capture하도록 source manifest 생성 시점을 �
 - tool/web/MCP/command event
 - schema/ID/order/marker conflict
 - missing/duplicate/extra IDs
-- pilot initial <80%
+- pilot initial <103/128
 - pilot not 128/128 within attempt cap
 - logical audit <60/64
 - unqualified v1/v2 bank sidecar
@@ -766,13 +782,13 @@ historical diagnostic, parser-only rescore를 current selection score로 표현�
 1. Git/PR/worktree read-only 확인
 2. mandatory docs/config/source/tests 완독
 3. mandatory CPU validation 재실행
-4. current v1 teacher prompt/safety implementation review
-5. historic failed ledger를 건드리지 않는 teacher v2 설계
-6. synthetic tests 추가
-7. Ruff/full pytest/checksum/public guard
-8. docs 09/10/11 업데이트와 새 source manifest
-9. fresh 128-row question-only pilot
-10. pilot 결과에 따라 fail-closed 또는 logical audit로 진행
+4. v1/v2/v3 prompt/config/receipt/sidecar compatibility regression 확인
+5. Ruff/full pytest/checksum/public guard
+6. code/config/tests/docs commit과 clean worktree 확인
+7. unique v3 source manifest·plan/status path 사전 부재 확인
+8. fresh 128-row question-only v3 pilot 32×4/worker 1
+9. first finalize 103/128 gate와 bounded repair/finalize waves
+10. 결과에 따라 raw-free fail-closed 또는 64→60 logical audit로 진행
 
 이 순서를 바꾸지 말고, 새 pilot이 green이 되기 전에는 full bank나 GPU 작업을 시작하지 않는다.
 ````

@@ -2,7 +2,7 @@
 
 기준 시각: **2026-08-11 KST**
 대상 호스트: **WSL2 Ubuntu 24.04 + NVIDIA GeForce RTX 4070 SUPER 12GB**
-현재 판정: **parser v2 current-source base 완료, answer-only QLoRA 중단, concise-rationale CPU 경로 READY·실제 학습 미실행**
+현재 판정: **parser v2 current-source base 완료, answer-only QLoRA 중단, teacher-pilot-v3 CPU READY·live pilot 미실행**
 
 이 문서는 현재 코드의 CLI와 정확히 일치하는 실행 순서다. GPU가 필요한 명령은 맨
 뒤의 별도 절에만 둔다. 2026-08-10 이전 source final smoke와 별도로, training cache-off와
@@ -49,9 +49,9 @@ SPLIT="$PROJECT/artifacts/analysis/splits-v4.json"
 DEV_SHARD="$PROJECT/artifacts/analysis/development-cv-v4"
 CONFIG="$PROJECT/configs/gate_b/rtx4070-super-12gb-direct-answer-v1.json"
 RATIONALE_CONFIG="$PROJECT/configs/gate_b/rtx4070-super-12gb-concise-rationale-v1.json"
-TEACHER_CONFIG="$PROJECT/configs/gate_b/codex-gpt-5.6-sol-teacher-pilot-v2.json"
+TEACHER_CONFIG="$PROJECT/configs/gate_b/codex-gpt-5.6-sol-teacher-pilot-v3.json"
 RUN_TAG=replace-with-new-unique-tag
-SOURCE_MANIFEST="$PROJECT/artifacts/analysis/source-manifest-gate-b-$RUN_TAG.json"
+SOURCE_MANIFEST="$PROJECT/artifacts/analysis/source-manifest-gate-b-teacher-pilot-v3-$RUN_TAG.json"
 ```
 
 여기서 `SPLIT_SHA`는 `splits-v4.json` 안의 논리 split SHA다. split JSON 파일 자체의
@@ -67,14 +67,17 @@ split SHA와 bundle SHA만 넣는다.
 `RATIONALE_CONFIG`의 semantic/file SHA는 각각
 `75a315b638481a0c8213c413aa3a1253d269776d08bd2252b68654fb38c3f053`와
 `66a4c5c145881c92cb4b260ef000bd89bd62119b644f6bd1e49e9894c431064f`다.
-fresh `TEACHER_CONFIG` (`teacher-pilot-v2`)의 semantic/file/prompt-policy SHA는 각각
-`6794dba97ba8b172b07e1b2f942d00d38e64a5f405d1144771ae037c25625de4`,
-`de9abbabe8f88bda17637b0070bc87d0ec694e37f953625ad8c1cbe4fb4b261e`,
-`5ed785c9a02bc84298ed8186681b2b21a80da50d9af4591da0c1586a28e387b3`다. historic
+fresh `TEACHER_CONFIG` (`teacher-pilot-v3`)의 semantic/file/prompt-template/prompt-policy
+SHA는 각각
+`deafe380e20079ef5e5fb2917c9f91d7a235d1135a23c64dcbd4ea7dddd38613`,
+`54a2e31e716edfdd3d5a5d22a2d5124da14f552b4ceeab31fdf7c5ea11ddba01`,
+`cf56fc2c021410337f8be8f5f519912eabf6390aa8892ecd92cac1ced6175c72`,
+`953d62e283d5237f29b2145b5ed513246d737acd7ec40879450d7bcc8d08402b`다. historic
 `teacher-v1` config의 semantic/file SHA는 각각
 `63129b89c5daa33aad5906d15f893371aba2ac1a022172c32399fd9c0ccd29cd`와
 `9480d8d083f1f21b6c78bbf8607de70393ff1011e3919b32bce5a4434499fc75`이며, forensic
-evidence 전용으로 남기고 fresh pilot에는 쓰지 않는다.
+evidence 전용으로 남긴다. failed `teacher-pilot-v2` config와 ledger도 forensic evidence
+전용이며 새 v3 plan/status/finalize 입력으로 쓰지 않는다.
 
 현재 canonical 사실은 다음과 같다.
 
@@ -167,7 +170,7 @@ authentication state만 짧게 복사한다. 전역 skills/config/API 환경변�
 올라가지 않는다. auth state의 복사본은 실행 중 별도 temporary tree에만 존재하며 종료 시
 정리된다. raw-free status snapshot만 `artifacts/analysis/`에 쓸 수 있다.
 
-먼저 `teacher-pilot-v2` config로 fold 0의 정확한 `training_ids(0)`에서 stable-hash
+먼저 `teacher-pilot-v3` config로 fold 0의 정확한 `training_ids(0)`에서 stable-hash
 sign/magnitude stratified 128문제 pilot plan을 만든다. `gate-b-teacher-v2-*`는 이 pilot의
 새 이름이 아니라, 이후 positive harm screen 뒤 remaining development-CV bank를 확장하는
 별도 명령이다. full 11,794문제 bank v1은 `--pilot-size`를 생략해 만들 수 있지만, 이 경우
@@ -176,8 +179,8 @@ sign/magnitude stratified 128문제 pilot plan을 만든다. `gate-b-teacher-v2-
 
 ```bash
 FOLD=0
-TEACHER_ROOT="$PROJECT/artifacts/gate_b/codex-teacher-pilot-v2-$RUN_TAG"
-TEACHER_STATUS="$PROJECT/artifacts/analysis/gate-b-teacher-pilot-v2-$RUN_TAG-status.json"
+TEACHER_ROOT="$PROJECT/artifacts/gate_b/codex-teacher-pilot-v3-$RUN_TAG"
+TEACHER_STATUS="$PROJECT/artifacts/analysis/gate-b-teacher-pilot-v3-$RUN_TAG-status.json"
 
 # Code/config/docs are now frozen for this run tag.  source-manifest/status use
 # atomic replacement internally, so prove all three target paths are new first.
@@ -210,9 +213,11 @@ uv run deep-challenge gate-b-teacher-status \
 ```
 
 Pilot의 최초 호출은 CLI가 자동으로 high reasoning을 붙이고, worker 1, 32문제 네 chunk로
-제한한다. v2 prompt는 question string을 untrusted data로 취급하고 role/tool/network/format
-변경 지시를 따르지 않으며, 각 integer의 산술·부호 재검사를 요구한다. 이는 성능 보장이 아니라
-per-call failure blast radius를 줄이는 bounded-quality candidate다. `gate-b-teacher-run`에는
+제한한다. v3 prompt는 question string을 untrusted data로 취급하고 role/tool/network/format
+변경 지시를 따르지 않는다. 각 signed integer를 먼저 도출한 뒤 governing condition을 다시
+확인하고, 가능하면 다른 경로로 결정적 산술을 재계산하며 feasibility·integrality·sign까지
+독립 검증한다. JSON suffix와 output validator는 v2와 같다. 이는 동일 128행 development
+prompt 비교이지 일반화 성능 증거가 아니다. `gate-b-teacher-run`에는
 reasoning-effort override가 없다. 같은 재개 호출에서도
 unattempted chunk는 high, local finalizer가 rejected로 판정한 repair row만 xhigh와 16문제 이하
 chunk를 자동 적용한다. status/terminal에는 aggregate count, latency, token usage, ledger lock
@@ -227,11 +232,15 @@ uv run deep-challenge gate-b-teacher-run \
   --max-workers 1
 ```
 
-그 다음 finalizer만 local development shard의 reference answer를 열어 exact match한다. 아직
+그 다음 finalizer만 local development shard의 reference answer를 열어 exact match한다. 첫
+finalize에서 initial accepted가 `103/128` 미만이면 80% gate는 복구 불가능하므로 repair를
+한 번도 호출하지 않고 즉시 종료한다. 아직
 accepted되지 않은 row가 있으면 source JSONL을 만들지 않고 `complete=false`만 반환한다. 이때
 manual ID selection이나 gold answer 재-prompt는 금지다. ledger가 선택한 failed row만 xhigh,
 16문제 이하 repair chunk로 최대 총 3회까지 재시도한다. complete가 아니면 아래 두 명령을
-`finalize → automatic repair run → finalize` 순서로 반복하고, exhausted row가 하나라도 생기면
+`finalize → automatic repair run → finalize` 순서로 반복한다. 한 repair wave는 canonical
+chunk·ID 순서의 최대 2 invocation만 허용하며, 매 wave 뒤 반드시 다시 finalize한다. exhausted
+row가 하나라도 생기면
 plan 전체가 fail-closed된다. 이후 `gate-b-teacher-run`은 남은 retryable row가 있어도 추가
 teacher 실행을 거부하며, raw-free status 조회와 aggregate 보존만 허용한다.
 
@@ -262,15 +271,18 @@ uv run deep-challenge gate-b-teacher-run \
   --plan-dir "$TEACHER_ROOT" \
   --teacher-config "$TEACHER_CONFIG" \
   --acknowledge-codex-teacher \
+  --max-invocations 2 \
   --max-workers 1
 ```
 
-Pilot promotion requires all 128 rows verified within the retry cap, 0 tool/error/schema/ID/provenance
-violation, initial exact-match rate at least 80%, and the separate 64-row answer-hidden logical audit
-at least 60 consistent rows. Only then make the full v1 plan; it may use two workers. A successful fold 0
-GPU harm screen is still required before adding the other 2,942 development-CV IDs to bank v2.
+Pilot promotion requires initial accepted at least 103/128, final accepted 128/128, zero
+exhausted/retryable/unassessed rows, at most three attempts per row, and zero
+tool/error/schema/ID/order/provenance violations. The complete source JSONL and manifest must reverify
+their SHA. The separate 64-row answer-hidden logical audit must then reach at least 60 consistent rows.
+Only then make the full v1 plan; it may use two workers. A successful fold 0 GPU harm screen is still
+required before adding the other 2,942 development-CV IDs to bank v2.
 
-모든 teacher/audit/v2 실행은 시작 직전에 ChatGPT Codex CLI의 resolved executable과 version을
+모든 teacher/audit 실행은 시작 직전에 ChatGPT Codex CLI의 resolved executable과 version을
 다시 probe해 immutable plan과 정확히 일치해야 한다. 불일치면 어떤 question도 보내지 않는다.
 각 worker의 auth-only `CODEX_HOME`은 `-C` model workspace 밖의 별도 ephemeral temp tree에만
 생기고, model-generated read-only tool process에는 `shell_environment_policy.inherit="none"`을
@@ -278,8 +290,7 @@ GPU harm screen is still required before adding the other 2,942 development-CV I
 
 현재 `20260811T103224KST` pilot은 first pass 103/128(80.47%)이었지만 final 111/128,
 exhausted 17로 fail-closed 됐다. 이 plan에서 logical audit, full v1 bank, corpus, GPU를
-이어 실행하지 않는다. 새 `teacher-pilot-v2` prompt/policy 후보는 기존 ledger를 수정하지 않는
-새 versioned pilot로만 다시 시작할 수 있다. 이 historic ledger는 현재의
+이어 실행하지 않는다. 이 historic ledger는 현재의
 `shell_environment_policy.inherit="none"` safe-command contract 이전에 만들어졌으므로,
 현재 status/finalize loader가 의도적으로 reject한다. raw-free final aggregate는 보존 증거일
 뿐 재개 입력이 아니며, 호환성을 위해 prompt/argv 검증을 완화하지 않는다.
@@ -289,9 +300,9 @@ exhausted 17로 fail-closed 됐다. 이 plan에서 logical audit, full v1 bank, 
 승인되고 7개가 exhaustion되어 fail-closed됐다. raw-free 결과는
 `artifacts/analysis/gate-b-teacher-pilot-v2-20260811T132301KST-final-v2.json` (SHA-256
 `5d50fdb41c0503546e673393d97b24bf7dc5c92e52577738eada35c143ac874e`)에 고정했다. 이 tag의
-ledger를 더 실행하거나 partial source를 materialize하지 않는다. 새 prompt/config design을
-CPU test로 검증한 별도 version/tag가 생기기 전에는 이 절 아래의 audit/full-bank/GPU 명령을
-실행하지 않는다.
+ledger를 더 실행하거나 partial source를 materialize하지 않는다. 새 v3 prompt/config는 별도
+version/tag에서만 실행하며 v1/v2 ledger를 resume하지 않는다. v3 pilot이 위의 원자적 성공
+조건을 모두 충족하기 전에는 이 절 아래의 audit/full-bank/GPU 명령을 실행하지 않는다.
 
 complete private bank가 생기면 audit agent에는 problem, candidate rationale와 candidate가 주장한
 final integer만 보낸다. organizer reference answer를 다시 열거나 전달하지 않는다. audit의
@@ -345,8 +356,8 @@ uv run deep-challenge gate-b-teacher-pilot-authorize \
 만들 때도 receipt만 신뢰하지 않고 동일 private evidence를 다시 hash-validate한다.
 
 ```bash
-FULL_TEACHER_ROOT="$PROJECT/artifacts/gate_b/codex-teacher-pilot-v2-full-$RUN_TAG"
-FULL_TEACHER_STATUS="$PROJECT/artifacts/analysis/gate-b-teacher-pilot-v2-full-$RUN_TAG-status.json"
+FULL_TEACHER_ROOT="$PROJECT/artifacts/gate_b/codex-teacher-pilot-v3-full-$RUN_TAG"
+FULL_TEACHER_STATUS="$PROJECT/artifacts/analysis/gate-b-teacher-pilot-v3-full-$RUN_TAG-status.json"
 FULL_TEACHER_JSONL="$FULL_TEACHER_ROOT/source-rationales.jsonl"
 FULL_TEACHER_MANIFEST="$FULL_TEACHER_ROOT/source-rationales.manifest.json"
 
@@ -372,8 +383,10 @@ uv run deep-challenge gate-b-teacher-plan \
   --pilot-source-manifest "$PRIVATE_TEACHER_MANIFEST" \
   --pilot-logical-audit-dir "$LOGICAL_AUDIT_ROOT"
 
-# This is a separate high-cost gate: only after the fresh pilot receipt exists.
-# The full bank may use at most two workers; it keeps the same v2 prompt policy.
+# This is a separate high-cost gate: 11,794/32 requires at least 369 initial
+# calls, before repairs. Show current cost/quota and obtain separate user
+# confirmation before running it. The full bank may use at most two workers
+# and keeps the same v3 prompt policy.
 uv run deep-challenge gate-b-teacher-run \
   --plan-dir "$FULL_TEACHER_ROOT" \
   --teacher-config "$TEACHER_CONFIG" \

@@ -50,10 +50,11 @@
   organizer reference answer를 제공하지 않고(`reference_answer_in_prompt=false`), 생성 후
   organizer answer/parser exact match로 rejection한다. production corpus와 모델 점수는 아직 없다.
 - no-API teacher 실행은 ChatGPT 로그인 Codex CLI `gpt-5.6-sol`만 허용한다. historic v1와
-  fresh `teacher-pilot-v2` ledger는 모두 forensic failure evidence로만 남긴다. v2는
-  first pass 105/128(82.03%) 뒤 최대 3회에서 106/128 승인·7 exhaustion으로 fail-closed됐으므로,
-  재개하지 않는다. 다음 teacher 후보는 새 immutable prompt/config version과 별도 plan tag를
-  사용해야 하며, question-only plan, 32문제×4 initial chunk SHA, append-only
+  failed `teacher-pilot-v2` ledger는 모두 forensic failure evidence로만 남기고 재개하지 않는다.
+  v2는 first pass 105/128(82.03%) 뒤 최대 3회에서 106/128 승인·7 exhaustion으로
+  fail-closed됐다. 다음 후보 `teacher-pilot-v3`는 같은 deterministic 128행에서 풀이를 먼저
+  도출한 뒤 조건·별도 산술 경로·feasibility·integrality·sign을 독립 검증하는 quality 변수만
+  추가한다. JSON suffix와 validator, question-only plan, 32문제×4 initial chunk SHA, append-only
   event/parsed/assessment ledger, retry cap 3, initial high/repair xhigh, pilot worker 1/full
   bank 최대 worker 2, raw-free status/lock PID를 고정한다.
   CLI는 빈 workdir와 auth-only temporary `CODEX_HOME`을 사용해 전역 skill/config/API token을
@@ -61,7 +62,9 @@
   answer는 local finalizer에만 있고 prompt에는 절대 들어가지 않는다.
 - 비용 절약 순서는 stable-hash stratified 128문제 fold-0 training pilot → local exact-match
   finalization/retry → 64문제 answer-hidden rationale logic audit → full fold-0 bank v1이다.
-  pilot의 initial exact rate 80% 미만, 총 3회 내 complete 실패, audit 60/64 미만이면 full bank와
+  첫 finalize의 initial 승인이 103/128 미만이면 repair 없이 즉시 종료한다. 그 이상일 때만
+  canonical rejected row를 wave당 최대 2호출로 repair하고 매 wave 뒤 다시 finalize한다. pilot이
+  총 3회 내 128/128 complete가 아니거나 exhaustion이 하나라도 생기거나 audit가 60/64 미만이면 full bank와
   GPU candidate를 시작하지 않는다. fold-0 GPU harm screen이 통과하기 전 나머지 2,942
   development-CV ID bank v2 생성도 금지한다.
 - 승격 가능한 새 candidate가 생기면 `compare-development-oof`는 모든 label×fold run을

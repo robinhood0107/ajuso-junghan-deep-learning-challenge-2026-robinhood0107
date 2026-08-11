@@ -13,8 +13,9 @@
 > 전에 중단했다. parser v2를 포함한 새 source/B0 tag `20260810T234907KST`에서 base를
 > 다시 생성해 1,653/2,942(56.1863%), parser `ok/conflict/invalid=2705/3/234`를
 > selection-eligible v2 bundle로 확정했다. 다음 candidate인 verified concise rationale는
-> CPU-only corpus/audit/SFT-preflight와 adapter provenance 경로까지 구현했지만 실제 private
-> corpus 생성·QLoRA·모델 점수는 아직 실행하지 않았다. 정확한 실행 명령은
+> CPU-only corpus/audit/SFT-preflight와 adapter provenance 경로에 더해 derive-then-verify
+> `teacher-pilot-v3` profile까지 구현했지만 live v3 pilot, private corpus 생성·QLoRA·모델
+> 점수는 아직 실행하지 않았다. 정확한 실행 명령은
 > [Gate B CPU-ready 런북](docs/10_GATE_B_CPU_READY_RUNBOOK.md)에 있다.
 
 ## 한 줄 결론
@@ -151,7 +152,7 @@ manifest와 preflight/smoke, 직전 read-only VRAM 조건, versioned no-overwrit
 ## 구현 단계별 체크포인트
 
 - **A — model-free 기반:** strict loader, manifest, quality flags, 안전한 group split, parser, grouped evaluator, voting, submission writer/validator를 구현·테스트했다. **현재 완료 상태**다.
-- **B — organizer-only 단일 adapter:** fold 0 base와 answer-only QLoRA를 완료했다. answer-only target은 출력을 7-token 수준으로 축약했지만 추론 성능을 훼손해 21.3120%로 탈락했다. parser v2 current-source base는 56.1863%로 재실행·검증했다. ChatGPT 로그인 Codex teacher의 question-only immutable ledger, local exact-match finalizer, 64→60 logical-audit 및 resume gate를 구현했다. historic v1 pilot은 111/128·17 exhaustion으로 fail-closed됐고, 별도 `teacher-pilot-v2` prompt/template-hash profile의 fresh 32행×4 pilot도 first pass 105/128(82.03%) 뒤 최종 106/128·7 exhaustion으로 fail-closed됐다. 두 ledger 모두 재개하지 않으며 source bank·logical audit·GPU는 시작하지 않았다. concise-rationale 모델 점수·holdout·leaderboard prediction은 아직 없다.
+- **B — organizer-only 단일 adapter:** fold 0 base와 answer-only QLoRA를 완료했다. answer-only target은 출력을 7-token 수준으로 축약했지만 추론 성능을 훼손해 21.3120%로 탈락했다. parser v2 current-source base는 56.1863%로 재실행·검증했다. ChatGPT 로그인 Codex teacher의 question-only immutable ledger, local exact-match finalizer, 64→60 logical-audit 및 resume gate를 구현했다. historic v1 pilot은 111/128·17 exhaustion, 별도 v2 32행×4 pilot은 first pass 105/128 뒤 106/128·7 exhaustion으로 fail-closed됐다. 두 ledger는 재개하지 않는다. v3는 동일 128행에서 풀이 도출 뒤 조건·별도 산술·feasibility·integrality·sign을 독립 검증하는 prompt/config만 새로 추가했으며 live pilot은 아직 시작하지 않았다. source bank·logical audit·GPU와 concise-rationale 모델 점수·holdout·leaderboard prediction도 아직 없다.
 - **C — 확장:** 규칙상 허용된 외부 공개 데이터와 training-only teacher rationale도 provenance/오염/품질 gate 뒤에만 쓴다. Python/SymPy TIR과 same-base 다중 adapter/checkpoint 결합은 서면 확인 전 비활성화한다.
 
 따라서 모든 질문의 답이 올 때까지 안전한 기반 구현을 멈추지는 않지만, 답이 없는 기능을 묵시적으로 허용하지도 않는다.

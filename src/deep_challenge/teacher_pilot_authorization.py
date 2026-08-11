@@ -62,7 +62,10 @@ _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _TRAIN_ID_RE = re.compile(r"train-\d{6}\Z")
 _TEACHER_PROMPT_V1 = "gate-b-codex-teacher-prompt-v1"
 _TEACHER_PROMPT_V2 = "gate-b-codex-teacher-prompt-v2"
-_POLICY_BOUND_TEACHER_PROMPTS = frozenset({_TEACHER_PROMPT_V2})
+_TEACHER_PROMPT_V3 = "gate-b-codex-teacher-prompt-v3"
+_POLICY_BOUND_TEACHER_PROMPTS = frozenset(
+    {_TEACHER_PROMPT_V2, _TEACHER_PROMPT_V3}
+)
 
 
 class TeacherPilotAuthorizationError(ValueError):
