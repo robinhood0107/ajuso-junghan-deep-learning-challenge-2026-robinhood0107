@@ -1,0 +1,22 @@
+{
+  "allow_tool_use": false,
+  "config_sha256": "deafe380e20079ef5e5fb2917c9f91d7a235d1135a23c64dcbd4ea7dddd38613",
+  "initial_chunk_size": 32,
+  "initial_reasoning_effort": "high",
+  "label": "codex-gpt-5.6-sol-teacher-pilot-v3",
+  "max_attempts": 3,
+  "max_concurrent_workers": 2,
+  "model_id": "gpt-5.6-sol",
+  "model_revision": "gpt-5.6-sol",
+  "network_scope": "training_only",
+  "pilot_size": 128,
+  "prompt_template_sha256": "cf56fc2c021410337f8be8f5f519912eabf6390aa8892ecd92cac1ced6175c72",
+  "prompt_version": "gate-b-codex-teacher-prompt-v3",
+  "provider": "chatgpt_codex_cli",
+  "reference_answer_in_prompt": false,
+  "repair_chunk_size": 16,
+  "repair_reasoning_effort": "xhigh",
+  "schema_version": "gate-b-codex-teacher-pilot-config-v3",
+  "seed": 20260731,
+  "version": "pilot-v3"
+}

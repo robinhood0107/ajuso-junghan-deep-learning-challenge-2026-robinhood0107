@@ -40,6 +40,15 @@ def _teacher_pilot_v2_config_path() -> Path:
     )
 
 
+def _teacher_pilot_v3_config_path() -> Path:
+    return (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "gate_b"
+        / "codex-gpt-5.6-sol-teacher-pilot-v3.json"
+    )
+
+
 def _teacher_contract(
     tmp_path: Path, *, row_count: int = 20
 ) -> tuple[list[str], Path]:
@@ -352,6 +361,24 @@ def test_teacher_cli_plan_run_status_and_local_finalize(
     assert json.loads((tmp_path / "raw-free-status.json").read_text(encoding="utf-8")) == status
     assert "unique expression" not in json.dumps(status)
 
+    for foreign_config in (
+        _teacher_pilot_v2_config_path(),
+        _teacher_pilot_v3_config_path(),
+    ):
+        assert (
+            main(
+                [
+                    "gate-b-teacher-status",
+                    "--plan-dir",
+                    str(plan_dir),
+                    "--teacher-config",
+                    str(foreign_config),
+                ]
+            )
+            == 2
+        )
+        assert "does not match" in capsys.readouterr().err
+
 
 def test_teacher_pilot_v2_profile_is_immutable_and_uses_four_safe_initial_chunks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -406,23 +433,132 @@ def test_teacher_pilot_v2_profile_is_immutable_and_uses_four_safe_initial_chunks
     )
     assert "unique expression" not in capsys.readouterr().out
 
-    assert (
-        main(
-            [
-                "gate-b-teacher-status",
-                "--plan-dir",
-                str(plan_dir),
-                "--teacher-config",
-                str(_teacher_config_path()),
-            ]
+    for foreign_config in (_teacher_config_path(), _teacher_pilot_v3_config_path()):
+        assert (
+            main(
+                [
+                    "gate-b-teacher-status",
+                    "--plan-dir",
+                    str(plan_dir),
+                    "--teacher-config",
+                    str(foreign_config),
+                ]
+            )
+            == 2
         )
-        == 2
-    )
-    assert "does not match" in capsys.readouterr().err
+        assert "does not match" in capsys.readouterr().err
 
     drifted = tmp_path / "drifted-teacher-pilot-v2.json"
     payload = json.loads(_teacher_pilot_v2_config_path().read_text(encoding="utf-8"))
     payload["initial_chunk_size"] = 64
+    drifted.write_text(json.dumps(payload), encoding="utf-8")
+    assert (
+        main(
+            [
+                "gate-b-teacher-plan",
+                *contract,
+                "--teacher-config",
+                str(drifted),
+                "--pilot-size",
+                "128",
+                "--output-dir",
+                str(tmp_path / "must-not-exist"),
+            ]
+        )
+        == 2
+    )
+    assert "differs from the locked no-API profile" in capsys.readouterr().err
+
+
+def test_teacher_pilot_v3_profile_hashes_cross_loads_and_worker_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config_path = _teacher_pilot_v3_config_path()
+    config, file_sha256 = cli_module._load_locked_codex_teacher_config(config_path)
+    assert cli_module._teacher_config_sha256(config) == (
+        "deafe380e20079ef5e5fb2917c9f91d7a235d1135a23c64dcbd4ea7dddd38613"
+    )
+    assert file_sha256 == "54a2e31e716edfdd3d5a5d22a2d5124da14f552b4ceeab31fdf7c5ea11ddba01"
+    assert config["initial_chunk_size"] == 32
+    assert config["repair_chunk_size"] == 16
+    assert config["max_attempts"] == 3
+    assert config["initial_reasoning_effort"] == "high"
+    assert config["repair_reasoning_effort"] == "xhigh"
+    assert cli_module._teacher_prompt_policy_from_config(config).sha256 == (
+        "953d62e283d5237f29b2145b5ed513246d737acd7ec40879450d7bcc8d08402b"
+    )
+
+    contract, _ = _teacher_contract(tmp_path, row_count=400)
+    capsys.readouterr()
+    probe_calls = 0
+
+    def probe() -> tuple[str, str]:
+        nonlocal probe_calls
+        probe_calls += 1
+        return "/private/codex", "codex-cli test"
+
+    monkeypatch.setattr(cli_module, "_probe_codex_chatgpt_cli", probe)
+    plan_dir = tmp_path / "private-teacher-pilot-v3"
+    assert (
+        main(
+            [
+                "gate-b-teacher-plan",
+                *contract,
+                "--teacher-config",
+                str(config_path),
+                "--pilot-size",
+                "128",
+                "--output-dir",
+                str(plan_dir),
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    plan = load_teacher_plan(plan_dir)
+    assert plan.label == "codex-gpt-5.6-sol-teacher-pilot-v3"
+    assert plan.version == "pilot-v3"
+    assert len(plan.chunks) == 4
+    assert all(len(chunk.problem_ids) == 32 for chunk in plan.chunks)
+    assert plan.prompt_policy.prompt_version == "gate-b-codex-teacher-prompt-v3"
+    assert "independently verify the candidate" in build_teacher_prompt(plan, 0)
+
+    for foreign_config in (_teacher_config_path(), _teacher_pilot_v2_config_path()):
+        assert (
+            main(
+                [
+                    "gate-b-teacher-status",
+                    "--plan-dir",
+                    str(plan_dir),
+                    "--teacher-config",
+                    str(foreign_config),
+                ]
+            )
+            == 2
+        )
+        assert "does not match" in capsys.readouterr().err
+
+    assert (
+        main(
+            [
+                "gate-b-teacher-run",
+                "--plan-dir",
+                str(plan_dir),
+                "--teacher-config",
+                str(config_path),
+                "--acknowledge-codex-teacher",
+                "--max-workers",
+                "2",
+            ]
+        )
+        == 2
+    )
+    assert "pilot requires --max-workers 1" in capsys.readouterr().err
+    assert probe_calls == 1
+
+    drifted = tmp_path / "drifted-teacher-pilot-v3.json"
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["prompt_template_sha256"] = "0" * 64
     drifted.write_text(json.dumps(payload), encoding="utf-8")
     assert (
         main(

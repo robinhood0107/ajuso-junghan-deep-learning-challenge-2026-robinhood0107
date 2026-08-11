@@ -62,6 +62,10 @@ _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _TRAIN_ID_RE = re.compile(r"train-\d{6}\Z")
 _TEACHER_PROMPT_V1 = "gate-b-codex-teacher-prompt-v1"
 _TEACHER_PROMPT_V2 = "gate-b-codex-teacher-prompt-v2"
+_TEACHER_PROMPT_V3 = "gate-b-codex-teacher-prompt-v3"
+_POLICY_BOUND_TEACHER_PROMPTS = frozenset(
+    {_TEACHER_PROMPT_V2, _TEACHER_PROMPT_V3}
+)
 
 
 class TeacherPilotAuthorizationError(ValueError):
@@ -172,13 +176,13 @@ class TeacherPilotAuthorizationReceipt:
         return payload
 
 
-def _uses_v2_prompt_policy(plan: TeacherPlan) -> bool:
-    """Classify an approved plan without ever silently downgrading v2 evidence."""
+def _uses_policy_bound_prompt(plan: TeacherPlan) -> bool:
+    """Classify a plan without silently downgrading versioned prompt evidence."""
 
     prompt_version = plan.prompt_policy.prompt_version
     if prompt_version == _TEACHER_PROMPT_V1:
         return False
-    if prompt_version == _TEACHER_PROMPT_V2:
+    if prompt_version in _POLICY_BOUND_TEACHER_PROMPTS:
         return True
     raise TeacherPilotAuthorizationError(
         "pilot authorization does not recognize the teacher prompt policy"
@@ -319,18 +323,21 @@ def write_teacher_full_v1_bank_authorization(
         raise TeacherPilotAuthorizationError(
             "v1 bank authorization receipt does not pass the locked pilot gates"
         )
-    receipt_uses_v2 = _receipt_uses_v2_schema(receipt_payload)
+    receipt_uses_policy_bound_schema = _receipt_uses_v2_schema(receipt_payload)
     if (
         plan.allowed_ids_sha256 != receipt_payload["fold0_training_ids_sha256"]
         or len(plan.problem_ids) != receipt_payload["fold0_training_problem_count"]
         or plan.label != receipt_payload["pilot_plan_label"]
         or plan.version != receipt_payload["pilot_plan_version"]
         or (
-            receipt_uses_v2
+            receipt_uses_policy_bound_schema
             and plan.prompt_policy.sha256
             != receipt_payload["teacher_prompt_policy_sha256"]
         )
-        or (not receipt_uses_v2 and plan.prompt_policy.prompt_version != _TEACHER_PROMPT_V1)
+        or (
+            not receipt_uses_policy_bound_schema
+            and plan.prompt_policy.prompt_version != _TEACHER_PROMPT_V1
+        )
     ):
         raise TeacherPilotAuthorizationError(
             "complete v1 plan does not exactly match the receipt's fold-0 training scope"
@@ -338,7 +345,7 @@ def write_teacher_full_v1_bank_authorization(
     payload_without_hash: dict[str, object] = {
         "schema_version": (
             FULL_V1_BANK_AUTHORIZATION_V2_SCHEMA
-            if receipt_uses_v2
+            if receipt_uses_policy_bound_schema
             else FULL_V1_BANK_AUTHORIZATION_SCHEMA
         ),
         "full_plan_sha256": plan.plan_sha256,
@@ -374,7 +381,7 @@ def write_teacher_full_v1_bank_authorization(
         "leaderboard_or_test_used": False,
         "raw_generation_serialized": False,
     }
-    if receipt_uses_v2:
+    if receipt_uses_policy_bound_schema:
         payload_without_hash["full_plan_prompt_policy_sha256"] = plan.prompt_policy.sha256
         payload_without_hash["pilot_plan_prompt_policy_sha256"] = receipt_payload[
             "teacher_prompt_policy_sha256"
@@ -556,7 +563,7 @@ def _verified_payload(
 
     plan = load_teacher_plan(pilot_plan_dir)
     _require_exact_pilot_plan(plan, contract)
-    plan_uses_v2 = _uses_v2_prompt_policy(plan)
+    plan_uses_policy_bound_prompt = _uses_policy_bound_prompt(plan)
 
     # These readers rehash all linked attempt, parsed-output, and assessment
     # files.  The private helper also re-derives the source JSONL/manifest from
@@ -632,7 +639,9 @@ def _verified_payload(
 
     payload: dict[str, object] = {
         "schema_version": (
-            PILOT_AUTHORIZATION_V2_SCHEMA if plan_uses_v2 else PILOT_AUTHORIZATION_SCHEMA
+            PILOT_AUTHORIZATION_V2_SCHEMA
+            if plan_uses_policy_bound_prompt
+            else PILOT_AUTHORIZATION_SCHEMA
         ),
         "teacher_config_sha256": contract.teacher_config_sha256,
         "teacher_config_file_sha256": contract.teacher_config_file_sha256,
@@ -674,7 +683,7 @@ def _verified_payload(
         "leaderboard_or_test_used": False,
         "raw_generation_serialized": False,
     }
-    if plan_uses_v2:
+    if plan_uses_policy_bound_prompt:
         # _require_exact_pilot_plan already rejected a missing or mismatched
         # binding, so this cast remains a fail-closed invariant.
         assert contract.teacher_prompt_policy_sha256 is not None
@@ -685,19 +694,19 @@ def _verified_payload(
 def _require_exact_pilot_plan(
     plan: TeacherPlan, contract: TeacherPilotAuthorizationContract
 ) -> None:
-    plan_uses_v2 = _uses_v2_prompt_policy(plan)
+    plan_uses_policy_bound_prompt = _uses_policy_bound_prompt(plan)
     if (
         plan.label != contract.teacher_plan_label
         or plan.version != contract.teacher_plan_version
         or (
-            plan_uses_v2
+            plan_uses_policy_bound_prompt
             and (
                 contract.teacher_prompt_policy_sha256 is None
                 or plan.prompt_policy.sha256 != contract.teacher_prompt_policy_sha256
             )
         )
         or (
-            not plan_uses_v2
+            not plan_uses_policy_bound_prompt
             and contract.teacher_prompt_policy_sha256 is not None
             and plan.prompt_policy.sha256 != contract.teacher_prompt_policy_sha256
         )

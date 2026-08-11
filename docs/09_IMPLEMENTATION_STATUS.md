@@ -23,7 +23,7 @@
 | Gate B0 final GPU smoke | **READY / 다음 GPU workload 전 재실행** | `gpu-smoke-20260810T234907KST.json`은 local `2+3` only, pinned NF4 load, LoRA backward/optimizer step, cache-on generation을 green으로 닫았다. 다음 source에서는 같은 smoke를 새 no-overwrite tag로 다시 실행한다. |
 | Gate B1 base direct-answer | **current-source v2 완료** | `20260810T234907KST` organizer-only fold 0 run은 parser v2 stored/current 일치 상태로 1,653/2,942 EM (56.1863%), parser `2705/3/234`, finish `2134/808`을 atomic 기록했다. records/manifest와 raw-free parser audit v6 checksum을 검증했다. |
 | Gate B2 QLoRA SFT | **fold 0 완료 / candidate 중단** | 첫 시도 `20260810T192204KST`는 tokenizer byte drift를 publish 전에 fail-closed로 거부했다. 수정 뒤 `20260810T210605KST` 재시도는 738/738 step, runtime 5,171.3711초, loss 0.4800419로 완료했고 exact pinned tokenizer와 504 LoRA tensor를 검증한 adapter를 atomic publish했다. adapter EM은 627/2,942(21.3120%)로 base보다 -19.8165%p여서 나머지 fold를 중단했다. |
-| concise-rationale candidate | **historic v1·fresh pilot-v2 모두 fail-closed / GPU 모델 단계 미실행** | historic `20260811T103224KST` question-only pilot은 111/128 승인·17 exhaustion으로 종료됐다. 새 `20260811T132301KST` pilot-v2는 separate prompt/template-policy SHA, 32행×4·worker 1로 first pass 105/128(82.03%)를 기록했지만 최대 3회 뒤 106/128 승인·7 exhaustion·15 retryable로 fail-closed됐다. 두 ledger 모두 재개하지 않으며 source bank, logical audit, canonical corpus, rationale QLoRA, 새 generation과 모델 점수는 없다. |
+| concise-rationale candidate | **v1/v2/v3 fail-closed / teacher·GPU 후속 잠금** | v1은 111/128 승인·17 exhaustion, v2는 106/128 승인·7 exhaustion으로 종료됐다. v3 `20260811T153322KST`는 동일 128행 initial 4호출 중 parsed 2/failed 2였고 local 승인 52/128로 103/128 gate에 미달해 repair 없이 종료했다. 세 ledger는 재개하지 않는다. source bank, logical audit, canonical corpus, rationale QLoRA, 새 generation과 모델 점수는 없다. v4는 versioned synthetic live-eval harness 설계·승인 전 allowlist에 추가하지 않는다. |
 | parser v2 | **current-source 재현 완료** | 기존 immutable raw의 CPU rescore는 진단 전용이지만, `20260810T234907KST`에서 새 generation을 atomic publish해 1,653/2,942와 conflict 3건을 selection-eligible stored parse로 재현했다. |
 | leaderboard prediction/submission | **미실행** | 모델 prediction 0건; leaderboard를 학습/API 입력에 쓰지 않음 |
 
@@ -102,7 +102,7 @@ diagnostic generation과 CPU rescore는 새 bundle 대신 selection 근거로 �
   `reference_answer_in_prompt_true_count=0`을 다시 계산해 기록하며, pair publish의 두 번째
   link가 어떤 I/O 오류로 실패해도 첫 번째 link를 제거하고 디렉터리를 fsync한다.
 - `teacher_rationale.py` 및 teacher CLI: ChatGPT 로그인 Codex `gpt-5.6-sol`을 위한
-  question-only immutable plan, historic v1과 별도 `teacher-pilot-v2` prompt/template SHA
+  question-only immutable plan, historic v1과 policy-bound `teacher-pilot-v2/v3` prompt/template SHA
   profile, 32문제 fresh-pilot initial chunk ledger, append-only attempt/parsed/assessment
   기록, raw-free status, 동일 contract의 완전 검증 attempt만 재개 시 재사용하는 정책과
   fail-closed finalizer를 제공한다.
@@ -124,11 +124,23 @@ diagnostic generation과 CPU rescore는 새 bundle 대신 selection 근거로 �
   `artifacts/analysis/gate-b-teacher-pilot-v2-20260811T132301KST-final-v2.json`이다. 이
   historic v1 ledger는 `inherit="none"` command contract 이전의 것이므로 current loader가
   의도적으로 reject하며, v2 ledger도 exhaustion 때문에 재개·승격하지 않는다.
+  v3 profile은 `codex-gpt-5.6-sol-teacher-pilot-v3.json`으로 분리했고 config
+  semantic/file SHA는 `deafe380e20079ef5e5fb2917c9f91d7a235d1135a23c64dcbd4ea7dddd38613` /
+  `54a2e31e716edfdd3d5a5d22a2d5124da14f552b4ceeab31fdf7c5ea11ddba01`,
+  prompt template/policy SHA는 `cf56fc2c021410337f8be8f5f519912eabf6390aa8892ecd92cac1ced6175c72` /
+  `953d62e283d5237f29b2145b5ed513246d737acd7ec40879450d7bcc8d08402b`다. JSON suffix와
+  validator는 v2에서 바꾸지 않았다. 전체 CPU suite를 통과한 commit `f33be84`에서 source tree
+  SHA `7b55a352902230325bbf25e6a5bcd81e32b8d488fd23af9f5619b229ad196963`를 고정하고 live
+  pilot을 실행했다. initial 4호출 중 parsed 2/failed 2, local 승인 52/128·거부 12·pending
+  76으로 103/128 gate가 복구 불가능해 repair 0회로 종료했다. source JSONL/manifest는
+  생성되지 않았고 raw-free final artifact는
+  `artifacts/analysis/gate-b-teacher-pilot-v3-20260811T153322KST-final-v3.json` (SHA-256
+  `6b5014b3da16fb31a1334ba101ffa1e6031a1aaac8db0369ac7b9ae81790f5e7`)이다.
 - `teacher_pilot_authorization.py`: full v1 bank plan은 deterministic 128-row pilot의
   first-pass 80% 이상, 최대 3회 내 전원 승인, source-bank provenance, passed 64→60 audit을
   재검증한 immutable raw-free receipt 없이는 만들 수 없다. historic v1 receipt/sidecar는
-  기존 schema를 byte-compatible read/verify만 하고, fresh v2 receipt/sidecar는 teacher
-  prompt-policy SHA까지 별도 v2 schema로 결속한다. 양쪽 모두 logical-audit의 deterministic
+  기존 schema를 byte-compatible read/verify만 하고, policy-bound v2/v3 receipt/sidecar는 teacher
+  prompt-policy SHA까지 기존 authorization-v2 wire schema로 결속한다. 모두 logical-audit의 deterministic
   64개 selection과 verified-bank question/candidate binding을 다시 계산하며, source/config/
   split/audit 변조는 full-plan 생성 시 거부한다.
 - `rationale_materialization.py`: 하나 이상의 finalized private bank에서 각 fold의 exact
@@ -351,8 +363,8 @@ leaderboard/test, locked holdout을 사용하지 않는다. 실제 teacher corpu
 ### 최신 전체 회귀
 
 - `uv run ruff check .`: **pass**
-- `CUDA_VISIBLE_DEVICES='' uv run pytest -s -q`: **454 passed, 1 skipped** (2026-08-11
-  fresh teacher-pilot-v2 prompt/policy/receipt regression까지 포함한 재실행)
+- `CUDA_VISIBLE_DEVICES='' uv run pytest -s -q`: **457 passed, 1 skipped** (2026-08-11
+  v1/v2 호환과 teacher-pilot-v3 prompt/config/receipt/sidecar regression까지 포함한 재실행)
 - `CUDA_VISIBLE_DEVICES='' uv run coverage run --branch -m pytest -s -q` 뒤
   `uv run coverage report`: **79%** (8,099 statements, 2,928 branches)
 - skip 1건은 기본 CPU `.venv`에 PyTorch가 없어 실제 PEFT 0.20 serialization
@@ -815,6 +827,9 @@ drift를 추적하는 역사적 trace이며 새 실험 입력으로 사용하지
 - 이 exact candidate의 fold 1--4 반복은 중단한다. 다음 candidate는
   `qlora-concise-rationale-v1`로 분리했으며 CPU corpus/audit/SFT-preflight/adapter provenance
   경로까지 구현했다.
+- v3 teacher pilot의 initial 52/128 threshold 실패로 production teacher JSONL, logical audit,
+  full bank, corpus/GPU 진입은 잠겼다. `TODOS.md`의 synthetic live-eval harness가 설계·승인될
+  때까지 v4 allowlist 확장도 금지한다.
 - production teacher JSONL은 exact fold-training ID 전체를 덮고 각 row가 organizer reference,
   current parser, canonical final marker, teacher/prompt/generation/raw SHA, reference answer가
   teacher prompt에서 숨겨졌다는 명시적 false flag, training-only/no-tool/no-test/no-holdout를
