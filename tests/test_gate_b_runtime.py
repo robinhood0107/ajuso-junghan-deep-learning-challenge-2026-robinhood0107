@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -28,10 +29,13 @@ from deep_challenge.gate_b import (
 from deep_challenge.gate_b_runtime import (
     GPU_EXECUTION_ACKNOWLEDGEMENT,
     PINNED_QWEN_ALL_LINEAR_TARGET_MODULES,
+    AdapterArtifactEvidence,
     RuntimeTrainingResult,
+    TrainingArtifact,
     build_fold_sft_plan,
     create_adapted_development_backend,
     create_base_development_backend,
+    read_training_resume_status,
     train_qlora_fold,
     validate_adapter_artifact,
     validate_runtime_gate,
@@ -808,7 +812,7 @@ def test_qlora_fold_training_publishes_complete_atomic_no_overwrite_bundle(
 
 
 def test_qlora_training_resume_keeps_checkpoint_and_reuses_exact_contract(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     preflight, smoke = _gate_artifacts(tmp_path)
     manifest = _split_manifest()
@@ -847,8 +851,16 @@ def test_qlora_training_resume_keeps_checkpoint_and_reuses_exact_contract(
         smoke.read_bytes()
     ).hexdigest()
     assert contract["source_manifest"]["sha256"] == source_manifest.sha256
+    assert contract["schema_version"] == "gate-b-qlora-training-resume-v2"
+    assert contract["split"]["training_count"] == len(training_ids)
+    assert contract["split"]["validation_count"] == len(validation_ids)
     assert contract["tokenizer_evidence"]["tokenizer_json_sha256"]
     assert contract["checkpoint_retention"] == "retain_all"
+    interrupted_status = read_training_resume_status(resume_dir)
+    assert interrupted_status.state == "retryable"
+    assert interrupted_status.latest_checkpoint_step == 7
+    assert interrupted_status.process_id is None
+    assert interrupted_status.completion_artifact_sha256 is None
 
     resumed = _ResumableTrainingRuntime()
     artifact = train_qlora_fold(
@@ -873,6 +885,254 @@ def test_qlora_training_resume_keeps_checkpoint_and_reuses_exact_contract(
     assert resumed.retain_checkpoints is True
     assert checkpoint.is_dir()
     assert not tuple(tmp_path.glob(".adapter-fold-0.training-*"))
+    complete_status = read_training_resume_status(resume_dir)
+    assert complete_status.state == "complete"
+    assert complete_status.contract_sha256 == contract["contract_sha256"]
+    assert complete_status.latest_checkpoint_step is None
+    assert complete_status.completion_artifact_sha256 == artifact.artifact_sha256
+
+    completion_marker = resume_dir / "training-complete.json"
+    original_validate_adapter = runtime_module.validate_adapter_artifact
+
+    def wrong_fold_adapter(
+        path: str | Path, *, config: GateBConfig = DEFAULT_GATE_B_CONFIG
+    ) -> AdapterArtifactEvidence:
+        return replace(original_validate_adapter(path, config=config), fold=1)
+
+    monkeypatch.setattr(
+        runtime_module, "validate_adapter_artifact", wrong_fold_adapter
+    )
+    with pytest.raises(GateBValidationError, match="resume contract"):
+        read_training_resume_status(resume_dir)
+    monkeypatch.setattr(
+        runtime_module,
+        "validate_adapter_artifact",
+        lambda path, *, config=DEFAULT_GATE_B_CONFIG: replace(
+            original_validate_adapter(path, config=config), training_count=999
+        ),
+    )
+    with pytest.raises(GateBValidationError, match="resume contract"):
+        read_training_resume_status(resume_dir)
+    monkeypatch.setattr(
+        runtime_module, "validate_adapter_artifact", original_validate_adapter
+    )
+
+    completion_payload = json.loads(completion_marker.read_text(encoding="utf-8"))
+    completion_payload["artifact_sha256"] = "f" * 64
+    completion_marker.write_text(json.dumps(completion_payload), encoding="utf-8")
+    with pytest.raises(GateBValidationError, match="changed adapter evidence"):
+        read_training_resume_status(resume_dir)
+
+
+def test_qlora_training_resume_preserves_historical_v1_contract(
+    tmp_path: Path,
+) -> None:
+    preflight, smoke = _gate_artifacts(tmp_path)
+    manifest = _split_manifest()
+    training_ids = eligible_training_ids(manifest, 0, ())
+    validation_ids = eligible_validation_ids(manifest, 0, ())
+    source_manifest = _source_manifest_evidence(tmp_path)
+    output = tmp_path / "adapter-fold-0"
+    resume_dir = tmp_path / "resume-fold-0"
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        train_qlora_fold(
+            _records(training_ids),
+            _records(validation_ids),
+            split_manifest=manifest,
+            fold=0,
+            excluded_ids=(),
+            **_data_provenance_args(),
+            source_manifest=source_manifest,
+            preflight_artifact=preflight,
+            gpu_smoke_artifact=smoke,
+            output_dir=output,
+            gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+            resume_dir=resume_dir,
+            runtime_factory=lambda _evidence: _ResumableTrainingRuntime(
+                fail_after_checkpoint=True
+            ),
+        )
+
+    contract_path = resume_dir / "resume-contract.json"
+    historical = json.loads(contract_path.read_text(encoding="utf-8"))
+    historical["schema_version"] = "gate-b-qlora-training-resume-v1"
+    historical["split"].pop("training_count")
+    historical["split"].pop("validation_count")
+    historical.pop("contract_sha256")
+    historical_sha256 = hashlib.sha256(canonical_json_bytes(historical)).hexdigest()
+
+    def normalize_hashes(value: object) -> object:
+        if isinstance(value, dict):
+            return {key: normalize_hashes(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [normalize_hashes(item) for item in value]
+        if (
+            isinstance(value, str)
+            and len(value) == 64
+            and all(character in "0123456789abcdef" for character in value)
+        ):
+            return "0" * 64
+        return value
+
+    assert (
+        hashlib.sha256(canonical_json_bytes(normalize_hashes(historical))).hexdigest()
+        == "d40164cdbf535df9d2d3bfae9a4ef081bca05624010d62b80da6b83e0b96a22b"
+    )
+    historical["contract_sha256"] = historical_sha256
+    contract_path.write_text(
+        json.dumps(historical, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    for marker in (
+        resume_dir / "training-started.json",
+        resume_dir / "trainer" / "checkpoint-7" / "resume-checkpoint.json",
+    ):
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+        payload["contract_sha256"] = historical_sha256
+        marker.write_text(
+            json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+        )
+
+    unknown = dict(historical)
+    unknown["schema_version"] = "gate-b-qlora-training-resume-v3"
+    unknown.pop("contract_sha256")
+    unknown["contract_sha256"] = hashlib.sha256(
+        canonical_json_bytes(unknown)
+    ).hexdigest()
+    contract_path.write_text(
+        json.dumps(unknown, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    with pytest.raises(GateBValidationError, match="schema is unsupported"):
+        read_training_resume_status(resume_dir)
+    contract_path.write_text(
+        json.dumps(historical, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+
+    resumed = _ResumableTrainingRuntime()
+    artifact = train_qlora_fold(
+        _records(training_ids),
+        _records(validation_ids),
+        split_manifest=manifest,
+        fold=0,
+        excluded_ids=(),
+        **_data_provenance_args(),
+        source_manifest=source_manifest,
+        preflight_artifact=preflight,
+        gpu_smoke_artifact=smoke,
+        output_dir=output,
+        gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+        resume_dir=resume_dir,
+        runtime_factory=lambda _evidence: resumed,
+    )
+    assert artifact.path == str(output.resolve())
+    assert resumed.resume_checkpoint == (
+        resume_dir / "trainer" / "checkpoint-7"
+    ).resolve()
+    assert read_training_resume_status(resume_dir).state == "complete"
+
+
+def test_qlora_training_resume_repairs_marker_after_atomic_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight, smoke = _gate_artifacts(tmp_path)
+    manifest = _split_manifest()
+    training_ids = eligible_training_ids(manifest, 0, ())
+    validation_ids = eligible_validation_ids(manifest, 0, ())
+    source_manifest = _source_manifest_evidence(tmp_path)
+    output = tmp_path / "adapter-fold-0"
+    resume_dir = tmp_path / "resume-fold-0"
+    runtime = _ResumableTrainingRuntime()
+    original_mark_complete = runtime_module._mark_training_resume_complete
+    marker_calls = 0
+
+    def interrupt_marker_write(
+        context: object, artifact: TrainingArtifact
+    ) -> None:
+        nonlocal marker_calls
+        marker_calls += 1
+        if marker_calls == 1:
+            raise RuntimeError("simulated interruption after adapter publish")
+        original_mark_complete(context, artifact)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        runtime_module, "_mark_training_resume_complete", interrupt_marker_write
+    )
+    with pytest.raises(RuntimeError, match="after adapter publish"):
+        train_qlora_fold(
+            _records(training_ids),
+            _records(validation_ids),
+            split_manifest=manifest,
+            fold=0,
+            excluded_ids=(),
+            **_data_provenance_args(),
+            source_manifest=source_manifest,
+            preflight_artifact=preflight,
+            gpu_smoke_artifact=smoke,
+            output_dir=output,
+            gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+            resume_dir=resume_dir,
+            runtime_factory=lambda _evidence: runtime,
+        )
+    assert output.is_dir()
+    assert not (resume_dir / "training-complete.json").exists()
+
+    factory_called = False
+
+    def unexpected_factory(_evidence: object) -> _TrainingRuntime:
+        nonlocal factory_called
+        factory_called = True
+        return _TrainingRuntime()
+
+    original_validate_adapter = runtime_module.validate_adapter_artifact
+
+    def wrong_fold_adapter(
+        path: str | Path, *, config: GateBConfig = DEFAULT_GATE_B_CONFIG
+    ) -> AdapterArtifactEvidence:
+        return replace(original_validate_adapter(path, config=config), fold=1)
+
+    monkeypatch.setattr(
+        runtime_module, "validate_adapter_artifact", wrong_fold_adapter
+    )
+    with pytest.raises(GateBValidationError, match="resume contract"):
+        train_qlora_fold(
+            _records(training_ids),
+            _records(validation_ids),
+            split_manifest=manifest,
+            fold=0,
+            excluded_ids=(),
+            **_data_provenance_args(),
+            source_manifest=source_manifest,
+            preflight_artifact=preflight,
+            gpu_smoke_artifact=smoke,
+            output_dir=output,
+            gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+            resume_dir=resume_dir,
+            runtime_factory=unexpected_factory,
+        )
+    assert factory_called is False
+    assert marker_calls == 1
+    monkeypatch.setattr(
+        runtime_module, "validate_adapter_artifact", original_validate_adapter
+    )
+
+    artifact = train_qlora_fold(
+        _records(training_ids),
+        _records(validation_ids),
+        split_manifest=manifest,
+        fold=0,
+        excluded_ids=(),
+        **_data_provenance_args(),
+        source_manifest=source_manifest,
+        preflight_artifact=preflight,
+        gpu_smoke_artifact=smoke,
+        output_dir=output,
+        gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+        resume_dir=resume_dir,
+        runtime_factory=unexpected_factory,
+    )
+    assert factory_called is False
+    assert marker_calls == 2
+    assert artifact.path == str(output.resolve())
+    assert read_training_resume_status(resume_dir).state == "complete"
 
 
 def test_qlora_training_resume_rejects_contract_mismatch_and_quarantines_corruption(
@@ -1119,6 +1379,119 @@ def test_qlora_training_resume_rejects_missing_checkpoint_after_interruption(
             runtime_factory=unexpected_factory,
         )
     assert factory_called is False
+    terminal_status = read_training_resume_status(resume_dir)
+    assert terminal_status.state == "terminal_failed"
+    assert terminal_status.latest_checkpoint_step is None
+
+
+def test_qlora_training_resume_recovers_only_dead_process_lock(tmp_path: Path) -> None:
+    preflight, smoke = _gate_artifacts(tmp_path)
+    manifest = _split_manifest()
+    training_ids = eligible_training_ids(manifest, 0, ())
+    validation_ids = eligible_validation_ids(manifest, 0, ())
+    source_manifest = _source_manifest_evidence(tmp_path)
+    resume_dir = tmp_path / "resume-fold-0"
+    output = tmp_path / "adapter-fold-0"
+
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        train_qlora_fold(
+            _records(training_ids),
+            _records(validation_ids),
+            split_manifest=manifest,
+            fold=0,
+            excluded_ids=(),
+            **_data_provenance_args(),
+            source_manifest=source_manifest,
+            preflight_artifact=preflight,
+            gpu_smoke_artifact=smoke,
+            output_dir=output,
+            gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+            resume_dir=resume_dir,
+            runtime_factory=lambda _evidence: _ResumableTrainingRuntime(
+                fail_after_checkpoint=True
+            ),
+        )
+
+    contract_sha256 = json.loads(
+        (resume_dir / "resume-contract.json").read_text(encoding="utf-8")
+    )["contract_sha256"]
+    lock = resume_dir / ".training-resume.lock"
+    lock.write_text(
+        json.dumps(
+            {
+                "schema_version": "gate-b-qlora-training-resume-v1",
+                "contract_sha256": contract_sha256,
+                "pid": 2_147_483_647,
+            }
+        ),
+        encoding="utf-8",
+    )
+    stale_status = read_training_resume_status(resume_dir)
+    assert stale_status.state == "retryable"
+    assert stale_status.process_id is None
+    assert stale_status.latest_checkpoint_step == 7
+
+    resumed = _ResumableTrainingRuntime()
+    artifact = train_qlora_fold(
+        _records(training_ids),
+        _records(validation_ids),
+        split_manifest=manifest,
+        fold=0,
+        excluded_ids=(),
+        **_data_provenance_args(),
+        source_manifest=source_manifest,
+        preflight_artifact=preflight,
+        gpu_smoke_artifact=smoke,
+        output_dir=output,
+        gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+        resume_dir=resume_dir,
+        runtime_factory=lambda _evidence: resumed,
+    )
+    assert artifact.path == str(output.resolve())
+    assert lock.exists()
+
+    output_2 = tmp_path / "adapter-fold-1"
+    resume_dir_2 = tmp_path / "resume-fold-1"
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        train_qlora_fold(
+            _records(training_ids),
+            _records(validation_ids),
+            split_manifest=manifest,
+            fold=0,
+            excluded_ids=(),
+            **_data_provenance_args(),
+            source_manifest=source_manifest,
+            preflight_artifact=preflight,
+            gpu_smoke_artifact=smoke,
+            output_dir=output_2,
+            gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+            resume_dir=resume_dir_2,
+            runtime_factory=lambda _evidence: _ResumableTrainingRuntime(
+                fail_after_checkpoint=True
+            ),
+        )
+    live_lock = resume_dir_2 / ".training-resume.lock"
+    with live_lock.open("r+") as held_lock:
+        fcntl.flock(held_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        running = read_training_resume_status(resume_dir_2)
+        assert running.state == "running"
+        assert running.process_id is None
+        with pytest.raises(GateBValidationError, match="active process"):
+            train_qlora_fold(
+                _records(training_ids),
+                _records(validation_ids),
+                split_manifest=manifest,
+                fold=0,
+                excluded_ids=(),
+                **_data_provenance_args(),
+                source_manifest=source_manifest,
+                preflight_artifact=preflight,
+                gpu_smoke_artifact=smoke,
+                output_dir=output_2,
+                gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+                resume_dir=resume_dir_2,
+                runtime_factory=lambda _evidence: _ResumableTrainingRuntime(),
+            )
 
 
 def test_qlora_training_resume_requires_runtime_resume_keywords(tmp_path: Path) -> None:

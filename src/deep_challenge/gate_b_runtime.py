@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import fcntl
 import gc
 import hashlib
 import importlib
@@ -73,10 +74,13 @@ _RATIONALE_ADAPTER_MANIFEST_SCHEMA = "gate-b-qlora-adapter-v4"
 _CHECKSUM_FILENAME = "CHECKSUMS.sha256"
 _MANIFEST_FILENAME = "manifest.json"
 _TRAINING_RESUME_CONTRACT_SCHEMA = "gate-b-qlora-training-resume-v1"
+_TRAINING_RESUME_CONTRACT_V2_SCHEMA = "gate-b-qlora-training-resume-v2"
 _TRAINING_RESUME_CONTRACT_FILENAME = "resume-contract.json"
 _TRAINING_RESUME_STARTED_FILENAME = "training-started.json"
 _TRAINING_RESUME_LOCK_FILENAME = ".training-resume.lock"
 _TRAINING_RESUME_CHECKPOINT_FILENAME = "resume-checkpoint.json"
+_TRAINING_RESUME_COMPLETE_SCHEMA = "gate-b-qlora-training-resume-complete-v1"
+_TRAINING_RESUME_COMPLETE_FILENAME = "training-complete.json"
 _TRAINING_RESUME_FORENSIC_DIRECTORY = "forensics"
 _TRAINING_RESUME_FORENSIC_SCHEMA = "gate-b-qlora-training-forensic-v1"
 _TRAINER_CHECKPOINT_RE = re.compile(r"checkpoint-([1-9][0-9]*)\Z")
@@ -281,6 +285,17 @@ class _TrainingResumeContext:
 
     root: Path
     contract_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingResumeStatus:
+    """Raw-free monitor view of one persistent QLoRA training job."""
+
+    contract_sha256: str
+    state: str
+    process_id: int | None
+    latest_checkpoint_step: int | None
+    completion_artifact_sha256: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -564,7 +579,7 @@ def train_qlora_fold(
         rationale_config=rationale_config,
         config=config,
     )
-    target = _validated_new_directory_target(output_dir)
+    target = _validated_adapter_directory_target_path(output_dir)
     resume = _prepare_training_resume_context(
         resume_dir,
         output_dir=target,
@@ -574,6 +589,10 @@ def train_qlora_fold(
         source_manifest=source_evidence,
         config=config,
     )
+    if target.exists() and resume is None:
+        raise GateBArtifactExistsError(
+            f"refusing to overwrite adapter directory: {target}"
+        )
     factory = runtime_factory or (
         lambda evidence: TransformersQLoRATrainingRuntime(
             evidence=evidence,
@@ -591,11 +610,21 @@ def train_qlora_fold(
     runtime: FoldTrainingRuntime | None = None
     try:
         lock = (
-            _locked_training_resume_checkpoint(resume)
+            _locked_training_resume(resume)
             if resume is not None
             else nullcontext(None)
         )
-        with lock as resume_checkpoint:
+        with lock:
+            if resume is not None and target.exists():
+                return _recover_published_training_artifact(
+                    resume,
+                    target=target,
+                    plan=plan,
+                    config=config,
+                )
+            resume_checkpoint = (
+                _select_resume_checkpoint(resume) if resume is not None else None
+            )
             runtime = factory(gate)
             if resume is not None:
                 _require_resume_capable_runtime(runtime)
@@ -645,7 +674,7 @@ def train_qlora_fold(
                 raise GateBValidationError(
                     "published adapter digest changed after atomic rename"
                 )
-            return TrainingArtifact(
+            artifact = TrainingArtifact(
                 path=published.path,
                 artifact_sha256=published.artifact_sha256,
                 manifest_sha256=published.manifest_sha256,
@@ -655,6 +684,9 @@ def train_qlora_fold(
                 validation_count=len(plan.validation_ids),
                 training_target_kind=plan.training_target_kind,
             )
+            if resume is not None:
+                _mark_training_resume_complete(resume, artifact)
+            return artifact
     finally:
         if runtime is not None:
             with suppress(Exception):
@@ -1617,6 +1649,156 @@ def _validated_source_manifest_evidence(
     )
 
 
+def read_training_resume_status(resume_dir: str | Path) -> TrainingResumeStatus:
+    """Read a raw-free QLoRA resume status without loading training examples."""
+
+    supplied = Path(resume_dir)
+    if supplied.is_symlink():
+        raise GateBValidationError("resume_dir must not be a symbolic link")
+    root = supplied.resolve(strict=True)
+    if not root.is_dir():
+        raise GateBValidationError("resume_dir must be a real directory")
+    contract = _training_resume_contract_payload_from_root(root)
+    contract_sha256 = _required_sha256(
+        contract.get("contract_sha256"), "training resume contract sha256"
+    )
+    completion_path = root / _TRAINING_RESUME_COMPLETE_FILENAME
+    if completion_path.exists() or completion_path.is_symlink():
+        if completion_path.is_symlink() or not completion_path.is_file():
+            raise GateBValidationError("training completion marker is unsafe")
+        _, payload, _ = _load_json_artifact(
+            completion_path, "training completion marker"
+        )
+        expected_keys = {
+            "schema_version",
+            "contract_sha256",
+            "artifact_path",
+            "artifact_sha256",
+            "manifest_sha256",
+            "checksums_sha256",
+            "file_count",
+            "training_count",
+            "validation_count",
+        }
+        if set(payload) != expected_keys:
+            raise GateBValidationError("training completion marker schema is invalid")
+        if (
+            payload.get("schema_version") != _TRAINING_RESUME_COMPLETE_SCHEMA
+            or payload.get("contract_sha256") != contract_sha256
+        ):
+            raise GateBValidationError("training completion marker contract is invalid")
+        artifact_path = payload.get("artifact_path")
+        if (
+            not isinstance(artifact_path, str)
+            or not artifact_path
+            or artifact_path != artifact_path.strip()
+        ):
+            raise GateBValidationError("completed adapter path is invalid")
+        artifact = validate_adapter_artifact(
+            artifact_path,
+            config=DEFAULT_GATE_B_CONFIG,
+        )
+        _validate_adapter_against_resume_contract(artifact, contract)
+        expected_artifact = {
+            "artifact_sha256": artifact.artifact_sha256,
+            "manifest_sha256": artifact.manifest_sha256,
+            "checksums_sha256": artifact.checksums_sha256,
+            "file_count": artifact.file_count,
+            "training_count": artifact.training_count,
+            "validation_count": artifact.validation_count,
+        }
+        mismatched = [
+            key for key, value in expected_artifact.items() if payload.get(key) != value
+        ]
+        if mismatched:
+            raise GateBValidationError(
+                f"training completion marker changed adapter evidence: {mismatched!r}"
+            )
+        return TrainingResumeStatus(
+            contract_sha256=contract_sha256,
+            state="complete",
+            process_id=None,
+            latest_checkpoint_step=None,
+            completion_artifact_sha256=artifact.artifact_sha256,
+        )
+
+    lock_path = root / _TRAINING_RESUME_LOCK_FILENAME
+    if lock_path.exists() or lock_path.is_symlink():
+        if lock_path.is_symlink() or not lock_path.is_file():
+            raise GateBValidationError("training resume lock is unsafe")
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(lock_path, flags)
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return TrainingResumeStatus(
+                    contract_sha256=contract_sha256,
+                    state="running",
+                    process_id=None,
+                    latest_checkpoint_step=None,
+                    completion_artifact_sha256=None,
+                )
+            _, lock, _ = _load_json_artifact(lock_path, "training resume lock")
+        finally:
+            os.close(descriptor)
+        if set(lock) != {"schema_version", "contract_sha256", "pid"}:
+            raise GateBValidationError("training resume lock schema is invalid")
+        process_id = lock.get("pid")
+        if (
+            lock.get("schema_version") != _TRAINING_RESUME_CONTRACT_SCHEMA
+            or lock.get("contract_sha256") != contract_sha256
+            or isinstance(process_id, bool)
+            or not isinstance(process_id, int)
+            or process_id <= 0
+        ):
+            raise GateBValidationError("training resume lock contract is invalid")
+
+    marker_path = root / _TRAINING_RESUME_STARTED_FILENAME
+    _validate_training_resume_started(marker_path, contract_sha256)
+    if not marker_path.exists():
+        return TrainingResumeStatus(
+            contract_sha256=contract_sha256,
+            state="ready",
+            process_id=None,
+            latest_checkpoint_step=None,
+            completion_artifact_sha256=None,
+        )
+    trainer_root = root / "trainer"
+    if trainer_root.is_symlink() or not trainer_root.is_dir():
+        return TrainingResumeStatus(
+            contract_sha256=contract_sha256,
+            state="terminal_failed",
+            process_id=None,
+            latest_checkpoint_step=None,
+            completion_artifact_sha256=None,
+        )
+    valid_steps: list[int] = []
+    for candidate in trainer_root.iterdir():
+        match = _TRAINER_CHECKPOINT_RE.fullmatch(candidate.name)
+        if match is None:
+            continue
+        step = int(match.group(1))
+        reason = _recoverable_trainer_checkpoint_reason(
+            candidate,
+            expected_global_step=step,
+            contract_sha256=contract_sha256,
+        )
+        if reason is None:
+            valid_steps.append(step)
+    return TrainingResumeStatus(
+        contract_sha256=contract_sha256,
+        state="retryable" if valid_steps else "terminal_failed",
+        process_id=None,
+        latest_checkpoint_step=max(valid_steps) if valid_steps else None,
+        completion_artifact_sha256=None,
+    )
+
+
 def _prepare_training_resume_context(
     resume_dir: str | Path | None,
     *,
@@ -1654,12 +1836,24 @@ def _prepare_training_resume_context(
             "resume_dir and output_dir must be disjoint to protect checkpoints"
         )
 
+    contract_schema = _TRAINING_RESUME_CONTRACT_V2_SCHEMA
+    contract_path = root / _TRAINING_RESUME_CONTRACT_FILENAME
+    if root.exists() and contract_path.exists():
+        existing = _training_resume_contract_payload_from_root(root)
+        existing_schema = existing.get("schema_version")
+        if existing_schema not in {
+            _TRAINING_RESUME_CONTRACT_SCHEMA,
+            _TRAINING_RESUME_CONTRACT_V2_SCHEMA,
+        }:
+            raise GateBValidationError("training resume contract schema is unsupported")
+        contract_schema = str(existing_schema)
     expected = _training_resume_contract_payload(
         plan=plan,
         gate=gate,
         data_provenance=data_provenance,
         source_manifest=source_manifest,
         config=config,
+        schema_version=contract_schema,
     )
     if root.exists():
         if root.is_symlink() or not root.is_dir():
@@ -1708,12 +1902,32 @@ def _training_resume_contract_payload(
     data_provenance: Mapping[str, str],
     source_manifest: SourceTreeArtifactEvidence,
     config: GateBConfig,
+    schema_version: str = _TRAINING_RESUME_CONTRACT_V2_SCHEMA,
 ) -> dict[str, object]:
     """Return the immutable evidence contract for retained Trainer state."""
 
     _validate_plan_binding(plan, config)
+    if schema_version not in {
+        _TRAINING_RESUME_CONTRACT_SCHEMA,
+        _TRAINING_RESUME_CONTRACT_V2_SCHEMA,
+    }:
+        raise GateBValidationError("training resume contract schema is unsupported")
+    split_payload: dict[str, object] = {
+        "version": plan.split_version,
+        "sha256": plan.split_sha256,
+        "source_groups_sha256": plan.source_groups_sha256,
+        "fold": plan.fold,
+        "excluded_ids_sha256": plan.excluded_ids_sha256,
+        "training_ids_sha256": plan.training_ids_sha256,
+        "validation_ids_sha256": plan.validation_ids_sha256,
+        "training_examples_sha256": plan.training_examples_sha256,
+        "validation_examples_sha256": plan.validation_examples_sha256,
+    }
+    if schema_version == _TRAINING_RESUME_CONTRACT_V2_SCHEMA:
+        split_payload["training_count"] = len(plan.training_ids)
+        split_payload["validation_count"] = len(plan.validation_ids)
     payload: dict[str, object] = {
-        "schema_version": _TRAINING_RESUME_CONTRACT_SCHEMA,
+        "schema_version": schema_version,
         "model_id": OFFICIAL_MODEL_ID,
         "revision": PINNED_MODEL_REVISION,
         "base_model_checkpoint_sha256": BASE_MODEL_CHECKPOINT_SHA256,
@@ -1733,17 +1947,7 @@ def _training_resume_contract_payload(
             "file_count": source_manifest.file_count,
         },
         "data_provenance": dict(sorted(data_provenance.items())),
-        "split": {
-            "version": plan.split_version,
-            "sha256": plan.split_sha256,
-            "source_groups_sha256": plan.source_groups_sha256,
-            "fold": plan.fold,
-            "excluded_ids_sha256": plan.excluded_ids_sha256,
-            "training_ids_sha256": plan.training_ids_sha256,
-            "validation_ids_sha256": plan.validation_ids_sha256,
-            "training_examples_sha256": plan.training_examples_sha256,
-            "validation_examples_sha256": plan.validation_examples_sha256,
-        },
+        "split": split_payload,
         "training_target": {
             "kind": plan.training_target_kind,
             "candidate_config_sha256": plan.rationale_candidate_config_sha256,
@@ -1794,10 +1998,10 @@ def _validate_training_resume_contract(
 
 
 @contextmanager
-def _locked_training_resume_checkpoint(
+def _locked_training_resume(
     context: _TrainingResumeContext,
-) -> Iterable[Path | None]:
-    """Hold an exclusive fail-closed lock while selecting a checkpoint."""
+) -> Iterable[None]:
+    """Hold an exclusive fail-closed lock for one resume-ledger mutation."""
 
     if context.root.is_symlink() or not context.root.is_dir():
         raise GateBValidationError("resume_dir disappeared or is no longer a real directory")
@@ -1809,15 +2013,25 @@ def _locked_training_resume_checkpoint(
             "pid": os.getpid(),
         }
     )
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    flags = (
+        os.O_RDWR
+        | os.O_CREAT
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
         descriptor = os.open(lock_path, flags, 0o600)
-    except FileExistsError as exc:
-        raise GateBValidationError(
-            "training resume lock exists; refusing concurrent or stale resume"
-        ) from exc
+    except OSError as exc:
+        raise GateBValidationError("training resume lock is unsafe") from exc
     try:
-        with os.fdopen(descriptor, "wb") as stream:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise GateBValidationError(
+                "training resume lock belongs to an active process"
+            ) from exc
+        os.ftruncate(descriptor, 0)
+        with os.fdopen(os.dup(descriptor), "wb") as stream:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
@@ -1825,19 +2039,43 @@ def _locked_training_resume_checkpoint(
         expected = _training_resume_contract_from_root(context.root)
         if expected != context.contract_sha256:
             raise GateBValidationError("training resume contract changed while acquiring lock")
-        yield _select_resume_checkpoint(context)
+        yield
     finally:
-        with suppress(FileNotFoundError):
-            lock_path.unlink()
-        _fsync_directory(context.root)
+        os.close(descriptor)
+
+
+@contextmanager
+def _locked_training_resume_checkpoint(
+    context: _TrainingResumeContext,
+) -> Iterable[Path | None]:
+    """Hold the resume lock while selecting one reusable checkpoint."""
+
+    with _locked_training_resume(context):
+        yield _select_resume_checkpoint(context)
 
 
 def _training_resume_contract_from_root(root: Path) -> str:
     """Validate the stored self-hash without accepting an unbound contract."""
 
+    payload = _training_resume_contract_payload_from_root(root)
+    return _required_sha256(
+        payload.get("contract_sha256"), "training resume contract sha256"
+    )
+
+
+def _training_resume_contract_payload_from_root(
+    root: Path,
+) -> Mapping[str, object]:
+    """Load one self-hashed resume contract for semantic adapter checks."""
+
     _, payload, _ = _load_json_artifact(
         root / _TRAINING_RESUME_CONTRACT_FILENAME, "training resume contract"
     )
+    if payload.get("schema_version") not in {
+        _TRAINING_RESUME_CONTRACT_SCHEMA,
+        _TRAINING_RESUME_CONTRACT_V2_SCHEMA,
+    }:
+        raise GateBValidationError("training resume contract schema is unsupported")
     stored_digest = _required_sha256(
         payload.get("contract_sha256"), "training resume contract sha256"
     )
@@ -1845,7 +2083,7 @@ def _training_resume_contract_from_root(root: Path) -> str:
     unhashed.pop("contract_sha256", None)
     if hashlib.sha256(canonical_json_bytes(unhashed)).hexdigest() != stored_digest:
         raise GateBValidationError("training resume contract hash is invalid")
-    return stored_digest
+    return payload
 
 
 def _select_resume_checkpoint(context: _TrainingResumeContext) -> Path | None:
@@ -2057,6 +2295,150 @@ def _mark_training_resume_started(context: _TrainingResumeContext) -> None:
     ).encode("utf-8")
     _atomic_write_new_file(marker_path, payload)
     _fsync_directory(context.root)
+
+
+def _mark_training_resume_complete(
+    context: _TrainingResumeContext,
+    artifact: TrainingArtifact,
+) -> None:
+    target = context.root / _TRAINING_RESUME_COMPLETE_FILENAME
+    payload = (
+        json.dumps(
+            {
+                "schema_version": _TRAINING_RESUME_COMPLETE_SCHEMA,
+                "contract_sha256": context.contract_sha256,
+                "artifact_path": artifact.path,
+                "artifact_sha256": artifact.artifact_sha256,
+                "manifest_sha256": artifact.manifest_sha256,
+                "checksums_sha256": artifact.checksums_sha256,
+                "file_count": artifact.file_count,
+                "training_count": artifact.training_count,
+                "validation_count": artifact.validation_count,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+        )
+        + "\n"
+    ).encode("utf-8")
+    if target.exists() or target.is_symlink():
+        raise GateBValidationError("training completion marker already exists")
+    _atomic_write_new_file(target, payload)
+    _fsync_directory(context.root)
+
+
+def _recover_published_training_artifact(
+    context: _TrainingResumeContext,
+    *,
+    target: Path,
+    plan: FoldSFTPlan,
+    config: GateBConfig,
+) -> TrainingArtifact:
+    """Repair only the marker after an already-verified atomic publish."""
+
+    completion = context.root / _TRAINING_RESUME_COMPLETE_FILENAME
+    if completion.exists() or completion.is_symlink():
+        raise GateBArtifactExistsError(
+            "training completion marker already exists; use status verification"
+        )
+    started = context.root / _TRAINING_RESUME_STARTED_FILENAME
+    _validate_training_resume_started(started, context.contract_sha256)
+    if not started.exists():
+        raise GateBValidationError(
+            "existing adapter is not bound to a started training resume"
+        )
+    published = validate_adapter_artifact(target, config=config)
+    _validate_adapter_target_binding(published, plan)
+    contract = _training_resume_contract_payload_from_root(context.root)
+    _validate_adapter_against_resume_contract(published, contract)
+    artifact = TrainingArtifact(
+        path=published.path,
+        artifact_sha256=published.artifact_sha256,
+        manifest_sha256=published.manifest_sha256,
+        checksums_sha256=published.checksums_sha256,
+        file_count=published.file_count,
+        training_count=published.training_count,
+        validation_count=published.validation_count,
+        training_target_kind=published.training_target_kind,
+    )
+    _mark_training_resume_complete(context, artifact)
+    return artifact
+
+
+def _validate_adapter_against_resume_contract(
+    adapter: AdapterArtifactEvidence,
+    contract: Mapping[str, object],
+) -> None:
+    runtime_gate = contract.get("runtime_gate")
+    source_manifest = contract.get("source_manifest")
+    data_provenance = contract.get("data_provenance")
+    split = contract.get("split")
+    training_target = contract.get("training_target")
+    if not all(
+        isinstance(value, Mapping)
+        for value in (
+            runtime_gate,
+            source_manifest,
+            data_provenance,
+            split,
+            training_target,
+        )
+    ):
+        raise GateBValidationError("training resume contract evidence is invalid")
+    assert isinstance(runtime_gate, Mapping)
+    assert isinstance(source_manifest, Mapping)
+    assert isinstance(data_provenance, Mapping)
+    assert isinstance(split, Mapping)
+    assert isinstance(training_target, Mapping)
+    expected = {
+        "config_sha256": contract.get("config_sha256"),
+        "split_version": split.get("version"),
+        "split_sha256": split.get("sha256"),
+        "source_groups_sha256": split.get("source_groups_sha256"),
+        "fold": split.get("fold"),
+        "excluded_ids_sha256": split.get("excluded_ids_sha256"),
+        "training_ids_sha256": split.get("training_ids_sha256"),
+        "training_examples_sha256": split.get("training_examples_sha256"),
+        "validation_ids_sha256": split.get("validation_ids_sha256"),
+        "validation_examples_sha256": split.get("validation_examples_sha256"),
+        "train_file_sha256": data_provenance.get("train_file_sha256"),
+        "exclusions_file_sha256": data_provenance.get("exclusions_file_sha256"),
+        "split_artifact_sha256": data_provenance.get("split_artifact_sha256"),
+        "development_shard_sha256": data_provenance.get(
+            "development_shard_sha256"
+        ),
+        "preflight_sha256": runtime_gate.get("preflight_sha256"),
+        "gpu_smoke_sha256": runtime_gate.get("gpu_smoke_sha256"),
+        "source_manifest_sha256": source_manifest.get("sha256"),
+        "source_tree_sha256": source_manifest.get("tree_sha256"),
+        "source_file_count": source_manifest.get("file_count"),
+        "training_target_kind": training_target.get("kind"),
+        "rationale_candidate_config_sha256": training_target.get(
+            "candidate_config_sha256"
+        ),
+        "rationale_candidate_config_file_sha256": training_target.get(
+            "candidate_config_file_sha256"
+        ),
+        "rationale_corpus_records_sha256": training_target.get(
+            "corpus_records_sha256"
+        ),
+        "rationale_corpus_manifest_sha256": training_target.get(
+            "corpus_manifest_sha256"
+        ),
+        "rationale_corpus_audit_sha256": training_target.get("corpus_audit_sha256"),
+    }
+    if contract.get("schema_version") == _TRAINING_RESUME_CONTRACT_V2_SCHEMA:
+        expected["training_count"] = split.get("training_count")
+        expected["validation_count"] = split.get("validation_count")
+    mismatched = [
+        field_name
+        for field_name, expected_value in expected.items()
+        if getattr(adapter, field_name) != expected_value
+    ]
+    if mismatched:
+        raise GateBValidationError(
+            f"published adapter does not match its resume contract: {mismatched!r}"
+        )
 
 
 def _validate_training_resume_started(path: Path, contract_sha256: str) -> None:
@@ -2574,13 +2956,23 @@ def _validated_new_file_target(path: str | Path, label: str) -> Path:
 
 
 def _validated_new_directory_target(path: str | Path) -> Path:
-    target = Path(path).resolve(strict=False)
+    target = _validated_adapter_directory_target_path(path)
+    if target.exists():
+        raise GateBArtifactExistsError(f"refusing to overwrite adapter directory: {target}")
+    return target
+
+
+def _validated_adapter_directory_target_path(path: str | Path) -> Path:
+    supplied = Path(path)
+    if supplied.is_symlink():
+        raise GateBArtifactExistsError(f"refusing symbolic-link adapter target: {supplied}")
+    target = supplied.resolve(strict=False)
     if not target.name or target.name in {".", ".."}:
         raise GateBValidationError("output_dir must name a child directory")
     if not target.parent.is_dir() or target.parent.is_symlink():
         raise GateBValidationError("output_dir parent must be an existing real directory")
-    if target.exists() or target.is_symlink():
-        raise GateBArtifactExistsError(f"refusing to overwrite adapter directory: {target}")
+    if target.exists() and not target.is_dir():
+        raise GateBArtifactExistsError(f"adapter target is not a directory: {target}")
     return target
 
 

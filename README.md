@@ -23,7 +23,9 @@
 > [Gate B CPU-ready 런북](docs/10_GATE_B_CPU_READY_RUNBOOK.md)과
 > [synthetic teacher harness v1](docs/13_SYNTHETIC_TEACHER_HARNESS_V1.md),
 > [v4 실행 런북](docs/14_GATE_B_TEACHER_V4_RUNBOOK.md),
-> [v4 실패 기록](docs/15_GATE_B_TEACHER_V4_FAILURE_RECORD.md)에 있다.
+> [v4 실패 기록](docs/15_GATE_B_TEACHER_V4_FAILURE_RECORD.md)에 있다. v4 이후의 현재
+> base OOF 안전망 → harness v2 → teacher v5 → freeze/holdout/submission 순서는
+> [hybrid completion runbook](docs/16_GATE_B_HYBRID_COMPLETION_RUNBOOK.md)이 권위 문서다.
 
 ## 한 줄 결론
 
@@ -144,6 +146,9 @@ manifest와 preflight/smoke, 직전 read-only VRAM 조건, versioned no-overwrit
     중단 후 재개 순서, GPU·holdout·submission gate, Git 공개 제외 대상을 고정
 12. [새 세션 시작용 상세 handoff prompt](docs/12_NEW_SESSION_START_PROMPT.md)
     새 세션에 그대로 붙여넣는 시작 지시문, 현재 snapshot, CPU/GPU 진입·중단 조건
+13. [Gate B hybrid completion runbook](docs/16_GATE_B_HYBRID_COMPLETION_RUNBOOK.md)
+    base 5-fold OOF 안전망, harness v2/teacher v5 gate, 단일 freeze와 one-shot
+    holdout·submission까지의 현재 순차 계약
 
 ## 절대 하지 않을 것
 

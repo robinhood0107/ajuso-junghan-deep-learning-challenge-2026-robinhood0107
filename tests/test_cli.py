@@ -10,9 +10,17 @@ import pytest
 import deep_challenge.cli as cli_module
 from deep_challenge.cli import main
 from deep_challenge.data import load_train_csv
-from deep_challenge.gate_b import DEFAULT_GATE_B_CONFIG, GenerationResult
+from deep_challenge.gate_b import (
+    DEFAULT_GATE_B_CONFIG,
+    DevelopmentResumeStatus,
+    GenerationResult,
+)
 from deep_challenge.gate_b_prediction import PredictionArtifactWriteResult
-from deep_challenge.gate_b_runtime import RuntimeGateEvidence, TrainingArtifact
+from deep_challenge.gate_b_runtime import (
+    RuntimeGateEvidence,
+    TrainingArtifact,
+    TrainingResumeStatus,
+)
 from deep_challenge.gate_b_selection import (
     HOLDOUT_ACCESS_ACKNOWLEDGEMENT,
     GateBSelectionWriteResult,
@@ -939,6 +947,219 @@ def test_compare_development_oof_cli_wires_all_folds_from_development_shard(
     keyword = captured["kwargs"]
     assert isinstance(keyword, dict)
     assert keyword["deployment_fold"] == 0
+
+
+def test_verify_base_development_oof_cli_wires_complete_base_folds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contract, _, _, _ = _gate_b_cli_fixture(tmp_path)
+    fold_index = contract.index("--fold")
+    del contract[fold_index : fold_index + 2]
+    captured: dict[str, object] = {}
+
+    def fake_verify(*args: object, **kwargs: object) -> GateBSelectionWriteResult:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return GateBSelectionWriteResult(
+            path=str(tmp_path / "base-oof.json"),
+            size_bytes=123,
+            sha256="a" * 64,
+            payload_sha256="b" * 64,
+        )
+
+    monkeypatch.setattr(cli_module, "verify_base_development_oof", fake_verify)
+    output = tmp_path / "base-oof.json"
+    assert (
+        main(
+            [
+                "verify-base-development-oof",
+                *contract,
+                "--deployment-fold",
+                "0",
+                "--base-label",
+                "fixed-base",
+                "--base-run",
+                "0",
+                str(tmp_path / "base0.jsonl"),
+                str(tmp_path / "base0.json"),
+                "--base-run",
+                "1",
+                str(tmp_path / "base1.jsonl"),
+                str(tmp_path / "base1.json"),
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    positional = captured["args"]
+    assert isinstance(positional, tuple)
+    assert positional[0] == "fixed-base"
+    fold_runs = positional[1]
+    assert isinstance(fold_runs, tuple)
+    assert [(item.fold, item.label, item.method_kind) for item in fold_runs] == [
+        (0, "fixed-base", "fixed_base"),
+        (1, "fixed-base", "fixed_base"),
+    ]
+    assert all(item.adapter_path is None for item in fold_runs)
+    development_records = positional[2]
+    assert isinstance(development_records, tuple)
+    assert all(record.id != "train-000001" for record in development_records)
+    keyword = captured["kwargs"]
+    assert isinstance(keyword, dict)
+    assert keyword["deployment_fold"] == 0
+    rendered = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert rendered["qualified"] is True
+    assert rendered["holdout_accessed"] is False
+
+
+def test_freeze_development_base_cli_requires_ack_and_wires_primary_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_freeze(*args: object, **kwargs: object) -> GateBSelectionWriteResult:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return GateBSelectionWriteResult(
+            path=str(tmp_path / "freeze.json"),
+            size_bytes=123,
+            sha256="a" * 64,
+            payload_sha256="b" * 64,
+        )
+
+    monkeypatch.setattr(cli_module, "freeze_base_development_selection", fake_freeze)
+    common = [
+        "freeze-development-base",
+        "--base-oof-artifact",
+        str(tmp_path / "base-oof.json"),
+        "--primary-label",
+        "fixed-base",
+        "--decision-note",
+        "candidate unavailable; freeze qualified complete base OOF",
+        "--source-manifest",
+        str(tmp_path / "source.json"),
+        "--lockfile",
+        str(tmp_path / "uv.lock"),
+        "--output",
+        str(tmp_path / "freeze.json"),
+    ]
+    assert main(common) == 2
+    assert "required" in capsys.readouterr().err
+    assert captured == {}
+
+    assert main([*common, "--confirm-no-leaderboard-selection"]) == 0
+    assert captured["args"] == (tmp_path / "base-oof.json",)
+    assert captured["kwargs"] == {
+        "primary_label": "fixed-base",
+        "decision_note": "candidate unavailable; freeze qualified complete base OOF",
+        "source_manifest_path": tmp_path / "source.json",
+        "lockfile_path": tmp_path / "uv.lock",
+        "output_path": tmp_path / "freeze.json",
+    }
+    rendered = json.loads(capsys.readouterr().out)
+    assert rendered["fallback_label"] is None
+    assert rendered["routing_policy"] == "primary_only"
+    assert rendered["selection_frozen"] is True
+
+
+def test_gate_b_status_clis_emit_shared_raw_free_schema(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    development = DevelopmentResumeStatus(
+        contract_sha256="a" * 64,
+        state="interrupted",
+        process_id=None,
+        total_chunks=2,
+        completed_chunks=1,
+        total_generations=10,
+        completed_generations=4,
+        chunk_attempt_count=2,
+        invalid_chunk_attempt_count=1,
+        completed_latency_ms=12.5,
+    )
+    training = TrainingResumeStatus(
+        contract_sha256="b" * 64,
+        state="retryable",
+        process_id=None,
+        latest_checkpoint_step=7,
+        completion_artifact_sha256=None,
+    )
+    monkeypatch.setattr(
+        cli_module, "read_development_resume_status", lambda _path: development
+    )
+    monkeypatch.setattr(
+        cli_module, "read_training_resume_status", lambda _path: training
+    )
+    development_output = tmp_path / "development-status.json"
+    assert (
+        main(
+            [
+                "gate-b-development-status",
+                "--resume-dir",
+                str(tmp_path / "private-development"),
+                "--output",
+                str(development_output),
+            ]
+        )
+        == 0
+    )
+    development_payload = json.loads(capsys.readouterr().out)
+    assert development_payload == json.loads(
+        development_output.read_text(encoding="utf-8")
+    )
+    assert development_payload["schema_version"] == "gate-b-workflow-status-v1"
+    assert development_payload["state"] == "retryable"
+    assert development_payload["next_action"] == "resume_development"
+
+    training_output = tmp_path / "training-status.json"
+    assert (
+        main(
+            [
+                "gate-b-training-status",
+                "--resume-dir",
+                str(tmp_path / "private-training"),
+                "--output",
+                str(training_output),
+            ]
+        )
+        == 0
+    )
+    training_payload = json.loads(capsys.readouterr().out)
+    assert training_payload == json.loads(training_output.read_text(encoding="utf-8"))
+    assert training_payload["schema_version"] == "gate-b-workflow-status-v1"
+    assert training_payload["state"] == "retryable"
+    assert training_payload["next_action"] == "resume_training"
+    serialized = json.dumps([development_payload, training_payload])
+    assert "/mnt/" not in serialized
+    assert not any(
+        word in serialized for word in ("problem_id", "question", "answer", "prompt")
+    )
+
+    assert (
+        main(
+            [
+                "gate-b-development-status",
+                "--resume-dir",
+                str(tmp_path / "private-development"),
+            ]
+        )
+        == 0
+    )
+    stdout_only_development = json.loads(capsys.readouterr().out)
+    assert stdout_only_development == development_payload
+    assert (
+        main(
+            [
+                "gate-b-training-status",
+                "--resume-dir",
+                str(tmp_path / "private-training"),
+            ]
+        )
+        == 0
+    )
+    stdout_only_training = json.loads(capsys.readouterr().out)
+    assert stdout_only_training == training_payload
 
 
 def test_decide_candidate_probe_cli_writes_cost_control_decision(
