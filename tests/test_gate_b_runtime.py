@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -1186,7 +1187,8 @@ def test_qlora_training_resume_recovers_only_dead_process_lock(tmp_path: Path) -
     )
     stale_status = read_training_resume_status(resume_dir)
     assert stale_status.state == "retryable"
-    assert stale_status.process_id == 2_147_483_647
+    assert stale_status.process_id is None
+    assert stale_status.latest_checkpoint_step == 7
 
     resumed = _ResumableTrainingRuntime()
     artifact = train_qlora_fold(
@@ -1205,7 +1207,7 @@ def test_qlora_training_resume_recovers_only_dead_process_lock(tmp_path: Path) -
         runtime_factory=lambda _evidence: resumed,
     )
     assert artifact.path == str(output.resolve())
-    assert not lock.exists()
+    assert lock.exists()
 
     output_2 = tmp_path / "adapter-fold-1"
     resume_dir_2 = tmp_path / "resume-fold-1"
@@ -1227,37 +1229,28 @@ def test_qlora_training_resume_recovers_only_dead_process_lock(tmp_path: Path) -
                 fail_after_checkpoint=True
             ),
         )
-    live_contract = json.loads(
-        (resume_dir_2 / "resume-contract.json").read_text(encoding="utf-8")
-    )["contract_sha256"]
     live_lock = resume_dir_2 / ".training-resume.lock"
-    live_lock.write_text(
-        json.dumps(
-            {
-                "schema_version": "gate-b-qlora-training-resume-v1",
-                "contract_sha256": live_contract,
-                "pid": os.getpid(),
-            }
-        ),
-        encoding="utf-8",
-    )
-    assert read_training_resume_status(resume_dir_2).state == "running"
-    with pytest.raises(GateBValidationError, match="active process"):
-        train_qlora_fold(
-            _records(training_ids),
-            _records(validation_ids),
-            split_manifest=manifest,
-            fold=0,
-            excluded_ids=(),
-            **_data_provenance_args(),
-            source_manifest=source_manifest,
-            preflight_artifact=preflight,
-            gpu_smoke_artifact=smoke,
-            output_dir=output_2,
-            gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
-            resume_dir=resume_dir_2,
-            runtime_factory=lambda _evidence: _ResumableTrainingRuntime(),
-        )
+    with live_lock.open("r+") as held_lock:
+        fcntl.flock(held_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        running = read_training_resume_status(resume_dir_2)
+        assert running.state == "running"
+        assert running.process_id is None
+        with pytest.raises(GateBValidationError, match="active process"):
+            train_qlora_fold(
+                _records(training_ids),
+                _records(validation_ids),
+                split_manifest=manifest,
+                fold=0,
+                excluded_ids=(),
+                **_data_provenance_args(),
+                source_manifest=source_manifest,
+                preflight_artifact=preflight,
+                gpu_smoke_artifact=smoke,
+                output_dir=output_2,
+                gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+                resume_dir=resume_dir_2,
+                runtime_factory=lambda _evidence: _ResumableTrainingRuntime(),
+            )
 
 
 def test_qlora_training_resume_requires_runtime_resume_keywords(tmp_path: Path) -> None:

@@ -14,7 +14,11 @@ from pathlib import Path
 
 from .gate_b import DevelopmentResumeStatus, GateBValidationError
 from .gate_b_runtime import TrainingResumeStatus
-from .provenance import canonical_json_bytes, sha256_file
+from .provenance import (
+    canonical_json_bytes,
+    sha256_file,
+    validate_source_tree_manifest_artifact,
+)
 
 RUN_CONTEXT_SCHEMA = "gate-b-run-context-v1"
 WORKFLOW_STATUS_SCHEMA = "gate-b-workflow-status-v1"
@@ -50,6 +54,11 @@ class WorkflowStatus:
             raise GateBValidationError("workflow status next_action is invalid")
         if any(not item or item != item.strip() for item in self.blockers):
             raise GateBValidationError("workflow status blocker is invalid")
+        if any(
+            type(value) is not bool
+            for value in (self.terminal, self.resume_allowed, self.repair_allowed)
+        ):
+            raise GateBValidationError("workflow status flags are invalid")
         if (
             isinstance(self.completed_count, bool)
             or not isinstance(self.completed_count, int)
@@ -201,16 +210,14 @@ def write_run_context(
         raise GateBValidationError("run context config labels are invalid")
     source_manifest = file_evidence(source_manifest_path, "source manifest")
     try:
-        manifest_payload = json.loads(
-            (root / str(source_manifest["path"])).read_text(encoding="utf-8")
+        validated_manifest = validate_source_tree_manifest_artifact(
+            root / str(source_manifest["path"]),
+            root=root,
         )
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, ValueError) as exc:
         raise GateBValidationError("run context source manifest is invalid") from exc
-    if not isinstance(manifest_payload, Mapping):
-        raise GateBValidationError("run context source manifest must be an object")
-    source_manifest["tree_sha256"] = _required_sha256(
-        manifest_payload.get("tree_sha256"), "source manifest tree_sha256"
-    )
+    source_manifest["tree_sha256"] = validated_manifest.tree_sha256
+    source_manifest["file_count"] = validated_manifest.file_count
 
     fold_paths = {
         str(fold): _relative_planned_path(path, root, f"fold {fold} output")

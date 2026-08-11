@@ -827,6 +827,34 @@ def test_base_only_oof_qualifies_freezes_and_authorizes_holdout(
     by_id = {record.id: record for record in records}
     eligible_records = tuple(by_id[problem_id] for problem_id in eligible_ids)
     oof = tmp_path / "base-oof.json"
+    with pytest.raises(GateBValidationError, match="exactly one"):
+        verify_base_development_oof(
+            "base",
+            supplied[:-1],
+            eligible_records,
+            split_manifest=manifest,
+            deployment_fold=0,
+            excluded_ids=(),
+            train_file_sha256="1" * 64,
+            exclusions_file_sha256="2" * 64,
+            split_artifact_sha256="3" * 64,
+            development_shard_sha256="4" * 64,
+            output_path=tmp_path / "missing-fold.json",
+        )
+    with pytest.raises(GateBValidationError, match="duplicate"):
+        verify_base_development_oof(
+            "base",
+            (*supplied[:-1], supplied[0]),
+            eligible_records,
+            split_manifest=manifest,
+            deployment_fold=0,
+            excluded_ids=(),
+            train_file_sha256="1" * 64,
+            exclusions_file_sha256="2" * 64,
+            split_artifact_sha256="3" * 64,
+            development_shard_sha256="4" * 64,
+            output_path=tmp_path / "duplicate-fold.json",
+        )
     verify_base_development_oof(
         "base",
         supplied,

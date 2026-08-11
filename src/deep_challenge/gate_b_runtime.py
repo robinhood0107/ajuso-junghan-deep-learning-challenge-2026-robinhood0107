@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import fcntl
 import gc
 import hashlib
 import importlib
@@ -1706,7 +1707,26 @@ def read_training_resume_status(resume_dir: str | Path) -> TrainingResumeStatus:
     if lock_path.exists() or lock_path.is_symlink():
         if lock_path.is_symlink() or not lock_path.is_file():
             raise GateBValidationError("training resume lock is unsafe")
-        _, lock, _ = _load_json_artifact(lock_path, "training resume lock")
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(lock_path, flags)
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return TrainingResumeStatus(
+                    contract_sha256=contract_sha256,
+                    state="running",
+                    process_id=None,
+                    latest_checkpoint_step=None,
+                    completion_artifact_sha256=None,
+                )
+            _, lock, _ = _load_json_artifact(lock_path, "training resume lock")
+        finally:
+            os.close(descriptor)
         if set(lock) != {"schema_version", "contract_sha256", "pid"}:
             raise GateBValidationError("training resume lock schema is invalid")
         process_id = lock.get("pid")
@@ -1718,13 +1738,6 @@ def read_training_resume_status(resume_dir: str | Path) -> TrainingResumeStatus:
             or process_id <= 0
         ):
             raise GateBValidationError("training resume lock contract is invalid")
-        return TrainingResumeStatus(
-            contract_sha256=contract_sha256,
-            state="running" if _training_process_is_alive(process_id) else "retryable",
-            process_id=process_id,
-            latest_checkpoint_step=None,
-            completion_artifact_sha256=None,
-        )
 
     marker_path = root / _TRAINING_RESUME_STARTED_FILENAME
     _validate_training_resume_started(marker_path, contract_sha256)
@@ -1959,46 +1972,25 @@ def _locked_training_resume_checkpoint(
             "pid": os.getpid(),
         }
     )
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
-    descriptor: int | None = None
-    for _ in range(2):
-        try:
-            descriptor = os.open(lock_path, flags, 0o600)
-            break
-        except FileExistsError as exc:
-            if lock_path.is_symlink() or not lock_path.is_file():
-                raise GateBValidationError("training resume lock is unsafe") from exc
-            before = lock_path.stat(follow_symlinks=False)
-            _, existing, _ = _load_json_artifact(lock_path, "training resume lock")
-            if set(existing) != {"schema_version", "contract_sha256", "pid"}:
-                raise GateBValidationError("training resume lock schema is invalid") from exc
-            stale_pid = existing.get("pid")
-            if (
-                existing.get("schema_version") != _TRAINING_RESUME_CONTRACT_SCHEMA
-                or existing.get("contract_sha256") != context.contract_sha256
-                or isinstance(stale_pid, bool)
-                or not isinstance(stale_pid, int)
-                or stale_pid <= 0
-            ):
-                raise GateBValidationError("training resume lock contract is invalid") from exc
-            if _training_process_is_alive(stale_pid):
-                raise GateBValidationError(
-                    "training resume lock belongs to an active process"
-                ) from exc
-            try:
-                current = lock_path.stat(follow_symlinks=False)
-            except FileNotFoundError:
-                continue
-            if (before.st_dev, before.st_ino) != (current.st_dev, current.st_ino):
-                continue
-            try:
-                lock_path.unlink()
-            except FileNotFoundError:
-                continue
-    if descriptor is None:
-        raise GateBValidationError("training resume lock changed during stale recovery")
+    flags = (
+        os.O_RDWR
+        | os.O_CREAT
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
-        with os.fdopen(descriptor, "wb") as stream:
+        descriptor = os.open(lock_path, flags, 0o600)
+    except OSError as exc:
+        raise GateBValidationError("training resume lock is unsafe") from exc
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise GateBValidationError(
+                "training resume lock belongs to an active process"
+            ) from exc
+        os.ftruncate(descriptor, 0)
+        with os.fdopen(os.dup(descriptor), "wb") as stream:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
@@ -2008,21 +2000,7 @@ def _locked_training_resume_checkpoint(
             raise GateBValidationError("training resume contract changed while acquiring lock")
         yield _select_resume_checkpoint(context)
     finally:
-        with suppress(FileNotFoundError):
-            lock_path.unlink()
-        _fsync_directory(context.root)
-
-
-def _training_process_is_alive(process_id: int) -> bool:
-    if process_id == os.getpid():
-        return True
-    try:
-        os.kill(process_id, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+        os.close(descriptor)
 
 
 def _training_resume_contract_from_root(root: Path) -> str:

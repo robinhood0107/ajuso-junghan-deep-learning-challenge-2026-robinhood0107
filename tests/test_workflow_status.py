@@ -8,6 +8,7 @@ import pytest
 
 from deep_challenge.gate_b import DevelopmentResumeStatus, GateBValidationError
 from deep_challenge.gate_b_runtime import TrainingResumeStatus
+from deep_challenge.provenance import build_source_tree_manifest, write_json_atomic
 from deep_challenge.workflow_status import (
     RUN_CONTEXT_SCHEMA,
     WORKFLOW_STATUS_SCHEMA,
@@ -124,14 +125,19 @@ def test_run_context_is_immutable_relative_and_hash_bound(tmp_path: Path) -> Non
     root = tmp_path / "source"
     root.mkdir()
     config = _write(root / "configs" / "base.json", '{"base":true}\n')
-    manifest = _write(
-        root / "private" / "source-manifest.json",
-        json.dumps({"tree_sha256": "1" * 64}) + "\n",
+    manifest = root / "artifacts" / "analysis" / "source-manifest.json"
+    split = _write(root / "artifacts" / "analysis" / "split.json", '{"split":"v1"}\n')
+    preflight = _write(
+        root / "artifacts" / "analysis" / "preflight.json", '{"ready":true}\n'
     )
-    split = _write(root / "artifacts" / "split.json", '{"split":"v1"}\n')
-    preflight = _write(root / "artifacts" / "preflight.json", '{"ready":true}\n')
-    smoke = _write(root / "artifacts" / "smoke.json", '{"ready":true}\n')
-    output = root / "private" / "run-context.json"
+    smoke = _write(
+        root / "artifacts" / "analysis" / "smoke.json", '{"ready":true}\n'
+    )
+    output = root / "artifacts" / "analysis" / "run-context.json"
+    write_json_atomic(
+        manifest,
+        build_source_tree_manifest(root, excluded_paths=(manifest,)).as_dict(),
+    )
 
     result = write_run_context(
         output,
@@ -143,17 +149,23 @@ def test_run_context_is_immutable_relative_and_hash_bound(tmp_path: Path) -> Non
         split_artifact_path=split,
         preflight_report_path=preflight,
         gpu_smoke_report_path=smoke,
-        fold_output_paths={fold: root / "private" / f"fold-{fold}" for fold in range(5)},
+        fold_output_paths={
+            fold: root / "artifacts" / "gate_b" / f"fold-{fold}"
+            for fold in range(5)
+        },
         planned_stages=("gpu_gate", "base_oof", "teacher_v5"),
     )
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["schema_version"] == RUN_CONTEXT_SCHEMA
     assert payload["source_commit"] == "2" * 40
-    assert payload["source_manifest"]["path"] == "private/source-manifest.json"
-    assert payload["source_manifest"]["tree_sha256"] == "1" * 64
+    assert payload["source_manifest"]["path"] == (
+        "artifacts/analysis/source-manifest.json"
+    )
+    assert payload["source_manifest"]["tree_sha256"]
+    assert payload["source_manifest"]["file_count"] == 1
     assert payload["configs"]["base"]["path"] == "configs/base.json"
     assert payload["fold_output_paths"] == {
-        str(fold): f"private/fold-{fold}" for fold in range(5)
+        str(fold): f"artifacts/gate_b/fold-{fold}" for fold in range(5)
     }
     assert "/mnt/" not in output.read_text(encoding="utf-8")
     unhashed = dict(payload)
@@ -180,14 +192,31 @@ def test_run_context_is_immutable_relative_and_hash_bound(tmp_path: Path) -> Non
             split_artifact_path=split,
             preflight_report_path=preflight,
             gpu_smoke_report_path=smoke,
-            fold_output_paths={0: root / "private" / "fold-0"},
+            fold_output_paths={0: root / "artifacts" / "gate_b" / "fold-0"},
             planned_stages=("base_oof",),
         )
+
+    config.write_text('{"base":false}\n', encoding="utf-8")
+    with pytest.raises(GateBValidationError, match="source manifest is invalid"):
+        write_run_context(
+            root / "artifacts" / "analysis" / "drift-context.json",
+            source_root=root,
+            source_commit="2" * 40,
+            run_tag="source-drift",
+            config_paths={"base": config},
+            source_manifest_path=manifest,
+            split_artifact_path=split,
+            preflight_report_path=preflight,
+            gpu_smoke_report_path=smoke,
+            fold_output_paths={0: root / "artifacts" / "gate_b" / "fold-0"},
+            planned_stages=("base_oof",),
+        )
+    config.write_text('{"base":true}\n', encoding="utf-8")
 
     outside = _write(tmp_path / "outside.json", "{}\n")
     with pytest.raises(GateBValidationError, match="source-root file"):
         write_run_context(
-            root / "private" / "outside-context.json",
+            root / "artifacts" / "analysis" / "outside-context.json",
             source_root=root,
             source_commit="2" * 40,
             run_tag="outside",
@@ -196,7 +225,7 @@ def test_run_context_is_immutable_relative_and_hash_bound(tmp_path: Path) -> Non
             split_artifact_path=split,
             preflight_report_path=preflight,
             gpu_smoke_report_path=smoke,
-            fold_output_paths={0: root / "private" / "fold-0"},
+            fold_output_paths={0: root / "artifacts" / "gate_b" / "fold-0"},
             planned_stages=("base_oof",),
         )
 
@@ -204,7 +233,7 @@ def test_run_context_is_immutable_relative_and_hash_bound(tmp_path: Path) -> Non
     root_link.symlink_to(root, target_is_directory=True)
     with pytest.raises(GateBValidationError, match="real directory"):
         write_run_context(
-            root / "private" / "symlink-context.json",
+            root / "artifacts" / "analysis" / "symlink-context.json",
             source_root=root_link,
             source_commit="2" * 40,
             run_tag="symlink",
@@ -213,6 +242,6 @@ def test_run_context_is_immutable_relative_and_hash_bound(tmp_path: Path) -> Non
             split_artifact_path=split,
             preflight_report_path=preflight,
             gpu_smoke_report_path=smoke,
-            fold_output_paths={0: root / "private" / "fold-0"},
+            fold_output_paths={0: root / "artifacts" / "gate_b" / "fold-0"},
             planned_stages=("base_oof",),
         )
