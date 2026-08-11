@@ -12,6 +12,7 @@ from deep_challenge.provenance import build_source_tree_manifest, write_json_ato
 from deep_challenge.workflow_status import (
     RUN_CONTEXT_SCHEMA,
     WORKFLOW_STATUS_SCHEMA,
+    WorkflowStatus,
     development_workflow_status,
     training_workflow_status,
     write_run_context,
@@ -113,6 +114,54 @@ def test_training_status_is_raw_free_and_exact(
         "total_count": 1,
         "artifact_sha256": completion or "a" * 64,
     }
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"stage": " stage"}, "stage"),
+        ({"state": "unknown"}, "state"),
+        ({"terminal": 1}, "flags"),
+        ({"next_action": ""}, "next_action"),
+        ({"blockers": (" bad",)}, "blocker"),
+        ({"completed_count": True}, "counts"),
+        ({"completed_count": 2, "total_count": 1}, "counts"),
+        ({"artifact_sha256": "bad"}, "artifact_sha256"),
+    ],
+)
+def test_workflow_status_rejects_malformed_envelopes(
+    overrides: dict[str, object], message: str
+) -> None:
+    values: dict[str, object] = {
+        "stage": "fold_training",
+        "state": "ready",
+        "terminal": False,
+        "resume_allowed": True,
+        "repair_allowed": False,
+        "next_action": "start_training",
+        "blockers": (),
+        "completed_count": 0,
+        "total_count": 1,
+        "artifact_sha256": "a" * 64,
+    }
+    values.update(overrides)
+    with pytest.raises(GateBValidationError, match=message):
+        WorkflowStatus(**values).as_dict()  # type: ignore[arg-type]
+
+
+def test_workflow_status_rejects_unknown_private_states() -> None:
+    with pytest.raises(GateBValidationError, match="development resume state"):
+        development_workflow_status(_development_status("unknown"))
+    with pytest.raises(GateBValidationError, match="training resume state"):
+        training_workflow_status(
+            TrainingResumeStatus(
+                contract_sha256="a" * 64,
+                state="unknown",
+                process_id=None,
+                latest_checkpoint_step=None,
+                completion_artifact_sha256=None,
+            )
+        )
 
 
 def _write(path: Path, content: str) -> Path:
@@ -244,4 +293,50 @@ def test_run_context_is_immutable_relative_and_hash_bound(tmp_path: Path) -> Non
             gpu_smoke_report_path=smoke,
             fold_output_paths={0: root / "artifacts" / "gate_b" / "fold-0"},
             planned_stages=("base_oof",),
+        )
+
+
+@pytest.mark.parametrize(
+    ("override", "value", "message"),
+    [
+        ("source_commit", "bad", "source_commit"),
+        ("run_tag", " bad", "run_tag"),
+        ("config_paths", {}, "at least one config"),
+        ("planned_stages", ("base_oof", "base_oof"), "planned stages"),
+        ("fold_output_paths", {True: "unused"}, "fold outputs"),
+    ],
+)
+def test_run_context_rejects_invalid_contract_inputs(
+    tmp_path: Path, override: str, value: object, message: str
+) -> None:
+    root = tmp_path / "source"
+    root.mkdir()
+    config = _write(root / "configs" / "base.json", '{"base":true}\n')
+    manifest = root / "artifacts" / "analysis" / "source-manifest.json"
+    split = _write(root / "artifacts" / "analysis" / "split.json", "{}\n")
+    preflight = _write(root / "artifacts" / "analysis" / "preflight.json", "{}\n")
+    smoke = _write(root / "artifacts" / "analysis" / "smoke.json", "{}\n")
+    write_json_atomic(
+        manifest,
+        build_source_tree_manifest(root, excluded_paths=(manifest,)).as_dict(),
+    )
+    arguments: dict[str, object] = {
+        "source_root": root,
+        "source_commit": "2" * 40,
+        "run_tag": "base-oof-20260811-002",
+        "config_paths": {"base": config},
+        "source_manifest_path": manifest,
+        "split_artifact_path": split,
+        "preflight_report_path": preflight,
+        "gpu_smoke_report_path": smoke,
+        "fold_output_paths": {0: root / "artifacts" / "gate_b" / "fold-0"},
+        "planned_stages": ("base_oof",),
+    }
+    if override == "fold_output_paths":
+        value = {True: root / "artifacts" / "gate_b" / "fold-0"}
+    arguments[override] = value
+    with pytest.raises(GateBValidationError, match=message):
+        write_run_context(
+            root / "artifacts" / "analysis" / f"invalid-{override}.json",
+            **arguments,  # type: ignore[arg-type]
         )

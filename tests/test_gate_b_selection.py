@@ -939,6 +939,50 @@ def test_base_only_oof_qualifies_freezes_and_authorizes_holdout(
     assert access.primary_label == "base"
     assert access.fallback_label is None
 
+    tampered_oof_payload = json.loads(oof.read_text(encoding="utf-8"))
+    tampered_oof_payload["run_order"] = []
+    tampered_oof_payload.pop("payload_sha256")
+    tampered_oof_payload["payload_sha256"] = hashlib.sha256(
+        canonical_json_bytes(tampered_oof_payload)
+    ).hexdigest()
+    tampered_oof = tmp_path / "tampered-base-oof.json"
+    tampered_oof.write_text(
+        json.dumps(tampered_oof_payload, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(GateBValidationError, match="run order"):
+        freeze_base_development_selection(
+            tampered_oof,
+            primary_label="base",
+            decision_note="Tampered OOF evidence must not be frozen.",
+            source_manifest_path=source_manifest,
+            lockfile_path=lockfile,
+            output_path=tmp_path / "tampered-oof-freeze.json",
+        )
+
+    tampered_freeze_payload = json.loads(freeze.read_text(encoding="utf-8"))
+    tampered_freeze_payload["primary"]["checkpoint_sha256"] = "f" * 64
+    tampered_freeze_payload.pop("payload_sha256")
+    tampered_freeze_payload["payload_sha256"] = hashlib.sha256(
+        canonical_json_bytes(tampered_freeze_payload)
+    ).hexdigest()
+    tampered_freeze = tmp_path / "tampered-base-freeze.json"
+    tampered_freeze.write_text(
+        json.dumps(tampered_freeze_payload, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(GateBValidationError, match="primary provenance"):
+        validate_frozen_selection_methods(
+            tampered_freeze,
+            split_manifest=manifest,
+            train_file_sha256="1" * 64,
+            exclusions_file_sha256="2" * 64,
+            excluded_ids_sha256=hashlib.sha256(b"[]").hexdigest(),
+            split_artifact_sha256="3" * 64,
+            development_shard_sha256="4" * 64,
+            fold=0,
+        )
+
     with pytest.raises(GateBValidationError, match="schema"):
         freeze_development_selection(
             oof,

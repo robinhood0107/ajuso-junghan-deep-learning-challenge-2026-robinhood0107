@@ -1136,6 +1136,31 @@ def test_gate_b_status_clis_emit_shared_raw_free_schema(
         word in serialized for word in ("problem_id", "question", "answer", "prompt")
     )
 
+    assert (
+        main(
+            [
+                "gate-b-development-status",
+                "--resume-dir",
+                str(tmp_path / "private-development"),
+            ]
+        )
+        == 0
+    )
+    stdout_only_development = json.loads(capsys.readouterr().out)
+    assert stdout_only_development == development_payload
+    assert (
+        main(
+            [
+                "gate-b-training-status",
+                "--resume-dir",
+                str(tmp_path / "private-training"),
+            ]
+        )
+        == 0
+    )
+    stdout_only_training = json.loads(capsys.readouterr().out)
+    assert stdout_only_training == training_payload
+
 
 def test_decide_candidate_probe_cli_writes_cost_control_decision(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
