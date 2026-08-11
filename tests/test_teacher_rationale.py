@@ -24,6 +24,7 @@ from deep_challenge.teacher_rationale import (
     create_teacher_plan,
     finalize_teacher_bank,
     finalize_teacher_logical_audit,
+    load_teacher_attempts,
     load_teacher_plan,
     run_teacher_logical_audit,
     run_teacher_plan,
@@ -569,6 +570,91 @@ def test_lock_tamper_and_exhaustion_fail_closed(tmp_path: Path) -> None:
     attempt.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(TeacherRationaleValidationError, match="payload SHA"):
         teacher_status(plan.plan_dir)
+
+
+def test_v5_protocol_retry_is_once_same_prompt_and_high_effort(tmp_path: Path) -> None:
+    records = tuple(_record(index, index) for index in range(1, 3))
+    policy = TeacherPromptPolicy(
+        prompt_version="gate-b-codex-teacher-prompt-v4",
+        prompt_template_sha256=(
+            "3029e9297bdda504e0f48e1ce4d57e363e5d3a5342edf18253b11c4f75ecd8a7"
+        ),
+    )
+    plan = create_teacher_plan(
+        records,
+        tuple(record.id for record in records),
+        tmp_path / "protocol-success",
+        chunk_size=2,
+        label="codex-gpt-5.6-sol-teacher-pilot-v5",
+        version="pilot-v5",
+        prompt_policy=policy,
+    )
+    commands: list[tuple[str, ...]] = []
+
+    def retry_then_succeed(command: tuple[str, ...]) -> CodexCommandResult:
+        commands.append(command)
+        if len(commands) == 1:
+            return CodexCommandResult(stdout="{}", stderr="", returncode=0, latency_ms=1)
+        answers = {record.id: record.answer for record in records}
+        assert all(isinstance(value, int) for value in answers.values())
+        return CodexCommandResult(
+            stdout=_events(_items(plan.problem_ids, answers)),  # type: ignore[arg-type]
+            stderr="",
+            returncode=0,
+            latency_ms=1,
+        )
+
+    run_teacher_plan(
+        plan.plan_dir,
+        retry_then_succeed,
+        max_chunks=1,
+        protocol_retry_attempt_keys=frozenset(),
+    )
+    run_teacher_plan(
+        plan.plan_dir,
+        retry_then_succeed,
+        max_chunks=1,
+        protocol_retry_attempt_keys=frozenset({(0, 1)}),
+    )
+    assert len(commands) == 2
+    assert commands[0][-1] == commands[1][-1]
+    assert all('model_reasoning_effort="high"' in command for command in commands)
+    attempts = load_teacher_attempts(plan.plan_dir)
+    assert [attempt.attempt_number for attempt in attempts] == [1, 2]
+    assert [attempt.execution.reasoning_effort for attempt in attempts] == ["high", "high"]
+
+    failed_plan = create_teacher_plan(
+        records,
+        tuple(record.id for record in records),
+        tmp_path / "protocol-failure",
+        chunk_size=2,
+        label="codex-gpt-5.6-sol-teacher-pilot-v5",
+        version="pilot-v5",
+        prompt_policy=policy,
+    )
+
+    def invalid(_command: tuple[str, ...]) -> CodexCommandResult:
+        return CodexCommandResult(stdout="{}", stderr="", returncode=0, latency_ms=1)
+
+    run_teacher_plan(
+        failed_plan.plan_dir,
+        invalid,
+        max_chunks=1,
+        protocol_retry_attempt_keys=frozenset(),
+    )
+    run_teacher_plan(
+        failed_plan.plan_dir,
+        invalid,
+        max_chunks=1,
+        protocol_retry_attempt_keys=frozenset({(0, 1)}),
+    )
+    with pytest.raises(TeacherRationaleValidationError, match="protocol retry"):
+        run_teacher_plan(
+            failed_plan.plan_dir,
+            invalid,
+            max_chunks=1,
+            protocol_retry_attempt_keys=frozenset(),
+        )
 
 
 def test_attempt_loader_reconstructs_prompt_and_safe_command_before_finalization(
