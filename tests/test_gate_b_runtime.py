@@ -902,6 +902,15 @@ def test_qlora_training_resume_keeps_checkpoint_and_reuses_exact_contract(
     with pytest.raises(GateBValidationError, match="resume contract"):
         read_training_resume_status(resume_dir)
     monkeypatch.setattr(
+        runtime_module,
+        "validate_adapter_artifact",
+        lambda path, *, config=DEFAULT_GATE_B_CONFIG: replace(
+            original_validate_adapter(path, config=config), training_count=999
+        ),
+    )
+    with pytest.raises(GateBValidationError, match="resume contract"):
+        read_training_resume_status(resume_dir)
+    monkeypatch.setattr(
         runtime_module, "validate_adapter_artifact", original_validate_adapter
     )
 
