@@ -87,8 +87,8 @@ Week 1 gate:
 #### 08/11
 
 - SFT best freeze
-- public leaderboard 제출 1회, Rules상 제출 예산 확인 후
-- 내부 결과와 public result의 방향만 비교
+- public leaderboard upload는 수행하지 않음; 현재 사용자의 명시 요청과 freeze/holdout gate 뒤에만 가능
+- 이미 합법적으로 보존된 public result가 있을 때만 내부 결과와 방향을 비교하며, 이를 위해 새 upload를 만들지 않음
 
 Week 2 gate:
 
@@ -127,7 +127,7 @@ Week 2 gate:
 #### 08/18
 
 - best rejection model freeze
-- public leaderboard 제출은 명확한 내부 개선 모델 하나만
+- public leaderboard upload는 명확한 내부 개선 모델 하나와 현재 사용자의 명시 요청이 모두 있을 때만
 
 Week 3 gate:
 

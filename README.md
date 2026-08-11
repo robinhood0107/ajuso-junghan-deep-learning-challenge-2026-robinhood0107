@@ -134,6 +134,8 @@ manifest와 preflight/smoke, 직전 read-only VRAM 조건, versioned no-overwrit
     filtered leaderboard 제출까지 그대로 실행할 명령과 중단 조건
 11. [지속 실행 체크리스트와 공개 저장소 경계](docs/11_EXECUTION_CONTINUATION_PLAN.md)
     중단 후 재개 순서, GPU·holdout·submission gate, Git 공개 제외 대상을 고정
+12. [새 세션 시작용 상세 handoff prompt](docs/12_NEW_SESSION_START_PROMPT.md)
+    새 세션에 그대로 붙여넣는 시작 지시문, 현재 snapshot, CPU/GPU 진입·중단 조건
 
 ## 절대 하지 않을 것
 
@@ -149,12 +151,12 @@ manifest와 preflight/smoke, 직전 read-only VRAM 조건, versioned no-overwrit
 ## 구현 단계별 체크포인트
 
 - **A — model-free 기반:** strict loader, manifest, quality flags, 안전한 group split, parser, grouped evaluator, voting, submission writer/validator를 구현·테스트했다. **현재 완료 상태**다.
-- **B — organizer-only 단일 adapter:** fold 0 base와 answer-only QLoRA를 완료했다. answer-only target은 출력을 7-token 수준으로 축약했지만 추론 성능을 훼손해 21.3120%로 탈락했다. parser v2 current-source base는 56.1863%로 재실행·검증했다. 다음은 training-only teacher provenance, exact fold-training coverage, reference-answer 검증, raw-free audit가 모두 통과한 concise-rationale candidate만 별도 버전으로 probe한다.
+- **B — organizer-only 단일 adapter:** fold 0 base와 answer-only QLoRA를 완료했다. answer-only target은 출력을 7-token 수준으로 축약했지만 추론 성능을 훼손해 21.3120%로 탈락했다. parser v2 current-source base는 56.1863%로 재실행·검증했다. ChatGPT 로그인 Codex teacher의 question-only immutable ledger, local exact-match finalizer, 64→60 logical-audit 및 resume gate를 구현했다. historic v1 pilot은 111/128·17 exhaustion으로 fail-closed됐고, 별도 `teacher-pilot-v2` prompt/template-hash profile의 fresh 32행×4 pilot도 first pass 105/128(82.03%) 뒤 최종 106/128·7 exhaustion으로 fail-closed됐다. 두 ledger 모두 재개하지 않으며 source bank·logical audit·GPU는 시작하지 않았다. concise-rationale 모델 점수·holdout·leaderboard prediction은 아직 없다.
 - **C — 확장:** 규칙상 허용된 외부 공개 데이터와 training-only teacher rationale도 provenance/오염/품질 gate 뒤에만 쓴다. Python/SymPy TIR과 same-base 다중 adapter/checkpoint 결합은 서면 확인 전 비활성화한다.
 
 따라서 모든 질문의 답이 올 때까지 안전한 기반 구현을 멈추지는 않지만, 답이 없는 기능을 묵시적으로 허용하지도 않는다.
 
-이 저장소의 기존 `NU_` 파일은 작업 시작 전부터 존재한 사용자 파일이므로 수정하거나 삭제하지 않았다.
+이 저장소의 기존 `NUL`/`NU_` 파일은 작업 시작 전부터 존재한 사용자 파일이므로 수정하거나 삭제하지 않았다.
 
 ## 공개 저장소와 라이선스
 

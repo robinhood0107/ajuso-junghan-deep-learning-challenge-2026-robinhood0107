@@ -466,6 +466,110 @@ class _TrainingRuntime:
         self.closed = True
 
 
+def _write_complete_trainer_checkpoint(
+    root: Path,
+    *,
+    global_step: int = 7,
+    contract_sha256: str,
+) -> None:
+    root.mkdir(parents=True)
+    (root / "adapter_config.json").write_text(
+        json.dumps(
+            {
+                "base_model_name_or_path": OFFICIAL_MODEL_ID,
+                "peft_type": "LORA",
+                "task_type": "CAUSAL_LM",
+                "r": 16,
+                "lora_alpha": 32,
+                "lora_dropout": 0.05,
+                "bias": "none",
+                "target_modules": list(PINNED_QWEN_ALL_LINEAR_TARGET_MODULES),
+                "modules_to_save": None,
+                "use_dora": False,
+                "use_rslora": False,
+                "trainable_token_indices": None,
+                "target_parameters": None,
+                "rank_pattern": {},
+                "alpha_pattern": {},
+                "inference_mode": True,
+                "fan_in_fan_out": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    save_file(
+        {
+            name: np.zeros(shape, dtype=np.float32)
+            for name, shape in runtime_module._expected_lora_tensor_shapes().items()
+        },
+        root / "adapter_model.safetensors",
+    )
+    (root / "trainer_state.json").write_text(
+        json.dumps({"global_step": global_step}), encoding="utf-8"
+    )
+    (root / "resume-checkpoint.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "gate-b-qlora-training-resume-v1",
+                "contract_sha256": contract_sha256,
+                "global_step": global_step,
+            }
+        ),
+        encoding="utf-8",
+    )
+    for filename in ("optimizer.pt", "rng_state.pth", "scheduler.pt", "training_args.bin"):
+        (root / filename).write_bytes(b"checkpoint-state\n")
+
+
+class _ResumableTrainingRuntime(_TrainingRuntime):
+    def __init__(
+        self,
+        *,
+        fail_after_checkpoint: bool = False,
+        fail_without_checkpoint: bool = False,
+    ) -> None:
+        super().__init__()
+        self.fail_after_checkpoint = fail_after_checkpoint
+        self.fail_without_checkpoint = fail_without_checkpoint
+        self.resume_checkpoint: Path | None = None
+        self.retain_checkpoints: bool | None = None
+        self.work_dir: Path | None = None
+
+    def train(
+        self,
+        *,
+        training_examples: tuple[object, ...],
+        validation_examples: tuple[object, ...],
+        work_dir: Path,
+        export_dir: Path,
+        plan: object,
+        config: GateBConfig,
+        resume_checkpoint: Path | None = None,
+        retain_checkpoints: bool = False,
+    ) -> RuntimeTrainingResult:
+        self.resume_checkpoint = resume_checkpoint
+        self.retain_checkpoints = retain_checkpoints
+        self.work_dir = work_dir
+        if self.fail_after_checkpoint:
+            _write_complete_trainer_checkpoint(
+                work_dir / "trainer" / "checkpoint-7",
+                contract_sha256=runtime_module._training_resume_contract_from_root(
+                    work_dir
+                ),
+            )
+            raise RuntimeError("simulated interruption after checkpoint")
+        if self.fail_without_checkpoint:
+            raise RuntimeError("simulated interruption before checkpoint")
+        return super().train(
+            training_examples=training_examples,
+            validation_examples=validation_examples,
+            work_dir=work_dir,
+            export_dir=export_dir,
+            plan=plan,
+            config=config,
+        )
+
+
 def test_module_import_is_cpu_safe() -> None:
     script = """
 import sys
@@ -701,6 +805,346 @@ def test_qlora_fold_training_publishes_complete_atomic_no_overwrite_bundle(
             runtime_factory=unexpected_factory,
         )
     assert factory_called is False
+
+
+def test_qlora_training_resume_keeps_checkpoint_and_reuses_exact_contract(
+    tmp_path: Path,
+) -> None:
+    preflight, smoke = _gate_artifacts(tmp_path)
+    manifest = _split_manifest()
+    training_ids = eligible_training_ids(manifest, 0, ())
+    validation_ids = eligible_validation_ids(manifest, 0, ())
+    source_manifest = _source_manifest_evidence(tmp_path)
+    output = tmp_path / "adapter-fold-0"
+    resume_dir = tmp_path / "resume-fold-0"
+    interrupted = _ResumableTrainingRuntime(fail_after_checkpoint=True)
+
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        train_qlora_fold(
+            _records(training_ids),
+            _records(validation_ids),
+            split_manifest=manifest,
+            fold=0,
+            excluded_ids=(),
+            **_data_provenance_args(),
+            source_manifest=source_manifest,
+            preflight_artifact=preflight,
+            gpu_smoke_artifact=smoke,
+            output_dir=output,
+            gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+            resume_dir=resume_dir,
+            runtime_factory=lambda _evidence: interrupted,
+        )
+
+    checkpoint = resume_dir / "trainer" / "checkpoint-7"
+    contract = json.loads((resume_dir / "resume-contract.json").read_text(encoding="utf-8"))
+    assert interrupted.closed is True
+    assert checkpoint.is_dir()
+    assert contract["runtime_gate"]["preflight_sha256"] == hashlib.sha256(
+        preflight.read_bytes()
+    ).hexdigest()
+    assert contract["runtime_gate"]["gpu_smoke_sha256"] == hashlib.sha256(
+        smoke.read_bytes()
+    ).hexdigest()
+    assert contract["source_manifest"]["sha256"] == source_manifest.sha256
+    assert contract["tokenizer_evidence"]["tokenizer_json_sha256"]
+    assert contract["checkpoint_retention"] == "retain_all"
+
+    resumed = _ResumableTrainingRuntime()
+    artifact = train_qlora_fold(
+        _records(training_ids),
+        _records(validation_ids),
+        split_manifest=manifest,
+        fold=0,
+        excluded_ids=(),
+        **_data_provenance_args(),
+        source_manifest=source_manifest,
+        preflight_artifact=preflight,
+        gpu_smoke_artifact=smoke,
+        output_dir=output,
+        gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+        resume_dir=resume_dir,
+        runtime_factory=lambda _evidence: resumed,
+    )
+
+    assert artifact.path == str(output.resolve())
+    assert resumed.work_dir == resume_dir.resolve()
+    assert resumed.resume_checkpoint == checkpoint.resolve()
+    assert resumed.retain_checkpoints is True
+    assert checkpoint.is_dir()
+    assert not tuple(tmp_path.glob(".adapter-fold-0.training-*"))
+
+
+def test_qlora_training_resume_rejects_contract_mismatch_and_quarantines_corruption(
+    tmp_path: Path,
+) -> None:
+    preflight, smoke = _gate_artifacts(tmp_path)
+    manifest = _split_manifest()
+    training_ids = eligible_training_ids(manifest, 0, ())
+    validation_ids = eligible_validation_ids(manifest, 0, ())
+    source_manifest = _source_manifest_evidence(tmp_path)
+    resume_dir = tmp_path / "resume-fold-0"
+
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        train_qlora_fold(
+            _records(training_ids),
+            _records(validation_ids),
+            split_manifest=manifest,
+            fold=0,
+            excluded_ids=(),
+            **_data_provenance_args(),
+            source_manifest=source_manifest,
+            preflight_artifact=preflight,
+            gpu_smoke_artifact=smoke,
+            output_dir=tmp_path / "first-output",
+            gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+            resume_dir=resume_dir,
+            runtime_factory=lambda _evidence: _ResumableTrainingRuntime(
+                fail_after_checkpoint=True
+            ),
+        )
+
+    called = False
+
+    def unexpected_factory(_evidence: object) -> _TrainingRuntime:
+        nonlocal called
+        called = True
+        return _TrainingRuntime()
+
+    changed_data = _data_provenance_args()
+    changed_data["train_file_sha256"] = "f" * 64
+    with pytest.raises(GateBValidationError, match="contract mismatches"):
+        train_qlora_fold(
+            _records(training_ids),
+            _records(validation_ids),
+            split_manifest=manifest,
+            fold=0,
+            excluded_ids=(),
+            **changed_data,
+            source_manifest=source_manifest,
+            preflight_artifact=preflight,
+            gpu_smoke_artifact=smoke,
+            output_dir=tmp_path / "mismatched-output",
+            gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+            resume_dir=resume_dir,
+            runtime_factory=unexpected_factory,
+        )
+    assert called is False
+
+    checkpoint_contract = resume_dir / "trainer" / "checkpoint-7" / "resume-checkpoint.json"
+    checkpoint_payload = json.loads(checkpoint_contract.read_text(encoding="utf-8"))
+    checkpoint_payload["contract_sha256"] = "f" * 64
+    checkpoint_contract.write_text(json.dumps(checkpoint_payload), encoding="utf-8")
+    with pytest.raises(GateBValidationError, match="checkpoint resume contract"):
+        train_qlora_fold(
+            _records(training_ids),
+            _records(validation_ids),
+            split_manifest=manifest,
+            fold=0,
+            excluded_ids=(),
+            **_data_provenance_args(),
+            source_manifest=source_manifest,
+            preflight_artifact=preflight,
+            gpu_smoke_artifact=smoke,
+            output_dir=tmp_path / "checkpoint-mismatch-output",
+            gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+            resume_dir=resume_dir,
+            runtime_factory=unexpected_factory,
+        )
+    assert called is False
+    checkpoint_payload["contract_sha256"] = json.loads(
+        (resume_dir / "resume-contract.json").read_text(encoding="utf-8")
+    )["contract_sha256"]
+    checkpoint_contract.write_text(json.dumps(checkpoint_payload), encoding="utf-8")
+
+    (resume_dir / "trainer" / "checkpoint-7" / "optimizer.pt").unlink()
+    recovered = _ResumableTrainingRuntime()
+    artifact = train_qlora_fold(
+        _records(training_ids),
+        _records(validation_ids),
+        split_manifest=manifest,
+        fold=0,
+        excluded_ids=(),
+        **_data_provenance_args(),
+        source_manifest=source_manifest,
+        preflight_artifact=preflight,
+        gpu_smoke_artifact=smoke,
+        output_dir=tmp_path / "corrupt-output",
+        gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+        resume_dir=resume_dir,
+        runtime_factory=lambda _evidence: recovered,
+    )
+    forensic_root = resume_dir / "forensics" / "attempt-000001"
+    forensic_manifest = json.loads(
+        (forensic_root / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert artifact.path == str((tmp_path / "corrupt-output").resolve())
+    assert recovered.resume_checkpoint is None
+    assert not (resume_dir / "trainer" / "checkpoint-7").exists()
+    assert (forensic_root / "checkpoint-7" / "adapter_config.json").is_file()
+    assert not (forensic_root / "checkpoint-7" / "optimizer.pt").exists()
+    assert forensic_manifest["contract_sha256"] == json.loads(
+        (resume_dir / "resume-contract.json").read_text(encoding="utf-8")
+    )["contract_sha256"]
+    assert forensic_manifest["entries"] == [
+        {
+            "checkpoint": "checkpoint-7",
+            "global_step": 7,
+            "reason": "corrupt_after_contract_binding",
+        }
+    ]
+
+
+def test_qlora_training_resume_uses_previous_complete_checkpoint_after_partial_save(
+    tmp_path: Path,
+) -> None:
+    preflight, smoke = _gate_artifacts(tmp_path)
+    manifest = _split_manifest()
+    training_ids = eligible_training_ids(manifest, 0, ())
+    validation_ids = eligible_validation_ids(manifest, 0, ())
+    source_manifest = _source_manifest_evidence(tmp_path)
+    output = tmp_path / "adapter-fold-0"
+    resume_dir = tmp_path / "resume-fold-0"
+
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        train_qlora_fold(
+            _records(training_ids),
+            _records(validation_ids),
+            split_manifest=manifest,
+            fold=0,
+            excluded_ids=(),
+            **_data_provenance_args(),
+            source_manifest=source_manifest,
+            preflight_artifact=preflight,
+            gpu_smoke_artifact=smoke,
+            output_dir=output,
+            gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+            resume_dir=resume_dir,
+            runtime_factory=lambda _evidence: _ResumableTrainingRuntime(
+                fail_after_checkpoint=True
+            ),
+        )
+
+    complete = resume_dir / "trainer" / "checkpoint-7"
+    partial = resume_dir / "trainer" / "checkpoint-8"
+    partial.mkdir()
+    (partial / "partial-state.bin").write_bytes(b"interrupted checkpoint\n")
+
+    resumed = _ResumableTrainingRuntime()
+    artifact = train_qlora_fold(
+        _records(training_ids),
+        _records(validation_ids),
+        split_manifest=manifest,
+        fold=0,
+        excluded_ids=(),
+        **_data_provenance_args(),
+        source_manifest=source_manifest,
+        preflight_artifact=preflight,
+        gpu_smoke_artifact=smoke,
+        output_dir=output,
+        gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+        resume_dir=resume_dir,
+        runtime_factory=lambda _evidence: resumed,
+    )
+
+    forensic_root = resume_dir / "forensics" / "attempt-000001"
+    assert artifact.path == str(output.resolve())
+    assert resumed.resume_checkpoint == complete.resolve()
+    assert complete.is_dir()
+    assert not partial.exists()
+    assert (forensic_root / "checkpoint-8" / "partial-state.bin").read_bytes() == (
+        b"interrupted checkpoint\n"
+    )
+    assert json.loads((forensic_root / "manifest.json").read_text(encoding="utf-8"))[
+        "entries"
+    ] == [
+        {
+            "checkpoint": "checkpoint-8",
+            "global_step": 8,
+            "reason": "missing_resume_contract",
+        }
+    ]
+
+
+def test_qlora_training_resume_rejects_missing_checkpoint_after_interruption(
+    tmp_path: Path,
+) -> None:
+    preflight, smoke = _gate_artifacts(tmp_path)
+    manifest = _split_manifest()
+    training_ids = eligible_training_ids(manifest, 0, ())
+    validation_ids = eligible_validation_ids(manifest, 0, ())
+    source_manifest = _source_manifest_evidence(tmp_path)
+    resume_dir = tmp_path / "resume-fold-0"
+
+    with pytest.raises(RuntimeError, match="before checkpoint"):
+        train_qlora_fold(
+            _records(training_ids),
+            _records(validation_ids),
+            split_manifest=manifest,
+            fold=0,
+            excluded_ids=(),
+            **_data_provenance_args(),
+            source_manifest=source_manifest,
+            preflight_artifact=preflight,
+            gpu_smoke_artifact=smoke,
+            output_dir=tmp_path / "first-output",
+            gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+            resume_dir=resume_dir,
+            runtime_factory=lambda _evidence: _ResumableTrainingRuntime(
+                fail_without_checkpoint=True
+            ),
+        )
+
+    factory_called = False
+
+    def unexpected_factory(_evidence: object) -> _TrainingRuntime:
+        nonlocal factory_called
+        factory_called = True
+        return _TrainingRuntime()
+
+    with pytest.raises(GateBValidationError, match="no checkpoint"):
+        train_qlora_fold(
+            _records(training_ids),
+            _records(validation_ids),
+            split_manifest=manifest,
+            fold=0,
+            excluded_ids=(),
+            **_data_provenance_args(),
+            source_manifest=source_manifest,
+            preflight_artifact=preflight,
+            gpu_smoke_artifact=smoke,
+            output_dir=tmp_path / "second-output",
+            gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+            resume_dir=resume_dir,
+            runtime_factory=unexpected_factory,
+        )
+    assert factory_called is False
+
+
+def test_qlora_training_resume_requires_runtime_resume_keywords(tmp_path: Path) -> None:
+    preflight, smoke = _gate_artifacts(tmp_path)
+    manifest = _split_manifest()
+    training_ids = eligible_training_ids(manifest, 0, ())
+    validation_ids = eligible_validation_ids(manifest, 0, ())
+    legacy = _TrainingRuntime()
+
+    with pytest.raises(GateBValidationError, match="requires runtime.train"):
+        train_qlora_fold(
+            _records(training_ids),
+            _records(validation_ids),
+            split_manifest=manifest,
+            fold=0,
+            excluded_ids=(),
+            **_data_provenance_args(),
+            source_manifest=_source_manifest_evidence(tmp_path),
+            preflight_artifact=preflight,
+            gpu_smoke_artifact=smoke,
+            output_dir=tmp_path / "adapter-fold-0",
+            gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+            resume_dir=tmp_path / "resume-fold-0",
+            runtime_factory=lambda _evidence: legacy,
+        )
+    assert legacy.closed is True
 
 
 def test_rationale_qlora_training_publishes_v4_target_provenance(
@@ -1298,5 +1742,14 @@ def test_training_arguments_follow_every_locked_optimizer_schedule_policy(tmp_pa
     assert arguments.kwargs["max_grad_norm"] == 1.0
     assert arguments.kwargs["eval_steps"] == 100
     assert arguments.kwargs["save_steps"] == 100
+    assert arguments.kwargs["save_total_limit"] == 2
     assert arguments.kwargs["bf16"] is True
     assert arguments.kwargs["gradient_checkpointing"] is True
+
+    retained = runtime_module._training_arguments(
+        FakeArguments,
+        output_dir=tmp_path / "persistent-trainer",
+        config=DEFAULT_GATE_B_CONFIG,
+        retain_checkpoints=True,
+    )
+    assert retained.kwargs["save_total_limit"] is None

@@ -28,6 +28,11 @@ Accuracy가 높아도 정수 추출·CSV schema·offline cache 중 하나가 틀
   rationale v4는 `reference_answer_in_prompt=false`인 exact fold-training corpus의 candidate
   config byte/semantic SHA, records/manifest/audit SHA를 adapter와 OOF evidence가 다시
   검증한다. inference route는 둘 다 고정 direct-answer parser다.
+- concise-rationale source는 ChatGPT-login Codex teacher의 question-only immutable ledger에서만
+  올 수 있다. raw event/prompt/rationale은 private artifact로 남기고 public/status/inference
+  evidence에는 plan/config/ID-set SHA, aggregate usage/latency, exact-match/audit counts만 남긴다.
+  teacher 단계는 training-only이며 frozen inference/leaderboard/test에는 Codex/API/network를
+  전혀 사용하지 않는다.
 - production validator와 별개로 `verify-submission-independent`가 primary data/submission
   모듈을 import하지 않는 최소 CSV parser로 header·ID·순서·정수를 교차검증한다.
 
