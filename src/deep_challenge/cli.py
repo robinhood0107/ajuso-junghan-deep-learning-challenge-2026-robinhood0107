@@ -40,6 +40,7 @@ from .gate_b import (
     DEFAULT_GATE_B_CONFIG,
     GateBConfig,
     create_development_execution_evidence,
+    read_development_resume_status,
     run_development_baseline,
     write_development_artifacts,
 )
@@ -51,6 +52,7 @@ from .gate_b_runtime import (
     RuntimeGateEvidence,
     create_adapted_development_backend,
     create_base_development_backend,
+    read_training_resume_status,
     train_qlora_fold,
 )
 from .gate_b_selection import (
@@ -62,8 +64,10 @@ from .gate_b_selection import (
     compare_cross_fold_development_runs,
     compare_development_runs,
     decide_candidate_probe_promotion,
+    freeze_base_development_selection,
     freeze_development_selection,
     require_base_development_artifact,
+    verify_base_development_oof,
 )
 from .gate_b_sft_preflight import run_sft_encoding_preflight
 from .gpu_smoke import run_final_gpu_smoke
@@ -151,6 +155,10 @@ from .tokenizer_profile import (
     DEFAULT_SYSTEM_PROMPT,
     load_and_profile_datasets,
     load_pinned_tokenizer,
+)
+from .workflow_status import (
+    development_workflow_status,
+    training_workflow_status,
 )
 
 _HARD_CLUSTER_METHOD = (
@@ -1015,6 +1023,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     development.set_defaults(handler=_command_gate_b_development)
 
+    development_status = subparsers.add_parser(
+        "gate-b-development-status",
+        help="read one raw-free resumable development-generation status",
+    )
+    development_status.add_argument("--resume-dir", required=True, type=Path)
+    development_status.add_argument("--output", type=Path)
+    development_status.set_defaults(handler=_command_gate_b_development_status)
+
     parser_golden = subparsers.add_parser(
         "audit-parser-golden",
         help="validate one development bundle and emit redacted parser-golden evidence",
@@ -1052,6 +1068,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     train_fold.set_defaults(handler=_command_gate_b_train_fold)
+
+    training_status = subparsers.add_parser(
+        "gate-b-training-status",
+        help="read one raw-free persistent QLoRA training status",
+    )
+    training_status.add_argument("--resume-dir", required=True, type=Path)
+    training_status.add_argument("--output", type=Path)
+    training_status.set_defaults(handler=_command_gate_b_training_status)
 
     compare = subparsers.add_parser(
         "compare-development",
@@ -1137,6 +1161,32 @@ def build_parser() -> argparse.ArgumentParser:
     compare_oof.add_argument("--output", required=True, type=Path)
     compare_oof.set_defaults(handler=_command_compare_development_oof)
 
+    verify_base_oof = subparsers.add_parser(
+        "verify-base-development-oof",
+        help="qualify complete fixed-base OOF evidence without a candidate",
+    )
+    verify_base_oof.add_argument("--train", required=True, type=Path)
+    verify_base_oof.add_argument("--train-exclusions", required=True, type=Path)
+    verify_base_oof.add_argument("--split-artifact", required=True, type=Path)
+    verify_base_oof.add_argument("--deployment-fold", required=True, type=int)
+    verify_base_oof.add_argument("--base-label", required=True)
+    verify_base_oof.add_argument(
+        "--base-run",
+        required=True,
+        action="append",
+        nargs=3,
+        metavar=("FOLD", "RECORDS_JSONL", "RUN_MANIFEST"),
+        help="one fixed-base validation run; repeat exactly once per fold",
+    )
+    verify_base_oof.add_argument("--expected-train-sha256", required=True)
+    verify_base_oof.add_argument("--expected-exclusions-sha256", required=True)
+    verify_base_oof.add_argument("--expected-exclusion-count", required=True, type=int)
+    verify_base_oof.add_argument("--expected-split-sha256", required=True)
+    verify_base_oof.add_argument("--development-shard", required=True, type=Path)
+    verify_base_oof.add_argument("--expected-development-shard-sha256", required=True)
+    verify_base_oof.add_argument("--output", required=True, type=Path)
+    verify_base_oof.set_defaults(handler=_command_verify_base_development_oof)
+
     freeze = subparsers.add_parser(
         "freeze-development-selection",
         help="freeze primary/fallback methods from development evidence",
@@ -1150,6 +1200,19 @@ def build_parser() -> argparse.ArgumentParser:
     freeze.add_argument("--output", required=True, type=Path)
     freeze.add_argument("--confirm-no-leaderboard-selection", action="store_true")
     freeze.set_defaults(handler=_command_freeze_development_selection)
+
+    freeze_base = subparsers.add_parser(
+        "freeze-development-base",
+        help="freeze one fixed-base method from qualified complete OOF evidence",
+    )
+    freeze_base.add_argument("--base-oof-artifact", required=True, type=Path)
+    freeze_base.add_argument("--primary-label", required=True)
+    freeze_base.add_argument("--decision-note", required=True)
+    freeze_base.add_argument("--source-manifest", required=True, type=Path)
+    freeze_base.add_argument("--lockfile", required=True, type=Path)
+    freeze_base.add_argument("--output", required=True, type=Path)
+    freeze_base.add_argument("--confirm-no-leaderboard-selection", action="store_true")
+    freeze_base.set_defaults(handler=_command_freeze_development_base)
 
     holdout = subparsers.add_parser(
         "gate-b-locked-holdout-evaluate",
@@ -3219,6 +3282,16 @@ def _command_gate_b_development(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_gate_b_development_status(args: argparse.Namespace) -> int:
+    status = development_workflow_status(
+        read_development_resume_status(args.resume_dir)
+    ).as_dict()
+    if args.output is not None:
+        write_json_atomic(args.output, status)
+    print(json.dumps(status, sort_keys=True))
+    return 0
+
+
 def _command_audit_parser_golden(args: argparse.Namespace) -> int:
     result = audit_development_parser_golden(
         args.records,
@@ -3319,6 +3392,16 @@ def _command_gate_b_train_fold(args: argparse.Namespace) -> int:
         config=config,
     )
     print(json.dumps(asdict(result), sort_keys=True))
+    return 0
+
+
+def _command_gate_b_training_status(args: argparse.Namespace) -> int:
+    status = training_workflow_status(
+        read_training_resume_status(args.resume_dir)
+    ).as_dict()
+    if args.output is not None:
+        write_json_atomic(args.output, status)
+    print(json.dumps(status, sort_keys=True))
     return 0
 
 
@@ -5126,6 +5209,71 @@ def _command_compare_development_oof(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_verify_base_development_oof(args: argparse.Namespace) -> int:
+    exclusions, manifest = _load_gate_b_preclaim_contract(args)
+    development = load_development_cv_shard(
+        args.development_shard,
+        source_train_sha256=sha256_file(args.train),
+        split_manifest=manifest,
+        split_artifact_sha256=sha256_file(args.split_artifact),
+        expected_bundle_sha256=args.expected_development_shard_sha256,
+    )
+    eligible_ids = tuple(
+        sorted(
+            problem_id
+            for fold in range(manifest.n_folds)
+            for problem_id in eligible_validation_ids(
+                manifest, fold, exclusions.ids
+            )
+        )
+    )
+    development_records = _records_for_ids(development.dataset.records, eligible_ids)
+    fold_runs: list[FoldDevelopmentRun] = []
+    for values in args.base_run:
+        try:
+            fold = int(values[0])
+        except ValueError as exc:
+            raise ValueError("--base-run FOLD must be an integer") from exc
+        fold_runs.append(
+            FoldDevelopmentRun(
+                fold=fold,
+                label=args.base_label,
+                records_path=Path(values[1]),
+                manifest_path=Path(values[2]),
+                method_kind=FIXED_BASE_METHOD_KIND,
+            )
+        )
+    result = verify_base_development_oof(
+        args.base_label,
+        tuple(fold_runs),
+        development_records,
+        split_manifest=manifest,
+        deployment_fold=args.deployment_fold,
+        excluded_ids=exclusions.ids,
+        train_file_sha256=sha256_file(args.train),
+        exclusions_file_sha256=exclusions.manifest.sha256,
+        split_artifact_sha256=sha256_file(args.split_artifact),
+        development_shard_sha256=args.expected_development_shard_sha256,
+        output_path=args.output,
+    )
+    print(
+        json.dumps(
+            {
+                "output": result.path,
+                "sha256": result.sha256,
+                "payload_sha256": result.payload_sha256,
+                "base_label": args.base_label,
+                "fold_count": manifest.n_folds,
+                "deployment_fold": args.deployment_fold,
+                "qualified": True,
+                "holdout_accessed": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def _command_decide_candidate_probe(args: argparse.Namespace) -> int:
     result = decide_candidate_probe_promotion(
         args.comparison_artifact,
@@ -5175,6 +5323,37 @@ def _command_freeze_development_selection(args: argparse.Namespace) -> int:
                 "payload_sha256": result.payload_sha256,
                 "primary_label": args.primary_label,
                 "fallback_label": args.fallback_label,
+                "selection_frozen": True,
+                "holdout_accessed": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _command_freeze_development_base(args: argparse.Namespace) -> int:
+    if not args.confirm_no_leaderboard_selection:
+        raise ValueError(
+            "--confirm-no-leaderboard-selection is required before freezing methods"
+        )
+    result = freeze_base_development_selection(
+        args.base_oof_artifact,
+        primary_label=args.primary_label,
+        decision_note=args.decision_note,
+        source_manifest_path=args.source_manifest,
+        lockfile_path=args.lockfile,
+        output_path=args.output,
+    )
+    print(
+        json.dumps(
+            {
+                "output": result.path,
+                "sha256": result.sha256,
+                "payload_sha256": result.payload_sha256,
+                "primary_label": args.primary_label,
+                "fallback_label": None,
+                "routing_policy": "primary_only",
                 "selection_frozen": True,
                 "holdout_accessed": False,
             },

@@ -35,10 +35,12 @@ from deep_challenge.gate_b_selection import (
     compare_cross_fold_development_runs,
     compare_development_runs,
     decide_candidate_probe_promotion,
+    freeze_base_development_selection,
     freeze_development_selection,
     require_base_development_artifact,
     validate_frozen_selection_methods,
     validate_locked_holdout_access,
+    verify_base_development_oof,
 )
 from deep_challenge.provenance import (
     build_source_tree_manifest,
@@ -66,13 +68,13 @@ class _Backend:
         return GenerationResult(text, "stop", 10, 3, 1234)
 
 
-def _fixture() -> tuple[SplitManifest, tuple[MathRecord, ...]]:
+def _fixture(*, n_folds: int = 2) -> tuple[SplitManifest, tuple[MathRecord, ...]]:
     ids = tuple(f"train-{index:06d}" for index in range(1, 13))
     groups = build_group_clusters(ids)
     manifest = make_grouped_split_manifest(
         ids,
         groups,
-        n_folds=2,
+        n_folds=n_folds,
         holdout_fraction=0.25,
         seed=7,
         version="test-v1",
@@ -791,6 +793,134 @@ def test_cross_fold_comparison_pools_every_fold_and_freezes_deployment_fold(
         fold=0,
     )
     assert validated.primary_label == "qlora"
+
+
+def test_base_only_oof_qualifies_freezes_and_authorizes_holdout(
+    tmp_path: Path,
+) -> None:
+    manifest, records = _fixture(n_folds=5)
+    supplied: list[FoldDevelopmentRun] = []
+    for fold in range(manifest.n_folds):
+        base = _write_run(
+            tmp_path,
+            label="base",
+            manifest=manifest,
+            all_records=records,
+            fold=fold,
+        )
+        supplied.append(
+            FoldDevelopmentRun(
+                fold=fold,
+                label="base",
+                records_path=base.records_path,
+                manifest_path=base.manifest_path,
+                method_kind=FIXED_BASE_METHOD_KIND,
+            )
+        )
+    eligible_ids = tuple(
+        sorted(
+            problem_id
+            for fold in range(manifest.n_folds)
+            for problem_id in eligible_validation_ids(manifest, fold, ())
+        )
+    )
+    by_id = {record.id: record for record in records}
+    eligible_records = tuple(by_id[problem_id] for problem_id in eligible_ids)
+    oof = tmp_path / "base-oof.json"
+    verify_base_development_oof(
+        "base",
+        supplied,
+        eligible_records,
+        split_manifest=manifest,
+        deployment_fold=0,
+        excluded_ids=(),
+        train_file_sha256="1" * 64,
+        exclusions_file_sha256="2" * 64,
+        split_artifact_sha256="3" * 64,
+        development_shard_sha256="4" * 64,
+        output_path=oof,
+    )
+    qualified = json.loads(oof.read_text(encoding="utf-8"))
+    assert qualified["schema_version"] == "gate-b-base-development-oof-v1"
+    assert qualified["problem_count"] == len(eligible_ids)
+    assert qualified["run_order"] == ["base"]
+    assert qualified["qualification"] == {
+        "evidence_scope": "complete_out_of_fold_union",
+        "fixed_base_only": True,
+        "exact_fold_coverage": True,
+        "validation_ids_unique": True,
+        "run_evidence_unique": True,
+        "checkpoint_sha256": BASE_MODEL_CHECKPOINT_SHA256,
+        "training_method_fingerprint": qualified["runs"]["base"][
+            "training_method_fingerprint"
+        ],
+    }
+
+    source_manifest = tmp_path / "source.json"
+    source_manifest.write_text(
+        json.dumps({"tree_sha256": "c" * 64, "files": [{"path": "x"}]}) + "\n",
+        encoding="utf-8",
+    )
+    lockfile = tmp_path / "uv.lock"
+    lockfile.write_text("version = 1\n", encoding="utf-8")
+    freeze = tmp_path / "base-freeze.json"
+    freeze_base_development_selection(
+        oof,
+        primary_label="base",
+        decision_note="Complete fixed-base OOF evidence selected the fallback path.",
+        source_manifest_path=source_manifest,
+        lockfile_path=lockfile,
+        output_path=freeze,
+        now=lambda: datetime(2026, 8, 11, tzinfo=UTC),
+    )
+    frozen = json.loads(freeze.read_text(encoding="utf-8"))
+    assert frozen["schema_version"] == "gate-b-base-selection-freeze-v1"
+    assert frozen["selection_kind"] == "base_only_complete_oof"
+    assert frozen["primary"]["label"] == "base"
+    assert frozen["fallback"] is None
+    assert frozen["routing_policy"] == "primary_only"
+    methods = validate_frozen_selection_methods(
+        freeze,
+        split_manifest=manifest,
+        train_file_sha256="1" * 64,
+        exclusions_file_sha256="2" * 64,
+        excluded_ids_sha256=hashlib.sha256(b"[]").hexdigest(),
+        split_artifact_sha256="3" * 64,
+        development_shard_sha256="4" * 64,
+        fold=0,
+    )
+    assert methods.primary_label == "base"
+    assert methods.fallback_label is None
+
+    ledger = tmp_path / "holdout-ledger"
+    ledger.mkdir()
+    receipt = authorize_locked_holdout_once(
+        freeze,
+        split_manifest=manifest,
+        excluded_ids=(),
+        acknowledgement=HOLDOUT_ACCESS_ACKNOWLEDGEMENT,
+        ledger_root=ledger,
+        now=lambda: datetime(2026, 8, 11, tzinfo=UTC),
+    )
+    access = validate_locked_holdout_access(
+        receipt.path,
+        freeze_artifact=freeze,
+        split_manifest=manifest,
+        excluded_ids=(),
+    )
+    assert access.primary_label == "base"
+    assert access.fallback_label is None
+
+    with pytest.raises(GateBValidationError, match="schema"):
+        freeze_development_selection(
+            oof,
+            primary_label="base",
+            fallback_label=None,
+            decision_note="Cross-load must fail.",
+            source_manifest_path=source_manifest,
+            lockfile_path=lockfile,
+            output_path=tmp_path / "must-not-exist.json",
+        )
 
 
 def test_rationale_adapter_provenance_survives_oof_comparison_and_freeze(

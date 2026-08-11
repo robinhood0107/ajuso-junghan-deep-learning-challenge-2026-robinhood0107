@@ -77,6 +77,8 @@ _TRAINING_RESUME_CONTRACT_FILENAME = "resume-contract.json"
 _TRAINING_RESUME_STARTED_FILENAME = "training-started.json"
 _TRAINING_RESUME_LOCK_FILENAME = ".training-resume.lock"
 _TRAINING_RESUME_CHECKPOINT_FILENAME = "resume-checkpoint.json"
+_TRAINING_RESUME_COMPLETE_SCHEMA = "gate-b-qlora-training-resume-complete-v1"
+_TRAINING_RESUME_COMPLETE_FILENAME = "training-complete.json"
 _TRAINING_RESUME_FORENSIC_DIRECTORY = "forensics"
 _TRAINING_RESUME_FORENSIC_SCHEMA = "gate-b-qlora-training-forensic-v1"
 _TRAINER_CHECKPOINT_RE = re.compile(r"checkpoint-([1-9][0-9]*)\Z")
@@ -281,6 +283,17 @@ class _TrainingResumeContext:
 
     root: Path
     contract_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingResumeStatus:
+    """Raw-free monitor view of one persistent QLoRA training job."""
+
+    contract_sha256: str
+    state: str
+    process_id: int | None
+    latest_checkpoint_step: int | None
+    completion_artifact_sha256: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -645,7 +658,7 @@ def train_qlora_fold(
                 raise GateBValidationError(
                     "published adapter digest changed after atomic rename"
                 )
-            return TrainingArtifact(
+            artifact = TrainingArtifact(
                 path=published.path,
                 artifact_sha256=published.artifact_sha256,
                 manifest_sha256=published.manifest_sha256,
@@ -655,6 +668,9 @@ def train_qlora_fold(
                 validation_count=len(plan.validation_ids),
                 training_target_kind=plan.training_target_kind,
             )
+            if resume is not None:
+                _mark_training_resume_complete(resume, artifact)
+            return artifact
     finally:
         if runtime is not None:
             with suppress(Exception):
@@ -1617,6 +1633,140 @@ def _validated_source_manifest_evidence(
     )
 
 
+def read_training_resume_status(resume_dir: str | Path) -> TrainingResumeStatus:
+    """Read a raw-free QLoRA resume status without loading training examples."""
+
+    supplied = Path(resume_dir)
+    if supplied.is_symlink():
+        raise GateBValidationError("resume_dir must not be a symbolic link")
+    root = supplied.resolve(strict=True)
+    if not root.is_dir():
+        raise GateBValidationError("resume_dir must be a real directory")
+    contract_sha256 = _training_resume_contract_from_root(root)
+    completion_path = root / _TRAINING_RESUME_COMPLETE_FILENAME
+    if completion_path.exists() or completion_path.is_symlink():
+        if completion_path.is_symlink() or not completion_path.is_file():
+            raise GateBValidationError("training completion marker is unsafe")
+        _, payload, _ = _load_json_artifact(
+            completion_path, "training completion marker"
+        )
+        expected_keys = {
+            "schema_version",
+            "contract_sha256",
+            "artifact_path",
+            "artifact_sha256",
+            "manifest_sha256",
+            "checksums_sha256",
+            "file_count",
+            "training_count",
+            "validation_count",
+        }
+        if set(payload) != expected_keys:
+            raise GateBValidationError("training completion marker schema is invalid")
+        if (
+            payload.get("schema_version") != _TRAINING_RESUME_COMPLETE_SCHEMA
+            or payload.get("contract_sha256") != contract_sha256
+        ):
+            raise GateBValidationError("training completion marker contract is invalid")
+        artifact_path = payload.get("artifact_path")
+        if (
+            not isinstance(artifact_path, str)
+            or not artifact_path
+            or artifact_path != artifact_path.strip()
+        ):
+            raise GateBValidationError("completed adapter path is invalid")
+        artifact = validate_adapter_artifact(
+            artifact_path,
+            config=DEFAULT_GATE_B_CONFIG,
+        )
+        expected_artifact = {
+            "artifact_sha256": artifact.artifact_sha256,
+            "manifest_sha256": artifact.manifest_sha256,
+            "checksums_sha256": artifact.checksums_sha256,
+            "file_count": artifact.file_count,
+            "training_count": artifact.training_count,
+            "validation_count": artifact.validation_count,
+        }
+        mismatched = [
+            key for key, value in expected_artifact.items() if payload.get(key) != value
+        ]
+        if mismatched:
+            raise GateBValidationError(
+                f"training completion marker changed adapter evidence: {mismatched!r}"
+            )
+        return TrainingResumeStatus(
+            contract_sha256=contract_sha256,
+            state="complete",
+            process_id=None,
+            latest_checkpoint_step=None,
+            completion_artifact_sha256=artifact.artifact_sha256,
+        )
+
+    lock_path = root / _TRAINING_RESUME_LOCK_FILENAME
+    if lock_path.exists() or lock_path.is_symlink():
+        if lock_path.is_symlink() or not lock_path.is_file():
+            raise GateBValidationError("training resume lock is unsafe")
+        _, lock, _ = _load_json_artifact(lock_path, "training resume lock")
+        if set(lock) != {"schema_version", "contract_sha256", "pid"}:
+            raise GateBValidationError("training resume lock schema is invalid")
+        process_id = lock.get("pid")
+        if (
+            lock.get("schema_version") != _TRAINING_RESUME_CONTRACT_SCHEMA
+            or lock.get("contract_sha256") != contract_sha256
+            or isinstance(process_id, bool)
+            or not isinstance(process_id, int)
+            or process_id <= 0
+        ):
+            raise GateBValidationError("training resume lock contract is invalid")
+        return TrainingResumeStatus(
+            contract_sha256=contract_sha256,
+            state="running" if _training_process_is_alive(process_id) else "retryable",
+            process_id=process_id,
+            latest_checkpoint_step=None,
+            completion_artifact_sha256=None,
+        )
+
+    marker_path = root / _TRAINING_RESUME_STARTED_FILENAME
+    _validate_training_resume_started(marker_path, contract_sha256)
+    if not marker_path.exists():
+        return TrainingResumeStatus(
+            contract_sha256=contract_sha256,
+            state="ready",
+            process_id=None,
+            latest_checkpoint_step=None,
+            completion_artifact_sha256=None,
+        )
+    trainer_root = root / "trainer"
+    if trainer_root.is_symlink() or not trainer_root.is_dir():
+        return TrainingResumeStatus(
+            contract_sha256=contract_sha256,
+            state="terminal_failed",
+            process_id=None,
+            latest_checkpoint_step=None,
+            completion_artifact_sha256=None,
+        )
+    valid_steps: list[int] = []
+    for candidate in trainer_root.iterdir():
+        match = _TRAINER_CHECKPOINT_RE.fullmatch(candidate.name)
+        if match is None:
+            continue
+        step = int(match.group(1))
+        reason = _recoverable_trainer_checkpoint_reason(
+            candidate,
+            expected_global_step=step,
+            contract_sha256=contract_sha256,
+        )
+        if reason is None:
+            valid_steps.append(step)
+    return TrainingResumeStatus(
+        contract_sha256=contract_sha256,
+        state="retryable" if valid_steps else "terminal_failed",
+        process_id=None,
+        latest_checkpoint_step=max(valid_steps) if valid_steps else None,
+        completion_artifact_sha256=None,
+    )
+
+
 def _prepare_training_resume_context(
     resume_dir: str | Path | None,
     *,
@@ -1810,12 +1960,43 @@ def _locked_training_resume_checkpoint(
         }
     )
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
-    try:
-        descriptor = os.open(lock_path, flags, 0o600)
-    except FileExistsError as exc:
-        raise GateBValidationError(
-            "training resume lock exists; refusing concurrent or stale resume"
-        ) from exc
+    descriptor: int | None = None
+    for _ in range(2):
+        try:
+            descriptor = os.open(lock_path, flags, 0o600)
+            break
+        except FileExistsError as exc:
+            if lock_path.is_symlink() or not lock_path.is_file():
+                raise GateBValidationError("training resume lock is unsafe") from exc
+            before = lock_path.stat(follow_symlinks=False)
+            _, existing, _ = _load_json_artifact(lock_path, "training resume lock")
+            if set(existing) != {"schema_version", "contract_sha256", "pid"}:
+                raise GateBValidationError("training resume lock schema is invalid") from exc
+            stale_pid = existing.get("pid")
+            if (
+                existing.get("schema_version") != _TRAINING_RESUME_CONTRACT_SCHEMA
+                or existing.get("contract_sha256") != context.contract_sha256
+                or isinstance(stale_pid, bool)
+                or not isinstance(stale_pid, int)
+                or stale_pid <= 0
+            ):
+                raise GateBValidationError("training resume lock contract is invalid") from exc
+            if _training_process_is_alive(stale_pid):
+                raise GateBValidationError(
+                    "training resume lock belongs to an active process"
+                ) from exc
+            try:
+                current = lock_path.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if (before.st_dev, before.st_ino) != (current.st_dev, current.st_ino):
+                continue
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                continue
+    if descriptor is None:
+        raise GateBValidationError("training resume lock changed during stale recovery")
     try:
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(payload)
@@ -1830,6 +2011,18 @@ def _locked_training_resume_checkpoint(
         with suppress(FileNotFoundError):
             lock_path.unlink()
         _fsync_directory(context.root)
+
+
+def _training_process_is_alive(process_id: int) -> bool:
+    if process_id == os.getpid():
+        return True
+    try:
+        os.kill(process_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _training_resume_contract_from_root(root: Path) -> str:
@@ -2056,6 +2249,36 @@ def _mark_training_resume_started(context: _TrainingResumeContext) -> None:
         + "\n"
     ).encode("utf-8")
     _atomic_write_new_file(marker_path, payload)
+    _fsync_directory(context.root)
+
+
+def _mark_training_resume_complete(
+    context: _TrainingResumeContext,
+    artifact: TrainingArtifact,
+) -> None:
+    target = context.root / _TRAINING_RESUME_COMPLETE_FILENAME
+    payload = (
+        json.dumps(
+            {
+                "schema_version": _TRAINING_RESUME_COMPLETE_SCHEMA,
+                "contract_sha256": context.contract_sha256,
+                "artifact_path": artifact.path,
+                "artifact_sha256": artifact.artifact_sha256,
+                "manifest_sha256": artifact.manifest_sha256,
+                "checksums_sha256": artifact.checksums_sha256,
+                "file_count": artifact.file_count,
+                "training_count": artifact.training_count,
+                "validation_count": artifact.validation_count,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+        )
+        + "\n"
+    ).encode("utf-8")
+    if target.exists() or target.is_symlink():
+        raise GateBValidationError("training completion marker already exists")
+    _atomic_write_new_file(target, payload)
     _fsync_directory(context.root)
 
 

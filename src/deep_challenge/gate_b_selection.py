@@ -50,7 +50,10 @@ _MAX_JSONL_LINE_BYTES = 16 * 1024 * 1024
 _COMPARISON_SCHEMA = "gate-b-development-comparison-v2"
 _PROBE_DECISION_SCHEMA = "gate-b-candidate-probe-decision-v1"
 _OOF_COMPARISON_SCHEMA = "gate-b-development-oof-comparison-v1"
+_BASE_OOF_SCHEMA = "gate-b-base-development-oof-v1"
+_BASE_OOF_FOLD_COUNT = 5
 _FREEZE_SCHEMA = "gate-b-selection-freeze-v3"
+_BASE_FREEZE_SCHEMA = "gate-b-base-selection-freeze-v1"
 _HOLDOUT_SCHEMA = "gate-b-locked-holdout-access-v1"
 HOLDOUT_ACCESS_ACKNOWLEDGEMENT = "OPEN_LOCKED_HOLDOUT_ONCE_AFTER_FREEZE"
 PRIMARY_ONLY_ROUTING_POLICY = "primary_only"
@@ -1051,6 +1054,194 @@ def compare_cross_fold_development_runs(
     return _write_hashed_json_noreplace(output_path, payload_without_hash)
 
 
+def verify_base_development_oof(
+    base_label: str,
+    fold_runs: Iterable[FoldDevelopmentRun],
+    records: Iterable[MathRecord],
+    *,
+    split_manifest: SplitManifest,
+    deployment_fold: int,
+    excluded_ids: Iterable[str],
+    train_file_sha256: str,
+    exclusions_file_sha256: str,
+    split_artifact_sha256: str,
+    development_shard_sha256: str,
+    output_path: str | Path,
+) -> GateBSelectionWriteResult:
+    """Qualify one pinned fixed-base run on every development fold.
+
+    This is deliberately separate from the candidate comparison schema.  It
+    proves that the fallback path has complete, non-reused OOF evidence without
+    inventing a synthetic candidate, paired statistic, or adapter claim.
+    """
+
+    if not isinstance(split_manifest, SplitManifest):
+        raise TypeError("split_manifest must be a SplitManifest")
+    split_manifest.validate()
+    if split_manifest.n_folds != _BASE_OOF_FOLD_COUNT:
+        raise GateBValidationError("base OOF requires the locked five-fold split")
+    if (
+        isinstance(deployment_fold, bool)
+        or not isinstance(deployment_fold, int)
+        or deployment_fold < 0
+        or deployment_fold >= split_manifest.n_folds
+    ):
+        raise GateBValidationError("deployment_fold is outside the split fold range")
+    train_digest = _required_sha256(train_file_sha256, "train_file_sha256")
+    exclusions_digest = _required_sha256(
+        exclusions_file_sha256, "exclusions_file_sha256"
+    )
+    split_artifact_digest = _required_sha256(
+        split_artifact_sha256, "split_artifact_sha256"
+    )
+    development_shard_digest = _required_sha256(
+        development_shard_sha256, "development_shard_sha256"
+    )
+    label = _validated_label(base_label)
+    supplied_runs = tuple(fold_runs)
+    if len(supplied_runs) != split_manifest.n_folds:
+        raise GateBValidationError(
+            "base OOF requires exactly one fixed-base run for every fold"
+        )
+    indexed: dict[int, FoldDevelopmentRun] = {}
+    for item in supplied_runs:
+        if not isinstance(item, FoldDevelopmentRun):
+            raise TypeError("fold_runs must contain FoldDevelopmentRun values")
+        if (
+            isinstance(item.fold, bool)
+            or not isinstance(item.fold, int)
+            or item.fold < 0
+            or item.fold >= split_manifest.n_folds
+        ):
+            raise GateBValidationError("base OOF run has an invalid fold")
+        if item.label != label:
+            raise GateBValidationError("base OOF run label does not match base_label")
+        if item.method_kind != FIXED_BASE_METHOD_KIND or item.adapter_path is not None:
+            raise GateBValidationError("base OOF accepts fixed-base runs only")
+        if item.fold in indexed:
+            raise GateBValidationError(f"duplicate base OOF fold: {item.fold}")
+        indexed[item.fold] = item
+    if set(indexed) != set(range(split_manifest.n_folds)):
+        raise GateBValidationError("base OOF folds are incomplete")
+
+    exclusions = tuple(excluded_ids)
+    if len(exclusions) != len(set(exclusions)):
+        raise GateBValidationError("excluded_ids must not contain duplicates")
+    expected_by_fold = {
+        fold: eligible_validation_ids(split_manifest, fold, exclusions)
+        for fold in range(split_manifest.n_folds)
+    }
+    expected_oof_ids = tuple(
+        sorted(problem_id for ids in expected_by_fold.values() for problem_id in ids)
+    )
+    if len(expected_oof_ids) != len(set(expected_oof_ids)):
+        raise GateBValidationError("base OOF validation IDs overlap")
+    record_by_id = _validated_exact_records(records, expected_oof_ids)
+    assignment_by_id = split_manifest.assignment_by_id()
+    validated: dict[int, _ValidatedRun] = {}
+    run_identities: set[tuple[str, str]] = set()
+    for fold in range(split_manifest.n_folds):
+        item = indexed[fold]
+        fold_records = {
+            problem_id: record_by_id[problem_id]
+            for problem_id in expected_by_fold[fold]
+        }
+        run = _load_development_run(
+            NamedDevelopmentRun(label, item.records_path, item.manifest_path),
+            expected_ids=expected_by_fold[fold],
+            record_by_id=fold_records,
+            split_manifest=split_manifest,
+            assignment_by_id=assignment_by_id,
+            fold=fold,
+        )
+        identity = (run.sha256, run.manifest_sha256)
+        if identity in run_identities:
+            raise GateBValidationError("base OOF reuses run evidence across folds")
+        run_identities.add(identity)
+        method = _validate_oof_method_provenance(
+            item,
+            run=run,
+            record_by_id=record_by_id,
+            split_manifest=split_manifest,
+            fold=fold,
+            excluded_ids=exclusions,
+            train_file_sha256=train_digest,
+            exclusions_file_sha256=exclusions_digest,
+            split_artifact_sha256=split_artifact_digest,
+            development_shard_sha256=development_shard_digest,
+        )
+        if (
+            method.method_kind != FIXED_BASE_METHOD_KIND
+            or method.adapter_artifact is not None
+            or method.training_method_fingerprint != _base_method_fingerprint()
+        ):
+            raise GateBValidationError("base OOF method provenance is invalid")
+        validated[fold] = run
+
+    fold_evidence = {
+        str(fold): {
+            **_run_evidence(validated[fold], len(expected_by_fold[fold])),
+            "method_kind": FIXED_BASE_METHOD_KIND,
+            "training_method_fingerprint": _base_method_fingerprint(),
+            "adapter_artifact": None,
+        }
+        for fold in range(split_manifest.n_folds)
+    }
+    deployment = dict(fold_evidence[str(deployment_fold)])
+    pooled_exact_count = sum(item.exact_match_count for item in validated.values())
+    run_evidence = {
+        **deployment,
+        "deployment_fold": deployment_fold,
+        "fold_runs": fold_evidence,
+        "oof_problem_count": len(expected_oof_ids),
+        "oof_exact_match_count": pooled_exact_count,
+        "oof_exact_match_accuracy": pooled_exact_count / len(expected_oof_ids),
+    }
+    payload_without_hash: dict[str, Any] = {
+        "schema_version": _BASE_OOF_SCHEMA,
+        "model_id": OFFICIAL_MODEL_ID,
+        "revision": PINNED_MODEL_REVISION,
+        "route": "direct_answer",
+        "split_version": split_manifest.version,
+        "split_sha256": split_manifest.sha256,
+        "source_groups_sha256": split_manifest.source_groups_sha256,
+        "n_folds": split_manifest.n_folds,
+        "folds": list(range(split_manifest.n_folds)),
+        "fold": deployment_fold,
+        "deployment_fold": deployment_fold,
+        "partition": "out_of_fold_cross_validation",
+        "deployment_partition": "fold_validation",
+        "locked_holdout_accessed": False,
+        "leaderboard_or_test_used": False,
+        "data_provenance": {
+            "train_file_sha256": train_digest,
+            "exclusions_file_sha256": exclusions_digest,
+            "excluded_ids_sha256": _ids_sha256(tuple(sorted(exclusions))),
+            "split_artifact_sha256": split_artifact_digest,
+            "development_shard_sha256": development_shard_digest,
+        },
+        "eligibility_ids_sha256": _ids_sha256(expected_oof_ids),
+        "deployment_eligibility_ids_sha256": _ids_sha256(
+            expected_by_fold[deployment_fold]
+        ),
+        "problem_count": len(expected_oof_ids),
+        "base_label": label,
+        "method_kind": FIXED_BASE_METHOD_KIND,
+        "run_order": [label],
+        "runs": {label: run_evidence},
+        "qualification": {
+            "evidence_scope": "complete_out_of_fold_union",
+            "fixed_base_only": True,
+            "exact_fold_coverage": True,
+            "validation_ids_unique": True,
+            "run_evidence_unique": True,
+            "checkpoint_sha256": BASE_MODEL_CHECKPOINT_SHA256,
+            "training_method_fingerprint": _base_method_fingerprint(),
+        },
+    }
+    return _write_hashed_json_noreplace(output_path, payload_without_hash)
+
+
 def _run_evidence(item: _ValidatedRun, problem_count: int) -> dict[str, Any]:
     return {
         "path": str(item.path),
@@ -1492,6 +1683,117 @@ def freeze_development_selection(
     return _write_hashed_json_noreplace(output_path, payload_without_hash)
 
 
+def freeze_base_development_selection(
+    base_oof_artifact: str | Path,
+    *,
+    primary_label: str,
+    decision_note: str,
+    source_manifest_path: str | Path,
+    lockfile_path: str | Path,
+    output_path: str | Path,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> GateBSelectionWriteResult:
+    """Freeze the single fixed-base method from complete OOF evidence."""
+
+    oof_path, oof, oof_file_sha = _load_hashed_json_artifact(
+        base_oof_artifact,
+        expected_schema=_BASE_OOF_SCHEMA,
+    )
+    _require_base_oof_qualification(oof)
+    primary = _validated_label(primary_label)
+    if primary != oof.get("base_label"):
+        raise GateBValidationError("primary_label does not match base OOF evidence")
+    if not isinstance(decision_note, str) or not decision_note.strip():
+        raise GateBValidationError("decision_note must be a non-empty string")
+    if decision_note != decision_note.strip():
+        raise GateBValidationError("decision_note must be trimmed")
+    source_manifest = _regular_file_evidence(source_manifest_path, "source manifest")
+    lockfile = _regular_file_evidence(lockfile_path, "environment lockfile")
+    runs = oof.get("runs")
+    if not isinstance(runs, Mapping) or set(runs) != {primary}:
+        raise GateBValidationError("base OOF artifact must contain exactly one run label")
+    evidence = runs.get(primary)
+    if not isinstance(evidence, Mapping):
+        raise GateBValidationError("base OOF deployment evidence is invalid")
+    _revalidate_deployment_method_evidence(evidence, oof, primary)
+    run_path = Path(_required_string(evidence.get("path"), "base run path"))
+    if run_path.is_symlink() or not run_path.is_file():
+        raise GateBValidationError("frozen base run file is missing or unsafe")
+    if sha256_file(run_path) != _required_sha256(
+        evidence.get("sha256"), "base run sha256"
+    ):
+        raise GateBValidationError("frozen base run bytes changed after qualification")
+    run_manifest_path = Path(
+        _required_string(evidence.get("manifest_path"), "base run manifest path")
+    )
+    if run_manifest_path.is_symlink() or not run_manifest_path.is_file():
+        raise GateBValidationError("frozen base run manifest is missing or unsafe")
+    if sha256_file(run_manifest_path) != _required_sha256(
+        evidence.get("manifest_sha256"), "base run manifest sha256"
+    ):
+        raise GateBValidationError("frozen base run manifest changed after qualification")
+    _, run_manifest = _load_run_manifest(run_manifest_path)
+    run_binding = {
+        "checkpoint_sha256": evidence.get("checkpoint_sha256"),
+        "config_sha256": evidence.get("config_sha256"),
+        "eligibility_ids_sha256": oof.get("deployment_eligibility_ids_sha256"),
+        "model_id": oof.get("model_id"),
+        "revision": oof.get("revision"),
+        "route": oof.get("route"),
+        "split_version": oof.get("split_version"),
+        "split_sha256": oof.get("split_sha256"),
+        "source_groups_sha256": oof.get("source_groups_sha256"),
+        "fold": oof.get("deployment_fold"),
+        "partition": oof.get("deployment_partition"),
+    }
+    mismatched_run_binding = [
+        key for key, value in run_binding.items() if run_manifest.get(key) != value
+    ]
+    if mismatched_run_binding:
+        raise GateBValidationError(
+            "base OOF evidence changed deployment run binding: "
+            f"{mismatched_run_binding!r}"
+        )
+    completed = now()
+    if not isinstance(completed, datetime) or completed.tzinfo is None:
+        raise GateBValidationError("freeze timestamp must be timezone-aware")
+    payload_without_hash = {
+        "schema_version": _BASE_FREEZE_SCHEMA,
+        "frozen_at_utc": completed.astimezone(UTC).isoformat(),
+        "selection_frozen": True,
+        "selection_basis": "development_evidence_only",
+        "selection_kind": "base_only_complete_oof",
+        "locked_holdout_accessed": False,
+        "leaderboard_used_for_selection": False,
+        "decision_note": decision_note,
+        "source_manifest": source_manifest,
+        "environment_lockfile": lockfile,
+        "comparison_artifact": {
+            "path": str(oof_path),
+            "size_bytes": oof_path.stat().st_size,
+            "sha256": oof_file_sha,
+            "payload_sha256": oof["payload_sha256"],
+        },
+        "comparison_scope": "complete_out_of_fold_union",
+        "model_id": oof.get("model_id"),
+        "revision": oof.get("revision"),
+        "split_version": oof.get("split_version"),
+        "split_sha256": oof.get("split_sha256"),
+        "source_groups_sha256": oof.get("source_groups_sha256"),
+        "fold": oof.get("deployment_fold"),
+        "development_eligibility_ids_sha256": oof.get("eligibility_ids_sha256"),
+        "deployment_eligibility_ids_sha256": oof.get(
+            "deployment_eligibility_ids_sha256"
+        ),
+        "data_provenance": oof.get("data_provenance"),
+        "routing_policy": PRIMARY_ONLY_ROUTING_POLICY,
+        "fallback_routing_evidence": None,
+        "primary": {"label": primary, **dict(evidence)},
+        "fallback": None,
+    }
+    return _write_hashed_json_noreplace(output_path, payload_without_hash)
+
+
 def authorize_locked_holdout_once(
     freeze_artifact: str | Path,
     *,
@@ -1516,10 +1818,9 @@ def authorize_locked_holdout_once(
     if not isinstance(split_manifest, SplitManifest):
         raise TypeError("split_manifest must be a SplitManifest")
     split_manifest.validate()
-    freeze_path, freeze, freeze_file_sha = _load_hashed_json_artifact(
-        freeze_artifact, expected_schema=_FREEZE_SCHEMA
+    freeze_path, freeze, freeze_file_sha = _load_supported_freeze_artifact(
+        freeze_artifact
     )
-    _require_complete_oof_freeze(freeze)
     if freeze.get("selection_frozen") is not True:
         raise GateBValidationError("selection is not frozen")
     if freeze.get("locked_holdout_accessed") is not False:
@@ -1615,10 +1916,9 @@ def validate_frozen_selection_methods(
     if not isinstance(split_manifest, SplitManifest):
         raise TypeError("split_manifest must be a SplitManifest")
     split_manifest.validate()
-    freeze_path, freeze, freeze_file_sha = _load_hashed_json_artifact(
-        freeze_artifact, expected_schema=_FREEZE_SCHEMA
+    freeze_path, freeze, freeze_file_sha = _load_supported_freeze_artifact(
+        freeze_artifact
     )
-    _require_complete_oof_freeze(freeze)
     expected = {
         "selection_frozen": True,
         "selection_basis": "development_evidence_only",
@@ -1720,10 +2020,9 @@ def validate_locked_holdout_access(
     receipt_path, receipt, receipt_file_sha = _load_hashed_json_artifact(
         receipt_artifact, expected_schema=_HOLDOUT_SCHEMA
     )
-    freeze_path, freeze, freeze_file_sha = _load_hashed_json_artifact(
-        freeze_artifact, expected_schema=_FREEZE_SCHEMA
+    freeze_path, freeze, freeze_file_sha = _load_supported_freeze_artifact(
+        freeze_artifact
     )
-    _require_complete_oof_freeze(freeze)
     if receipt.get("comparison_scope") != "complete_out_of_fold_union":
         raise GateBValidationError("holdout receipt is not bound to complete OOF evidence")
     freeze_evidence = receipt.get("freeze_artifact")
@@ -1823,6 +2122,163 @@ def _validated_routing_policy(freeze: Mapping[str, Any], has_fallback: bool) -> 
 def _require_complete_oof_freeze(freeze: Mapping[str, Any]) -> None:
     if freeze.get("comparison_scope") != "complete_out_of_fold_union":
         raise GateBValidationError("final selection must be frozen from complete OOF evidence")
+
+
+def _require_base_oof_qualification(oof: Mapping[str, Any]) -> None:
+    expected = {
+        "schema_version": _BASE_OOF_SCHEMA,
+        "model_id": OFFICIAL_MODEL_ID,
+        "revision": PINNED_MODEL_REVISION,
+        "route": "direct_answer",
+        "partition": "out_of_fold_cross_validation",
+        "deployment_partition": "fold_validation",
+        "locked_holdout_accessed": False,
+        "leaderboard_or_test_used": False,
+        "method_kind": FIXED_BASE_METHOD_KIND,
+    }
+    mismatched = [key for key, value in expected.items() if oof.get(key) != value]
+    if mismatched:
+        raise GateBValidationError(
+            f"base OOF artifact violates its fixed-base contract: {mismatched!r}"
+        )
+    n_folds = oof.get("n_folds")
+    deployment_fold = oof.get("deployment_fold")
+    if (
+        isinstance(n_folds, bool)
+        or not isinstance(n_folds, int)
+        or n_folds != _BASE_OOF_FOLD_COUNT
+        or isinstance(deployment_fold, bool)
+        or not isinstance(deployment_fold, int)
+        or deployment_fold < 0
+        or deployment_fold >= n_folds
+        or oof.get("fold") != deployment_fold
+        or oof.get("folds") != list(range(n_folds))
+    ):
+        raise GateBValidationError("base OOF fold coverage is invalid")
+    for field_name in (
+        "split_sha256",
+        "source_groups_sha256",
+        "eligibility_ids_sha256",
+        "deployment_eligibility_ids_sha256",
+    ):
+        _required_sha256(oof.get(field_name), f"base OOF {field_name}")
+    provenance = oof.get("data_provenance")
+    provenance_keys = {
+        "train_file_sha256",
+        "exclusions_file_sha256",
+        "excluded_ids_sha256",
+        "split_artifact_sha256",
+        "development_shard_sha256",
+    }
+    if not isinstance(provenance, Mapping) or set(provenance) != provenance_keys:
+        raise GateBValidationError("base OOF data_provenance has an unexpected schema")
+    for field_name in provenance_keys:
+        _required_sha256(provenance.get(field_name), f"base OOF {field_name}")
+    label = _validated_label(_required_string(oof.get("base_label"), "base label"))
+    if oof.get("run_order") != [label]:
+        raise GateBValidationError("base OOF run order is invalid")
+    runs = oof.get("runs")
+    if not isinstance(runs, Mapping) or set(runs) != {label}:
+        raise GateBValidationError("base OOF runs must contain exactly the base label")
+    evidence = runs[label]
+    if not isinstance(evidence, Mapping):
+        raise GateBValidationError("base OOF run evidence is invalid")
+    fold_runs = evidence.get("fold_runs")
+    if not isinstance(fold_runs, Mapping) or set(fold_runs) != {
+        str(fold) for fold in range(n_folds)
+    }:
+        raise GateBValidationError("base OOF fold run evidence is incomplete")
+    problem_count = oof.get("problem_count")
+    if (
+        isinstance(problem_count, bool)
+        or not isinstance(problem_count, int)
+        or problem_count <= 0
+        or evidence.get("oof_problem_count") != problem_count
+    ):
+        raise GateBValidationError("base OOF problem count is invalid")
+    total_fold_count = 0
+    for fold in range(n_folds):
+        fold_evidence = fold_runs[str(fold)]
+        if not isinstance(fold_evidence, Mapping):
+            raise GateBValidationError("base OOF fold evidence is invalid")
+        if (
+            fold_evidence.get("method_kind") != FIXED_BASE_METHOD_KIND
+            or fold_evidence.get("adapter_artifact") is not None
+            or fold_evidence.get("checkpoint_sha256")
+            != BASE_MODEL_CHECKPOINT_SHA256
+            or fold_evidence.get("training_method_fingerprint")
+            != _base_method_fingerprint()
+        ):
+            raise GateBValidationError("base OOF fold method provenance is invalid")
+        fold_count = fold_evidence.get("problem_count")
+        if isinstance(fold_count, bool) or not isinstance(fold_count, int) or fold_count <= 0:
+            raise GateBValidationError("base OOF fold problem count is invalid")
+        total_fold_count += fold_count
+    if total_fold_count != problem_count:
+        raise GateBValidationError("base OOF fold counts do not match the OOF union")
+    qualification = oof.get("qualification")
+    if not isinstance(qualification, Mapping) or dict(qualification) != {
+        "evidence_scope": "complete_out_of_fold_union",
+        "fixed_base_only": True,
+        "exact_fold_coverage": True,
+        "validation_ids_unique": True,
+        "run_evidence_unique": True,
+        "checkpoint_sha256": BASE_MODEL_CHECKPOINT_SHA256,
+        "training_method_fingerprint": _base_method_fingerprint(),
+    }:
+        raise GateBValidationError("base OOF qualification flags are invalid")
+
+
+def _load_supported_freeze_artifact(
+    path: str | Path,
+) -> tuple[Path, Mapping[str, Any], str]:
+    source, freeze, file_sha256 = _load_hashed_json_artifact(
+        path,
+        expected_schema=(_FREEZE_SCHEMA, _BASE_FREEZE_SCHEMA),
+    )
+    _require_complete_oof_freeze(freeze)
+    if freeze.get("schema_version") == _FREEZE_SCHEMA:
+        return source, freeze, file_sha256
+    if (
+        freeze.get("selection_kind") != "base_only_complete_oof"
+        or freeze.get("fallback") is not None
+        or freeze.get("routing_policy") != PRIMARY_ONLY_ROUTING_POLICY
+        or freeze.get("fallback_routing_evidence") is not None
+    ):
+        raise GateBValidationError("base-only freeze shape is invalid")
+    primary = freeze.get("primary")
+    if not isinstance(primary, Mapping):
+        raise GateBValidationError("base-only freeze primary is missing")
+    if (
+        primary.get("method_kind") != FIXED_BASE_METHOD_KIND
+        or primary.get("adapter_artifact") is not None
+        or primary.get("checkpoint_sha256") != BASE_MODEL_CHECKPOINT_SHA256
+        or primary.get("training_method_fingerprint") != _base_method_fingerprint()
+    ):
+        raise GateBValidationError("base-only freeze primary provenance is invalid")
+    comparison = freeze.get("comparison_artifact")
+    if not isinstance(comparison, Mapping):
+        raise GateBValidationError("base-only freeze lacks OOF evidence")
+    oof_path, oof, oof_file_sha = _load_hashed_json_artifact(
+        _required_string(comparison.get("path"), "base OOF path"),
+        expected_schema=_BASE_OOF_SCHEMA,
+    )
+    _require_base_oof_qualification(oof)
+    if (
+        comparison.get("sha256") != oof_file_sha
+        or comparison.get("payload_sha256") != oof.get("payload_sha256")
+        or comparison.get("size_bytes") != oof_path.stat().st_size
+    ):
+        raise GateBValidationError("base-only freeze OOF binding is invalid")
+    label = _validated_label(_required_string(primary.get("label"), "primary label"))
+    runs = oof.get("runs")
+    if (
+        label != oof.get("base_label")
+        or not isinstance(runs, Mapping)
+        or dict(primary) != {"label": label, **dict(runs[label])}
+    ):
+        raise GateBValidationError("base-only freeze changed the qualified method")
+    return source, freeze, file_sha256
 
 
 def _revalidate_deployment_method_evidence(

@@ -8,7 +8,11 @@
 
 이 절이 현재 실행 상태의 권위 원본이다. 아래의 “2026-07-31 역사적 snapshot”은
 정의 drift와 과거 근거를 보존하기 위한 부록이며 현재 명령·데이터·blocker를 대체하지
-않는다.
+않는다. PR #4는 merge commit
+`2b876a89637c2c71392a4ecfe9ce4ea1af9d30ce`로 착륙했다. 이후 base complete OOF
+안전망, synthetic harness v2, teacher v5, 단일 freeze와 최종 제출물까지의 확정 순서는
+[`16_GATE_B_HYBRID_COMPLETION_RUNBOOK.md`](16_GATE_B_HYBRID_COMPLETION_RUNBOOK.md)를
+따른다.
 
 ### 판정
 
