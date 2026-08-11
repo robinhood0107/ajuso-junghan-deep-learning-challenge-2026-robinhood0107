@@ -39,6 +39,7 @@ _FORBIDDEN_TOP_LEVEL = frozenset(
 )
 _FORBIDDEN_BASENAMES = frozenset(
     {
+        "NUL",
         "NU_",
         "access_token",
         "adapter_model.bin",

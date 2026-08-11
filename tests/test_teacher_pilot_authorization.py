@@ -10,7 +10,11 @@ import pytest
 from deep_challenge.data import MathRecord
 from deep_challenge.provenance import canonical_json_bytes
 from deep_challenge.teacher_pilot_authorization import (
+    FULL_V1_BANK_AUTHORIZATION_SCHEMA,
+    FULL_V1_BANK_AUTHORIZATION_V2_SCHEMA,
     PILOT_AUTHORIZATION_PILOT_SIZE,
+    PILOT_AUTHORIZATION_SCHEMA,
+    PILOT_AUTHORIZATION_V2_SCHEMA,
     TeacherPilotAuthorizationContract,
     TeacherPilotAuthorizationError,
     create_teacher_pilot_authorization,
@@ -20,6 +24,7 @@ from deep_challenge.teacher_pilot_authorization import (
 )
 from deep_challenge.teacher_rationale import (
     CodexCommandResult,
+    TeacherPromptPolicy,
     create_teacher_logical_audit_plan,
     create_teacher_plan,
     finalize_teacher_bank,
@@ -73,7 +78,14 @@ def _prompt_ids(command: tuple[str, ...]) -> list[str]:
     return [item["problem_id"] for item in payload["items"]]
 
 
-def _contract(records: tuple[MathRecord, ...]) -> TeacherPilotAuthorizationContract:
+def _contract(
+    records: tuple[MathRecord, ...],
+    *,
+    teacher_plan_label: str = "codex-gpt-5.6-sol-teacher",
+    teacher_plan_version: str = "v1",
+    prompt_policy: TeacherPromptPolicy | None = None,
+) -> TeacherPilotAuthorizationContract:
+    policy = prompt_policy or TeacherPromptPolicy()
     return TeacherPilotAuthorizationContract(
         teacher_config_sha256="1" * 64,
         teacher_config_file_sha256="2" * 64,
@@ -88,15 +100,22 @@ def _contract(records: tuple[MathRecord, ...]) -> TeacherPilotAuthorizationContr
         fold=0,
         fold0_training_ids=tuple(record.id for record in records),
         pilot_ids=tuple(record.id for record in records),
-        teacher_plan_label="codex-gpt-5.6-sol-teacher",
-        teacher_plan_version="v1",
+        teacher_plan_label=teacher_plan_label,
+        teacher_plan_version=teacher_plan_version,
         logical_audit_label="codex-gpt-5.6-sol-logical-audit",
         logical_audit_version="v1",
+        teacher_prompt_policy_sha256=policy.sha256,
     )
 
 
 def _finalized_pilot(
-    tmp_path: Path, *, initial_wrong_ids: set[str] | None = None
+    tmp_path: Path,
+    *,
+    initial_wrong_ids: set[str] | None = None,
+    chunk_size: int = 64,
+    label: str = "codex-gpt-5.6-sol-teacher",
+    version: str = "v1",
+    prompt_policy: TeacherPromptPolicy | None = None,
 ) -> tuple[
     tuple[MathRecord, ...],
     Path,
@@ -111,14 +130,17 @@ def _finalized_pilot(
         records,
         tuple(record.id for record in records),
         tmp_path / "private-pilot-plan",
-        chunk_size=64,
+        chunk_size=chunk_size,
+        label=label,
+        version=version,
+        prompt_policy=prompt_policy or TeacherPromptPolicy(),
     )
     first_full_chunk_calls = 0
 
     def teacher_runner(command: tuple[str, ...]) -> CodexCommandResult:
         nonlocal first_full_chunk_calls
         problem_ids = _prompt_ids(command)
-        initial = len(problem_ids) == 64 and first_full_chunk_calls < 2
+        initial = len(problem_ids) == chunk_size and first_full_chunk_calls < len(records)
         if initial:
             first_full_chunk_calls += 1
         items: list[dict[str, str]] = []
@@ -214,6 +236,8 @@ def test_pilot_authorization_receipt_is_raw_free_immutable_and_reverified(
     assert receipt.initial_exact_match_accepted_count == 128
     assert receipt.initial_exact_match_total_count == 128
     assert receipt.logical_audit_consistent_problem_count == 64
+    assert json.loads(serialized)["schema_version"] == PILOT_AUTHORIZATION_SCHEMA
+    assert "teacher_prompt_policy_sha256" not in json.loads(serialized)
     assert verify_teacher_pilot_authorization(
         receipt_path,
         contract=_contract(records),
@@ -222,6 +246,11 @@ def test_pilot_authorization_receipt_is_raw_free_immutable_and_reverified(
         source_manifest=source_manifest,
         logical_audit_dir=audit_dir,
     ).file_sha256 == receipt.file_sha256
+    sidecar_sha = write_teacher_full_v1_bank_authorization(plan_dir, receipt)
+    sidecar = load_teacher_full_v1_bank_authorization(plan_dir)
+    assert sidecar["schema_version"] == FULL_V1_BANK_AUTHORIZATION_SCHEMA
+    assert "full_plan_prompt_policy_sha256" not in sidecar
+    assert sidecar["payload_sha256"] == sidecar_sha
     with pytest.raises(TeacherPilotAuthorizationError, match="overwrite"):
         create_teacher_pilot_authorization(
             receipt_path,
@@ -233,13 +262,28 @@ def test_pilot_authorization_receipt_is_raw_free_immutable_and_reverified(
         )
 
 
-def test_full_v1_plan_sidecar_binds_verified_pilot_receipt_without_raw_data(
+def test_v2_pilot_authorization_and_full_bank_sidecar_bind_prompt_policy(
     tmp_path: Path,
 ) -> None:
-    records, plan_dir, source, source_manifest, audit_dir = _finalized_pilot(tmp_path)
+    policy = TeacherPromptPolicy(
+        prompt_version="gate-b-codex-teacher-prompt-v2",
+        prompt_template_sha256="743fb09547055475a8d73856859e9f068d6332cdb2a2bcd9802052c3d5b917b0",
+    )
+    records, plan_dir, source, source_manifest, audit_dir = _finalized_pilot(
+        tmp_path,
+        chunk_size=32,
+        label="codex-gpt-5.6-sol-teacher-pilot-v2",
+        version="pilot-v2",
+        prompt_policy=policy,
+    )
     receipt = create_teacher_pilot_authorization(
         tmp_path / "pilot-authorization.json",
-        contract=_contract(records),
+        contract=_contract(
+            records,
+            teacher_plan_label="codex-gpt-5.6-sol-teacher-pilot-v2",
+            teacher_plan_version="pilot-v2",
+            prompt_policy=policy,
+        ),
         pilot_plan_dir=plan_dir,
         source_jsonl=source,
         source_manifest=source_manifest,
@@ -248,7 +292,13 @@ def test_full_v1_plan_sidecar_binds_verified_pilot_receipt_without_raw_data(
 
     sidecar_sha = write_teacher_full_v1_bank_authorization(plan_dir, receipt)
     payload = load_teacher_full_v1_bank_authorization(plan_dir)
+    receipt_payload = json.loads((tmp_path / "pilot-authorization.json").read_text())
     rendered = json.dumps(payload, sort_keys=True)
+    assert receipt_payload["schema_version"] == PILOT_AUTHORIZATION_V2_SCHEMA
+    assert receipt_payload["teacher_prompt_policy_sha256"] == policy.sha256
+    assert payload["schema_version"] == FULL_V1_BANK_AUTHORIZATION_V2_SCHEMA
+    assert payload["full_plan_prompt_policy_sha256"] == policy.sha256
+    assert payload["pilot_plan_prompt_policy_sha256"] == policy.sha256
     assert payload["payload_sha256"] == sidecar_sha
     assert payload["pilot_authorization_file_sha256"] == receipt.file_sha256
     assert "Synthetic pilot question" not in rendered
@@ -367,9 +417,10 @@ def test_pilot_authorization_rejects_config_split_source_and_audit_mismatch(
     )
     for changed_contract in (
         replace(contract, teacher_config_sha256="9" * 64),
+        replace(contract, teacher_prompt_policy_sha256="b" * 64),
         replace(contract, split_sha256="a" * 64),
     ):
-        with pytest.raises(TeacherPilotAuthorizationError, match="does not match"):
+        with pytest.raises(TeacherPilotAuthorizationError, match="does not"):
             verify_teacher_pilot_authorization(
                 receipt_path,
                 contract=changed_contract,

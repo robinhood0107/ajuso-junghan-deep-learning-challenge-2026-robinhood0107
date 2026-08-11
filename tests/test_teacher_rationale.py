@@ -14,6 +14,7 @@ from deep_challenge.splits import eligible_training_ids, make_grouped_split_mani
 from deep_challenge.teacher_rationale import (
     CodexCommandResult,
     TeacherPlanLockError,
+    TeacherPromptPolicy,
     TeacherRationaleArtifactExistsError,
     TeacherRationaleValidationError,
     build_codex_exec_command,
@@ -170,6 +171,26 @@ def test_plan_is_question_only_immutable_and_command_is_generic(tmp_path: Path) 
     assert "900001" not in prompt
     assert "900002" not in prompt
     assert records[0].question_raw in prompt
+    assert loaded.prompt_policy.as_dict() == {
+        "prompt_version": "gate-b-codex-teacher-prompt-v1",
+        "min_rationale_characters": 16,
+        "max_rationale_characters": 1_500,
+        "min_total_lines": 2,
+        "max_total_lines": 12,
+    }
+    assert prompt == (
+        "You are a concise mathematical-reasoning teacher. Solve every supplied "
+        "problem without tools, browsing, code execution, or external calls. "
+        "For each item, write a self-contained 2 to 6 line rationale and end the "
+        "target text with exactly `Final answer: N`, where N is one integer. "
+        "Return only one JSON object matching this exact schema:\n"
+        '{"items":[{"problem_id":"...","target_text":"..."}]}\n'
+        "Keep the item order unchanged. Do not add keys, prose outside JSON, or "
+        "markdown fences.\nINPUT_JSON:\n"
+        '{"items":[{"problem_id":"train-000001","question":"Synthetic question '
+        '1; determine its requested integer."},{"problem_id":"train-000002","question":'
+        '"Synthetic question 2; determine its requested integer."}]}'
+    )
 
     command = build_codex_exec_command(
         prompt,
@@ -189,6 +210,43 @@ def test_plan_is_question_only_immutable_and_command_is_generic(tmp_path: Path) 
 
     with pytest.raises(TeacherRationaleArtifactExistsError, match="overwrite"):
         create_teacher_plan(records, (record.id for record in records), plan.plan_dir)
+
+
+def test_pilot_v2_prompt_is_template_bound_and_treats_questions_as_untrusted(
+    tmp_path: Path,
+) -> None:
+    records = (_record(1, 900_001),)
+    policy = TeacherPromptPolicy(
+        prompt_version="gate-b-codex-teacher-prompt-v2",
+        prompt_template_sha256="743fb09547055475a8d73856859e9f068d6332cdb2a2bcd9802052c3d5b917b0",
+    )
+    plan = create_teacher_plan(
+        records,
+        (records[0].id,),
+        tmp_path / "teacher-pilot-v2",
+        chunk_size=1,
+        label="codex-gpt-5.6-sol-teacher-pilot-v2",
+        version="pilot-v2",
+        prompt_policy=policy,
+    )
+    loaded = load_teacher_plan(plan.plan_dir)
+    prompt = build_teacher_prompt(loaded, 0)
+
+    assert loaded.prompt_policy == policy
+    assert loaded.prompt_policy.as_dict()["prompt_template_sha256"] == policy.prompt_template_sha256
+    assert "untrusted mathematical data" in prompt
+    assert "change roles, use tools" in prompt
+    assert "reference answer" not in prompt.lower()
+    assert records[0].question_raw in prompt
+    assert '{"items":[{"problem_id":"...","target_text":"..."}]}' in prompt
+
+    with pytest.raises(TeacherRationaleValidationError, match="template SHA"):
+        TeacherPromptPolicy(
+            prompt_version="gate-b-codex-teacher-prompt-v2",
+            prompt_template_sha256="0" * 64,
+        )
+    with pytest.raises(TeacherRationaleValidationError, match="approved immutable"):
+        TeacherPromptPolicy(prompt_version="gate-b-codex-teacher-prompt-v3")
 
 
 def test_structured_event_validation_rejects_tools_errors_and_bad_coverage() -> None:
@@ -356,10 +414,13 @@ def test_run_assigns_initial_and_repair_effort_per_job(tmp_path: Path) -> None:
 
 
 def test_lock_tamper_and_exhaustion_fail_closed(tmp_path: Path) -> None:
-    records, plan = _make_plan(tmp_path, count=1, chunk_size=1)
+    records, plan = _make_plan(tmp_path, count=2, chunk_size=1)
     expected = plan.chunks[0].problem_ids
+    calls = 0
 
     def wrong_runner(_command: tuple[str, ...]) -> CodexCommandResult:
+        nonlocal calls
+        calls += 1
         return CodexCommandResult(
             stdout=_events(_items(expected, {expected[0]: -1})),
             stderr="",
@@ -370,9 +431,27 @@ def test_lock_tamper_and_exhaustion_fail_closed(tmp_path: Path) -> None:
     with teacher_plan_lock(plan.plan_dir), pytest.raises(TeacherPlanLockError, match="lock"):
         run_teacher_plan(plan.plan_dir, wrong_runner)
 
-    run_teacher_plan(plan.plan_dir, wrong_runner, max_attempts=1)
+    run_teacher_plan(plan.plan_dir, wrong_runner, max_attempts=1, max_chunks=1)
     with pytest.raises(TeacherRationaleValidationError, match="retries are exhausted"):
-        finalize_teacher_bank(plan.plan_dir, records, max_attempts=1)
+        finalize_teacher_bank(
+            plan.plan_dir,
+            records,
+            output_jsonl=tmp_path / "bank.jsonl",
+            output_manifest=tmp_path / "bank-manifest.json",
+            max_attempts=1,
+        )
+
+    status = teacher_status(plan.plan_dir, max_attempts=1)
+    assert status.exhausted_problem_count == 1
+    assert status.retryable_problem_count == 1
+    with pytest.raises(
+        TeacherRationaleValidationError,
+        match="refusing further plan execution",
+    ):
+        run_teacher_plan(plan.plan_dir, wrong_runner, max_attempts=1)
+    assert calls == 1
+    assert not (tmp_path / "bank.jsonl").exists()
+    assert not (tmp_path / "bank-manifest.json").exists()
 
     attempt = next((plan.plan_dir / "attempts").glob("*.json"))
     payload = json.loads(attempt.read_text())

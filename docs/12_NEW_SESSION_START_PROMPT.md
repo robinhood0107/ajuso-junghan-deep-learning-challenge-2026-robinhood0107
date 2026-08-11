@@ -125,9 +125,10 @@ rg --files \
 14. `.gitignore`
 15. `LICENSE`
 16. `pyproject.toml`
-17. `configs/gate_b/codex-gpt-5.6-sol-teacher-v1.json`
-18. `configs/gate_b/rtx4070-super-12gb-direct-answer-v1.json`
-19. `configs/gate_b/rtx4070-super-12gb-concise-rationale-v1.json`
+17. `configs/gate_b/codex-gpt-5.6-sol-teacher-pilot-v2.json`
+18. `configs/gate_b/codex-gpt-5.6-sol-teacher-v1.json` (historic forensic evidence only)
+19. `configs/gate_b/rtx4070-super-12gb-direct-answer-v1.json`
+20. `configs/gate_b/rtx4070-super-12gb-concise-rationale-v1.json`
 
 그 다음 현재 작업과 직접 관련된 source/test를 읽는다.
 
@@ -291,6 +292,29 @@ actual usage aggregate:
 - total attempts: 6
 - total latency: 3,199,760 ms
 
+fresh pilot-v2 snapshot:
+
+- run tag: `20260811T132301KST`
+- plan SHA:
+  `b4624eac74f3a2b0238debda96bbc40edfc2e9b37ea27825bf62ed8d4726d4af`
+- config semantic/file/prompt-policy SHA:
+  `6794dba97ba8b172b07e1b2f942d00d38e64a5f405d1144771ae037c25625de4` /
+  `de9abbabe8f88bda17637b0070bc87d0ec694e37f953625ad8c1cbe4fb4b261e` /
+  `5ed785c9a02bc84298ed8186681b2b21a80da50d9af4591da0c1586a28e387b3`
+- total: 128 training questions; initial chunks: 32×4; worker: 1
+- first pass accepted: 105/128 = 82.03%
+- final accepted after retry cap: 106/128
+- exhausted: 7; retryable at stop: 15; max attempts per problem: 3
+- outcome: `failed_closed_retry_exhausted`
+- logical audit/full bank/GPU started: false
+- leaderboard/test used: false; locked holdout accessed: false
+- raw-free final artifact:
+  `artifacts/analysis/gate-b-teacher-pilot-v2-20260811T132301KST-final-v2.json`
+- final artifact SHA-256:
+  `5d50fdb41c0503546e673393d97b24bf7dc5c92e52577738eada35c143ac874e`
+- aggregate usage: input 117,241; output 84,014; reasoning telemetry 73,127;
+  cached input 0; total attempts 8; total latency 1,809,811 ms
+
 이 historic ledger는 current safe command의
 `shell_environment_policy.inherit="none"` 이전에 생성됐다. current loader가 stored argv를
 재구성한 safe argv와 비교할 때 의도적으로 reject한다. 따라서 다음을 금지한다.
@@ -302,18 +326,18 @@ actual usage aggregate:
 - 17개 실패 row에 organizer answer를 알려 주고 rationale을 다시 쓰게 하기
 - 승인된 111개만 partial bank로 승격하기
 
-historic artifact는 실패 evidence로만 보존한다. 다음 실험은 새 prompt/config/version/tag와
-새 immutable ledger를 사용한다.
+historic v1와 fresh v2 artifact 모두 실패 evidence로만 보존한다. 다음 실험은 새
+prompt/config/version/tag와 새 immutable ledger를 사용한다.
 
-6. 새 세션의 첫 실제 개발 목표: teacher candidate v2
-===================================================
+6. 다음 실제 개발 목표: teacher candidate v3 설계
+=============================================
 
 GPU 없이 다음을 수행한다.
 
-1. current v1 prompt builder, schema, event validator, finalizer, authorization test를 읽는다.
-2. old unsafe ledger를 재해석하지 말고, 공개-safe aggregate 실패 사실과 synthetic cases만
+1. current v1/v2 prompt builder, schema, event validator, finalizer, authorization test를 읽는다.
+2. raw ledger를 재해석하지 말고, 공개-safe aggregate 실패 사실과 synthetic cases만
    이용해 general prompt 개선안을 설계한다.
-3. v1 config나 artifact를 덮어쓰지 않는다. 새 config가 필요하면 별도 v2 filename/schema로
+3. v1/v2 config나 artifact를 덮어쓰지 않는다. 새 config가 필요하면 별도 v3 filename/schema로
    추가하고 semantic/file SHA를 새로 계산한다.
 4. 아래 safety fields와 실행 정책은 완화하지 않는다.
    - provider: ChatGPT-login Codex CLI
@@ -369,7 +393,7 @@ git diff --check
 
 - dependency sync success
 - Ruff pass
-- `452 passed, 1 skipped`
+- `454 passed, 1 skipped`
 - skip 1은 default CPU `.venv`에 PyTorch가 없기 때문
 - canonical checksum pass
 - public repository guard pass
@@ -378,11 +402,13 @@ git diff --check
 기본 `.venv`에 GPU package를 억지로 섞지 않는다. GPU runtime은 ext4의 별도 `$GPU_ENV`를
 사용한다.
 
-8. 새 128문제 pilot gate
-========================
+8. 다음 128문제 pilot gate
+=========================
 
-prompt/config/tests가 green이면 `docs/10_GATE_B_CPU_READY_RUNBOOK.md`의 teacher plan/run/
-status/finalize 명령을 current CLI help와 대조한 뒤 새 unique `RUN_TAG`로 실행한다.
+fresh pilot-v2는 initial 80% gate는 넘었지만 7 exhaustion으로 fail-closed됐다. 따라서 그
+ledger/tag를 재개하지 않고, 새로운 v3 prompt/config/tests가 green일 때만
+`docs/10_GATE_B_CPU_READY_RUNBOOK.md`의 teacher plan/run/status/finalize 명령을 current CLI
+help와 대조한 뒤 새 unique `RUN_TAG`로 실행한다.
 
 pilot scope:
 

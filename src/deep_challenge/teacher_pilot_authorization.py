@@ -43,6 +43,7 @@ from .teacher_rationale import (
 )
 
 PILOT_AUTHORIZATION_SCHEMA = "gate-b-codex-teacher-pilot-authorization-v1"
+PILOT_AUTHORIZATION_V2_SCHEMA = "gate-b-codex-teacher-pilot-authorization-v2"
 PILOT_AUTHORIZATION_PILOT_SIZE = 128
 PILOT_AUTHORIZATION_MAX_ATTEMPTS = 3
 PILOT_AUTHORIZATION_INITIAL_EXACT_MATCH_PERCENT = 80
@@ -54,10 +55,13 @@ PILOT_AUTHORIZATION_LOGICAL_AUDIT_MIN_CONSISTENT = 60
 # later private materialization cannot accept a hand-supplied plan/source tuple
 # that bypassed the pilot gate.
 FULL_V1_BANK_AUTHORIZATION_SCHEMA = "gate-b-codex-teacher-v1-bank-authorization-v1"
+FULL_V1_BANK_AUTHORIZATION_V2_SCHEMA = "gate-b-codex-teacher-v1-bank-authorization-v2"
 FULL_V1_BANK_AUTHORIZATION_FILENAME = "v1-pilot-authorization.json"
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _TRAIN_ID_RE = re.compile(r"train-\d{6}\Z")
+_TEACHER_PROMPT_V1 = "gate-b-codex-teacher-prompt-v1"
+_TEACHER_PROMPT_V2 = "gate-b-codex-teacher-prompt-v2"
 
 
 class TeacherPilotAuthorizationError(ValueError):
@@ -89,6 +93,9 @@ class TeacherPilotAuthorizationContract:
     teacher_plan_version: str
     logical_audit_label: str
     logical_audit_version: str
+    # The historic v1 receipt schema did not serialize this binding.  Keep it
+    # optional for exact v1 replay, while every v2 prompt plan requires it.
+    teacher_prompt_policy_sha256: str | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -102,6 +109,11 @@ class TeacherPilotAuthorizationContract:
             "source_groups_sha256",
         ):
             _required_sha256(getattr(self, field_name), field_name)
+        if self.teacher_prompt_policy_sha256 is not None:
+            _required_sha256(
+                self.teacher_prompt_policy_sha256,
+                "teacher_prompt_policy_sha256",
+            )
         _required_nonempty_text(self.split_version, "split_version")
         _required_nonempty_text(self.teacher_plan_label, "teacher_plan_label")
         _required_nonempty_text(self.teacher_plan_version, "teacher_plan_version")
@@ -140,11 +152,12 @@ class TeacherPilotAuthorizationReceipt:
     initial_exact_match_accepted_count: int
     initial_exact_match_total_count: int
     logical_audit_consistent_problem_count: int
+    teacher_prompt_policy_sha256: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         """Return a monitor-safe receipt summary with no private text."""
 
-        return {
+        payload: dict[str, object] = {
             "payload_sha256": self.payload_sha256,
             "file_sha256": self.file_sha256,
             "pilot_plan_sha256": self.pilot_plan_sha256,
@@ -154,6 +167,33 @@ class TeacherPilotAuthorizationReceipt:
             "initial_exact_match_total_count": self.initial_exact_match_total_count,
             "logical_audit_consistent_problem_count": self.logical_audit_consistent_problem_count,
         }
+        if self.teacher_prompt_policy_sha256 is not None:
+            payload["teacher_prompt_policy_sha256"] = self.teacher_prompt_policy_sha256
+        return payload
+
+
+def _uses_v2_prompt_policy(plan: TeacherPlan) -> bool:
+    """Classify an approved plan without ever silently downgrading v2 evidence."""
+
+    prompt_version = plan.prompt_policy.prompt_version
+    if prompt_version == _TEACHER_PROMPT_V1:
+        return False
+    if prompt_version == _TEACHER_PROMPT_V2:
+        return True
+    raise TeacherPilotAuthorizationError(
+        "pilot authorization does not recognize the teacher prompt policy"
+    )
+
+
+def _receipt_uses_v2_schema(payload: Mapping[str, object]) -> bool:
+    """Return the receipt schema generation, rejecting unknown variants."""
+
+    schema_version = payload.get("schema_version")
+    if schema_version == PILOT_AUTHORIZATION_SCHEMA:
+        return False
+    if schema_version == PILOT_AUTHORIZATION_V2_SCHEMA:
+        return True
+    raise TeacherPilotAuthorizationError("pilot authorization receipt schema is invalid")
 
 
 def create_teacher_pilot_authorization(
@@ -252,6 +292,8 @@ def write_teacher_full_v1_bank_authorization(
         or receipt_payload["pilot_plan_sha256"] != receipt.pilot_plan_sha256
         or receipt_payload["audit_plan_sha256"] != receipt.audit_plan_sha256
         or receipt_payload["audit_manifest_sha256"] != receipt.audit_manifest_sha256
+        or receipt_payload.get("teacher_prompt_policy_sha256")
+        != receipt.teacher_prompt_policy_sha256
     ):
         raise TeacherPilotAuthorizationError(
             "v1 bank authorization receipt object does not match its immutable file"
@@ -277,17 +319,28 @@ def write_teacher_full_v1_bank_authorization(
         raise TeacherPilotAuthorizationError(
             "v1 bank authorization receipt does not pass the locked pilot gates"
         )
+    receipt_uses_v2 = _receipt_uses_v2_schema(receipt_payload)
     if (
         plan.allowed_ids_sha256 != receipt_payload["fold0_training_ids_sha256"]
         or len(plan.problem_ids) != receipt_payload["fold0_training_problem_count"]
         or plan.label != receipt_payload["pilot_plan_label"]
         or plan.version != receipt_payload["pilot_plan_version"]
+        or (
+            receipt_uses_v2
+            and plan.prompt_policy.sha256
+            != receipt_payload["teacher_prompt_policy_sha256"]
+        )
+        or (not receipt_uses_v2 and plan.prompt_policy.prompt_version != _TEACHER_PROMPT_V1)
     ):
         raise TeacherPilotAuthorizationError(
             "complete v1 plan does not exactly match the receipt's fold-0 training scope"
         )
     payload_without_hash: dict[str, object] = {
-        "schema_version": FULL_V1_BANK_AUTHORIZATION_SCHEMA,
+        "schema_version": (
+            FULL_V1_BANK_AUTHORIZATION_V2_SCHEMA
+            if receipt_uses_v2
+            else FULL_V1_BANK_AUTHORIZATION_SCHEMA
+        ),
         "full_plan_sha256": plan.plan_sha256,
         "full_plan_label": plan.label,
         "full_plan_version": plan.version,
@@ -321,6 +374,11 @@ def write_teacher_full_v1_bank_authorization(
         "leaderboard_or_test_used": False,
         "raw_generation_serialized": False,
     }
+    if receipt_uses_v2:
+        payload_without_hash["full_plan_prompt_policy_sha256"] = plan.prompt_policy.sha256
+        payload_without_hash["pilot_plan_prompt_policy_sha256"] = receipt_payload[
+            "teacher_prompt_policy_sha256"
+        ]
     payload = {
         **payload_without_hash,
         "payload_sha256": _payload_sha256(payload_without_hash),
@@ -349,6 +407,13 @@ def load_teacher_full_v1_bank_authorization(
         "v1 bank authorization",
     )
     payload = _load_json_object(path, "v1 bank authorization")
+    schema_version = payload.get("schema_version")
+    if schema_version == FULL_V1_BANK_AUTHORIZATION_SCHEMA:
+        sidecar_uses_v2 = False
+    elif schema_version == FULL_V1_BANK_AUTHORIZATION_V2_SCHEMA:
+        sidecar_uses_v2 = True
+    else:
+        raise TeacherPilotAuthorizationError("v1 bank authorization schema is invalid")
     expected_keys = {
         "schema_version",
         "full_plan_sha256",
@@ -379,12 +444,17 @@ def load_teacher_full_v1_bank_authorization(
         "raw_generation_serialized",
         "payload_sha256",
     }
+    if sidecar_uses_v2:
+        expected_keys.update(
+            {
+                "full_plan_prompt_policy_sha256",
+                "pilot_plan_prompt_policy_sha256",
+            }
+        )
     if set(payload) != expected_keys:
         raise TeacherPilotAuthorizationError(
             "v1 bank authorization keys differ from the locked schema"
         )
-    if payload["schema_version"] != FULL_V1_BANK_AUTHORIZATION_SCHEMA:
-        raise TeacherPilotAuthorizationError("v1 bank authorization schema is invalid")
     stored_sha = _required_sha256(payload["payload_sha256"], "v1 bank authorization payload_sha256")
     without_hash = dict(payload)
     without_hash.pop("payload_sha256")
@@ -404,6 +474,12 @@ def load_teacher_full_v1_bank_authorization(
         "audit_manifest_sha256",
     ):
         _required_sha256(payload[field_name], f"v1 bank authorization {field_name}")
+    if sidecar_uses_v2:
+        for field_name in (
+            "full_plan_prompt_policy_sha256",
+            "pilot_plan_prompt_policy_sha256",
+        ):
+            _required_sha256(payload[field_name], f"v1 bank authorization {field_name}")
     for field_name in (
         "full_plan_label",
         "full_plan_version",
@@ -452,6 +528,15 @@ def load_teacher_full_v1_bank_authorization(
         or payload["locked_holdout_accessed"] is not False
         or payload["leaderboard_or_test_used"] is not False
         or payload["raw_generation_serialized"] is not False
+        or (
+            sidecar_uses_v2
+            and payload["full_plan_prompt_policy_sha256"] != plan.prompt_policy.sha256
+        )
+        or (
+            sidecar_uses_v2
+            and payload["pilot_plan_prompt_policy_sha256"] != plan.prompt_policy.sha256
+        )
+        or (not sidecar_uses_v2 and plan.prompt_policy.prompt_version != _TEACHER_PROMPT_V1)
     ):
         raise TeacherPilotAuthorizationError(
             "v1 bank authorization does not match the locked full-plan promotion contract"
@@ -471,6 +556,7 @@ def _verified_payload(
 
     plan = load_teacher_plan(pilot_plan_dir)
     _require_exact_pilot_plan(plan, contract)
+    plan_uses_v2 = _uses_v2_prompt_policy(plan)
 
     # These readers rehash all linked attempt, parsed-output, and assessment
     # files.  The private helper also re-derives the source JSONL/manifest from
@@ -544,8 +630,10 @@ def _verified_payload(
             "pilot logical audit did not pass the locked 64/60 gate"
         )
 
-    return {
-        "schema_version": PILOT_AUTHORIZATION_SCHEMA,
+    payload: dict[str, object] = {
+        "schema_version": (
+            PILOT_AUTHORIZATION_V2_SCHEMA if plan_uses_v2 else PILOT_AUTHORIZATION_SCHEMA
+        ),
         "teacher_config_sha256": contract.teacher_config_sha256,
         "teacher_config_file_sha256": contract.teacher_config_file_sha256,
         "train_sha256": contract.train_sha256,
@@ -586,14 +674,33 @@ def _verified_payload(
         "leaderboard_or_test_used": False,
         "raw_generation_serialized": False,
     }
+    if plan_uses_v2:
+        # _require_exact_pilot_plan already rejected a missing or mismatched
+        # binding, so this cast remains a fail-closed invariant.
+        assert contract.teacher_prompt_policy_sha256 is not None
+        payload["teacher_prompt_policy_sha256"] = contract.teacher_prompt_policy_sha256
+    return payload
 
 
 def _require_exact_pilot_plan(
     plan: TeacherPlan, contract: TeacherPilotAuthorizationContract
 ) -> None:
+    plan_uses_v2 = _uses_v2_prompt_policy(plan)
     if (
         plan.label != contract.teacher_plan_label
         or plan.version != contract.teacher_plan_version
+        or (
+            plan_uses_v2
+            and (
+                contract.teacher_prompt_policy_sha256 is None
+                or plan.prompt_policy.sha256 != contract.teacher_prompt_policy_sha256
+            )
+        )
+        or (
+            not plan_uses_v2
+            and contract.teacher_prompt_policy_sha256 is not None
+            and plan.prompt_policy.sha256 != contract.teacher_prompt_policy_sha256
+        )
         or plan.problem_ids != contract.pilot_ids
         or plan.allowed_ids_sha256 != _ids_sha256(contract.pilot_ids)
         or len(plan.problem_ids) != PILOT_AUTHORIZATION_PILOT_SIZE
@@ -719,6 +826,7 @@ def _require_exact_logical_audit_plan(
 
 def _load_receipt_payload(path: Path) -> dict[str, object]:
     payload = _load_json_object(path, "pilot authorization receipt")
+    receipt_uses_v2 = _receipt_uses_v2_schema(payload)
     expected_keys = {
         "schema_version",
         "teacher_config_sha256",
@@ -760,12 +868,12 @@ def _load_receipt_payload(path: Path) -> dict[str, object]:
         "raw_generation_serialized",
         "payload_sha256",
     }
+    if receipt_uses_v2:
+        expected_keys.add("teacher_prompt_policy_sha256")
     if set(payload) != expected_keys:
         raise TeacherPilotAuthorizationError(
             "pilot authorization receipt keys differ from the locked schema"
         )
-    if payload["schema_version"] != PILOT_AUTHORIZATION_SCHEMA:
-        raise TeacherPilotAuthorizationError("pilot authorization receipt schema is invalid")
     stored_sha = payload["payload_sha256"]
     _required_sha256(stored_sha, "pilot authorization payload_sha256")
     without_hash = dict(payload)
@@ -774,11 +882,16 @@ def _load_receipt_payload(path: Path) -> dict[str, object]:
         raise TeacherPilotAuthorizationError(
             "pilot authorization receipt payload SHA does not match content"
         )
-    _validate_receipt_value_types(without_hash)
+    _validate_receipt_value_types(
+        without_hash,
+        requires_prompt_policy=receipt_uses_v2,
+    )
     return payload
 
 
-def _validate_receipt_value_types(payload: Mapping[str, object]) -> None:
+def _validate_receipt_value_types(
+    payload: Mapping[str, object], *, requires_prompt_policy: bool
+) -> None:
     for field_name in (
         "teacher_config_sha256",
         "teacher_config_file_sha256",
@@ -798,6 +911,11 @@ def _validate_receipt_value_types(payload: Mapping[str, object]) -> None:
         "audit_manifest_sha256",
     ):
         _required_sha256(payload.get(field_name), field_name)
+    if requires_prompt_policy:
+        _required_sha256(
+            payload.get("teacher_prompt_policy_sha256"),
+            "teacher_prompt_policy_sha256",
+        )
     for field_name in ("split_version", "pilot_plan_label", "pilot_plan_version"):
         _required_nonempty_text(payload.get(field_name), field_name)
     for field_name in (
@@ -849,6 +967,11 @@ def _receipt_from_payload(
         initial_exact_match_total_count=int(payload["initial_exact_match_total_count"]),
         logical_audit_consistent_problem_count=int(
             payload["audit_consistent_problem_count"]
+        ),
+        teacher_prompt_policy_sha256=(
+            str(payload["teacher_prompt_policy_sha256"])
+            if "teacher_prompt_policy_sha256" in payload
+            else None
         ),
     )
 

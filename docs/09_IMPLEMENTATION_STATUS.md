@@ -23,7 +23,7 @@
 | Gate B0 final GPU smoke | **READY / 다음 GPU workload 전 재실행** | `gpu-smoke-20260810T234907KST.json`은 local `2+3` only, pinned NF4 load, LoRA backward/optimizer step, cache-on generation을 green으로 닫았다. 다음 source에서는 같은 smoke를 새 no-overwrite tag로 다시 실행한다. |
 | Gate B1 base direct-answer | **current-source v2 완료** | `20260810T234907KST` organizer-only fold 0 run은 parser v2 stored/current 일치 상태로 1,653/2,942 EM (56.1863%), parser `2705/3/234`, finish `2134/808`을 atomic 기록했다. records/manifest와 raw-free parser audit v6 checksum을 검증했다. |
 | Gate B2 QLoRA SFT | **fold 0 완료 / candidate 중단** | 첫 시도 `20260810T192204KST`는 tokenizer byte drift를 publish 전에 fail-closed로 거부했다. 수정 뒤 `20260810T210605KST` 재시도는 738/738 step, runtime 5,171.3711초, loss 0.4800419로 완료했고 exact pinned tokenizer와 504 LoRA tensor를 검증한 adapter를 atomic publish했다. adapter EM은 627/2,942(21.3120%)로 base보다 -19.8165%p여서 나머지 fold를 중단했다. |
-| concise-rationale candidate | **CPU teacher pilot fail-closed / GPU 모델 단계 미실행** | exact fold-training ID coverage, question/target/teacher/config SHA, reference-answer/parser 검증, training-only/no-tool/no-test/no-holdout 정책, immutable teacher ledger, atomic corpus+manifest, raw-free audit, v4 SFT preflight/adapter provenance를 구현했다. `20260811T103224KST` 128문제 question-only pilot은 first pass 103/128(80.47%)이었지만, 총 3회 뒤 111/128만 승인되고 17행이 exhaustion 됐다. pilot은 source bank 없이 끝났고, 현재 강화된 safe-command contract는 그 historic ledger도 재사용하지 않는다. 따라서 logical audit, canonical corpus, rationale QLoRA, 새 generation과 모델 점수는 없다. |
+| concise-rationale candidate | **historic v1·fresh pilot-v2 모두 fail-closed / GPU 모델 단계 미실행** | historic `20260811T103224KST` question-only pilot은 111/128 승인·17 exhaustion으로 종료됐다. 새 `20260811T132301KST` pilot-v2는 separate prompt/template-policy SHA, 32행×4·worker 1로 first pass 105/128(82.03%)를 기록했지만 최대 3회 뒤 106/128 승인·7 exhaustion·15 retryable로 fail-closed됐다. 두 ledger 모두 재개하지 않으며 source bank, logical audit, canonical corpus, rationale QLoRA, 새 generation과 모델 점수는 없다. |
 | parser v2 | **current-source 재현 완료** | 기존 immutable raw의 CPU rescore는 진단 전용이지만, `20260810T234907KST`에서 새 generation을 atomic publish해 1,653/2,942와 conflict 3건을 selection-eligible stored parse로 재현했다. |
 | leaderboard prediction/submission | **미실행** | 모델 prediction 0건; leaderboard를 학습/API 입력에 쓰지 않음 |
 
@@ -102,7 +102,8 @@ diagnostic generation과 CPU rescore는 새 bundle 대신 selection 근거로 �
   `reference_answer_in_prompt_true_count=0`을 다시 계산해 기록하며, pair publish의 두 번째
   link가 어떤 I/O 오류로 실패해도 첫 번째 link를 제거하고 디렉터리를 fsync한다.
 - `teacher_rationale.py` 및 teacher CLI: ChatGPT 로그인 Codex `gpt-5.6-sol`을 위한
-  question-only immutable plan, 64문제 chunk ledger, append-only attempt/parsed/assessment
+  question-only immutable plan, historic v1과 별도 `teacher-pilot-v2` prompt/template SHA
+  profile, 32문제 fresh-pilot initial chunk ledger, append-only attempt/parsed/assessment
   기록, raw-free status, 동일 contract의 완전 검증 attempt만 재개 시 재사용하는 정책과
   fail-closed finalizer를 제공한다.
   organizer reference answer는 prompt에 넣지 않고 local finalizer에서만 exact match에 쓴다.
@@ -118,14 +119,18 @@ diagnostic generation과 CPU rescore는 새 bundle 대신 selection 근거로 �
   pilot은 local first pass 103/128(80.47%), 최대 3회 후 111/128 승인·17 exhaustion으로
   source bank 전에 fail-closed됐으므로 audit은 시작하지 않았다. raw-free aggregate 결과는
   `artifacts/analysis/gate-b-teacher-pilot-v1-20260811T103224KST-final-v1.json`에 고정했다.
-  이 historic ledger는 `inherit="none"` command contract 이전의 것이므로 current loader가
-  의도적으로 reject하며, 새 pilot은 새 versioned ledger로만 시작한다.
+  `20260811T132301KST` fresh pilot-v2도 first pass 105/128(82.03%), 최종 106/128 승인·7
+  exhaustion으로 fail-closed됐고 raw-free final artifact는
+  `artifacts/analysis/gate-b-teacher-pilot-v2-20260811T132301KST-final-v2.json`이다. 이
+  historic v1 ledger는 `inherit="none"` command contract 이전의 것이므로 current loader가
+  의도적으로 reject하며, v2 ledger도 exhaustion 때문에 재개·승격하지 않는다.
 - `teacher_pilot_authorization.py`: full v1 bank plan은 deterministic 128-row pilot의
   first-pass 80% 이상, 최대 3회 내 전원 승인, source-bank provenance, passed 64→60 audit을
-  재검증한 immutable raw-free receipt 없이는 만들 수 없다. receipt는 logical-audit의
-  deterministic 64개 selection과 verified-bank question/candidate binding까지 다시 계산하고,
-  full v1 plan에는 `v1-pilot-authorization.json` sidecar를 남긴다. receipt 뒤
-  source/config/split/audit 변조도 full-plan 생성 시 다시 거부한다.
+  재검증한 immutable raw-free receipt 없이는 만들 수 없다. historic v1 receipt/sidecar는
+  기존 schema를 byte-compatible read/verify만 하고, fresh v2 receipt/sidecar는 teacher
+  prompt-policy SHA까지 별도 v2 schema로 결속한다. 양쪽 모두 logical-audit의 deterministic
+  64개 selection과 verified-bank question/candidate binding을 다시 계산하며, source/config/
+  split/audit 변조는 full-plan 생성 시 거부한다.
 - `rationale_materialization.py`: 하나 이상의 finalized private bank에서 각 fold의 exact
   `training_ids(fold)`만 private JSONL로 materialize한다. v1 full bank에는 pilot receipt
   sidecar, v2 bank에는 positive-probe sidecar가 없으면 거부한다. v1/v2 union,
@@ -346,8 +351,8 @@ leaderboard/test, locked holdout을 사용하지 않는다. 실제 teacher corpu
 ### 최신 전체 회귀
 
 - `uv run ruff check .`: **pass**
-- `CUDA_VISIBLE_DEVICES='' uv run pytest -s -q`: **398 passed, 1 skipped** (2026-08-11
-  concise-rationale corpus/audit/SFT/adapter/OOF/freeze와 rollback 회귀 포함 재실행)
+- `CUDA_VISIBLE_DEVICES='' uv run pytest -s -q`: **454 passed, 1 skipped** (2026-08-11
+  fresh teacher-pilot-v2 prompt/policy/receipt regression까지 포함한 재실행)
 - `CUDA_VISIBLE_DEVICES='' uv run coverage run --branch -m pytest -s -q` 뒤
   `uv run coverage report`: **79%** (8,099 statements, 2,928 branches)
 - skip 1건은 기본 CPU `.venv`에 PyTorch가 없어 실제 PEFT 0.20 serialization
@@ -683,7 +688,7 @@ uv run coverage report
 2026-08-11 concise-rationale CPU gate까지 반영한 현재 결과:
 
 - Ruff: pass
-- pytest: **398 passed, 1 skipped** (`torch`가 없는 기본 CPU 환경의 실제-runtime test 1개만 skip)
+- pytest: **454 passed, 1 skipped** (`torch`가 없는 기본 CPU 환경의 실제-runtime test 1개만 skip)
 - current branch coverage: **79%** (8,099 statements, 2,928 branches)
 - public-repo guard: pass
 - canonical `CHECKSUMS.sha256`: pass

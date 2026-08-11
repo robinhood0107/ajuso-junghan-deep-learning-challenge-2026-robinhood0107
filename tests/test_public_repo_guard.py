@@ -20,6 +20,7 @@ def test_forbidden_paths_cover_competition_data_credentials_and_model_outputs() 
             "env",
             ".env.production",
             ".kaggle/kaggle.json",
+            "NUL",
             "NU_",
             "id_ed25519",
             "models/adapter_model.safetensors",
@@ -36,6 +37,7 @@ def test_forbidden_paths_cover_competition_data_credentials_and_model_outputs() 
     assert violations == (
         ".env.production",
         ".kaggle/kaggle.json",
+        "NUL",
         "NU_",
         "archive/artifacts/run.json",
         "artifacts/run.json",

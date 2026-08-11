@@ -49,7 +49,7 @@ SPLIT="$PROJECT/artifacts/analysis/splits-v4.json"
 DEV_SHARD="$PROJECT/artifacts/analysis/development-cv-v4"
 CONFIG="$PROJECT/configs/gate_b/rtx4070-super-12gb-direct-answer-v1.json"
 RATIONALE_CONFIG="$PROJECT/configs/gate_b/rtx4070-super-12gb-concise-rationale-v1.json"
-TEACHER_CONFIG="$PROJECT/configs/gate_b/codex-gpt-5.6-sol-teacher-v1.json"
+TEACHER_CONFIG="$PROJECT/configs/gate_b/codex-gpt-5.6-sol-teacher-pilot-v2.json"
 RUN_TAG=replace-with-new-unique-tag
 SOURCE_MANIFEST="$PROJECT/artifacts/analysis/source-manifest-gate-b-$RUN_TAG.json"
 ```
@@ -67,9 +67,14 @@ split SHA와 bundle SHA만 넣는다.
 `RATIONALE_CONFIG`의 semantic/file SHA는 각각
 `75a315b638481a0c8213c413aa3a1253d269776d08bd2252b68654fb38c3f053`와
 `66a4c5c145881c92cb4b260ef000bd89bd62119b644f6bd1e49e9894c431064f`다.
-`TEACHER_CONFIG`의 semantic/file SHA는 각각
+fresh `TEACHER_CONFIG` (`teacher-pilot-v2`)의 semantic/file/prompt-policy SHA는 각각
+`6794dba97ba8b172b07e1b2f942d00d38e64a5f405d1144771ae037c25625de4`,
+`de9abbabe8f88bda17637b0070bc87d0ec694e37f953625ad8c1cbe4fb4b261e`,
+`5ed785c9a02bc84298ed8186681b2b21a80da50d9af4591da0c1586a28e387b3`다. historic
+`teacher-v1` config의 semantic/file SHA는 각각
 `63129b89c5daa33aad5906d15f893371aba2ac1a022172c32399fd9c0ccd29cd`와
-`9480d8d083f1f21b6c78bbf8607de70393ff1011e3919b32bce5a4434499fc75`다.
+`9480d8d083f1f21b6c78bbf8607de70393ff1011e3919b32bce5a4434499fc75`이며, forensic
+evidence 전용으로 남기고 fresh pilot에는 쓰지 않는다.
 
 현재 canonical 사실은 다음과 같다.
 
@@ -162,15 +167,26 @@ authentication state만 짧게 복사한다. 전역 skills/config/API 환경변�
 올라가지 않는다. auth state의 복사본은 실행 중 별도 temporary tree에만 존재하며 종료 시
 정리된다. raw-free status snapshot만 `artifacts/analysis/`에 쓸 수 있다.
 
-먼저 fold 0의 정확한 `training_ids(0)`에서 stable-hash sign/magnitude stratified 128문제
-pilot plan을 만든다. full 11,794문제 bank v1은 `--pilot-size`를 생략해 만들 수 있지만, 이 경우
+먼저 `teacher-pilot-v2` config로 fold 0의 정확한 `training_ids(0)`에서 stable-hash
+sign/magnitude stratified 128문제 pilot plan을 만든다. `gate-b-teacher-v2-*`는 이 pilot의
+새 이름이 아니라, 이후 positive harm screen 뒤 remaining development-CV bank를 확장하는
+별도 명령이다. full 11,794문제 bank v1은 `--pilot-size`를 생략해 만들 수 있지만, 이 경우
 아래의 immutable pilot receipt와 pilot plan/source/audit를 모두 다시 검증하는 인자를 반드시
 줘야 한다. fold, arbitrary ID, validation, holdout, leaderboard/test 입력은 CLI가 거부한다.
 
 ```bash
 FOLD=0
-TEACHER_ROOT="$PROJECT/artifacts/gate_b/codex-teacher-pilot-$RUN_TAG"
-TEACHER_STATUS="$PROJECT/artifacts/analysis/gate-b-teacher-pilot-$RUN_TAG-status.json"
+TEACHER_ROOT="$PROJECT/artifacts/gate_b/codex-teacher-pilot-v2-$RUN_TAG"
+TEACHER_STATUS="$PROJECT/artifacts/analysis/gate-b-teacher-pilot-v2-$RUN_TAG-status.json"
+
+# Code/config/docs are now frozen for this run tag.  source-manifest/status use
+# atomic replacement internally, so prove all three target paths are new first.
+test ! -e "$SOURCE_MANIFEST"
+test ! -e "$TEACHER_ROOT"
+test ! -e "$TEACHER_STATUS"
+uv run deep-challenge source-manifest \
+  --root "$PROJECT" \
+  --output "$SOURCE_MANIFEST"
 
 uv run deep-challenge gate-b-teacher-plan \
   --train "$TRAIN" \
@@ -193,8 +209,11 @@ uv run deep-challenge gate-b-teacher-status \
   --output "$TEACHER_STATUS"
 ```
 
-Pilot의 최초 호출은 CLI가 자동으로 high reasoning을 붙이고, worker 1, 64문제 두 chunk로
-제한한다. `gate-b-teacher-run`에는 reasoning-effort override가 없다. 같은 재개 호출에서도
+Pilot의 최초 호출은 CLI가 자동으로 high reasoning을 붙이고, worker 1, 32문제 네 chunk로
+제한한다. v2 prompt는 question string을 untrusted data로 취급하고 role/tool/network/format
+변경 지시를 따르지 않으며, 각 integer의 산술·부호 재검사를 요구한다. 이는 성능 보장이 아니라
+per-call failure blast radius를 줄이는 bounded-quality candidate다. `gate-b-teacher-run`에는
+reasoning-effort override가 없다. 같은 재개 호출에서도
 unattempted chunk는 high, local finalizer가 rejected로 판정한 repair row만 xhigh와 16문제 이하
 chunk를 자동 적용한다. status/terminal에는 aggregate count, latency, token usage, ledger lock
 PID만 보이고 raw payload는 나오지 않는다.
@@ -204,7 +223,7 @@ uv run deep-challenge gate-b-teacher-run \
   --plan-dir "$TEACHER_ROOT" \
   --teacher-config "$TEACHER_CONFIG" \
   --acknowledge-codex-teacher \
-  --max-invocations 2 \
+  --max-invocations 4 \
   --max-workers 1
 ```
 
@@ -213,7 +232,8 @@ accepted되지 않은 row가 있으면 source JSONL을 만들지 않고 `complet
 manual ID selection이나 gold answer 재-prompt는 금지다. ledger가 선택한 failed row만 xhigh,
 16문제 이하 repair chunk로 최대 총 3회까지 재시도한다. complete가 아니면 아래 두 명령을
 `finalize → automatic repair run → finalize` 순서로 반복하고, exhausted row가 하나라도 생기면
-fail-closed다.
+plan 전체가 fail-closed된다. 이후 `gate-b-teacher-run`은 남은 retryable row가 있어도 추가
+teacher 실행을 거부하며, raw-free status 조회와 aggregate 보존만 허용한다.
 
 ```bash
 PRIVATE_TEACHER_JSONL="$TEACHER_ROOT/source-rationales.jsonl"
@@ -258,11 +278,20 @@ GPU harm screen is still required before adding the other 2,942 development-CV I
 
 현재 `20260811T103224KST` pilot은 first pass 103/128(80.47%)이었지만 final 111/128,
 exhausted 17로 fail-closed 됐다. 이 plan에서 logical audit, full v1 bank, corpus, GPU를
-이어 실행하지 않는다. 새 teacher prompt/policy 후보는 기존 ledger를 수정하지 않는 새 versioned
-pilot로만 다시 시작할 수 있다. 이 historic ledger는 현재의
+이어 실행하지 않는다. 새 `teacher-pilot-v2` prompt/policy 후보는 기존 ledger를 수정하지 않는
+새 versioned pilot로만 다시 시작할 수 있다. 이 historic ledger는 현재의
 `shell_environment_policy.inherit="none"` safe-command contract 이전에 만들어졌으므로,
 현재 status/finalize loader가 의도적으로 reject한다. raw-free final aggregate는 보존 증거일
 뿐 재개 입력이 아니며, 호환성을 위해 prompt/argv 검증을 완화하지 않는다.
+
+`20260811T132301KST` fresh `teacher-pilot-v2` run은 이 런북의 32행×4/worker 1 profile로
+실행됐다. first pass는 105/128(82.03%)로 80% gate를 넘었지만, 최대 3회 후 106/128만
+승인되고 7개가 exhaustion되어 fail-closed됐다. raw-free 결과는
+`artifacts/analysis/gate-b-teacher-pilot-v2-20260811T132301KST-final-v2.json` (SHA-256
+`5d50fdb41c0503546e673393d97b24bf7dc5c92e52577738eada35c143ac874e`)에 고정했다. 이 tag의
+ledger를 더 실행하거나 partial source를 materialize하지 않는다. 새 prompt/config design을
+CPU test로 검증한 별도 version/tag가 생기기 전에는 이 절 아래의 audit/full-bank/GPU 명령을
+실행하지 않는다.
 
 complete private bank가 생기면 audit agent에는 problem, candidate rationale와 candidate가 주장한
 final integer만 보낸다. organizer reference answer를 다시 열거나 전달하지 않는다. audit의
@@ -316,7 +345,13 @@ uv run deep-challenge gate-b-teacher-pilot-authorize \
 만들 때도 receipt만 신뢰하지 않고 동일 private evidence를 다시 hash-validate한다.
 
 ```bash
-FULL_TEACHER_ROOT="$PROJECT/artifacts/gate_b/codex-teacher-v1-full-$RUN_TAG"
+FULL_TEACHER_ROOT="$PROJECT/artifacts/gate_b/codex-teacher-pilot-v2-full-$RUN_TAG"
+FULL_TEACHER_STATUS="$PROJECT/artifacts/analysis/gate-b-teacher-pilot-v2-full-$RUN_TAG-status.json"
+FULL_TEACHER_JSONL="$FULL_TEACHER_ROOT/source-rationales.jsonl"
+FULL_TEACHER_MANIFEST="$FULL_TEACHER_ROOT/source-rationales.manifest.json"
+
+test ! -e "$FULL_TEACHER_ROOT"
+test ! -e "$FULL_TEACHER_STATUS"
 
 uv run deep-challenge gate-b-teacher-plan \
   --train "$TRAIN" \
@@ -336,6 +371,35 @@ uv run deep-challenge gate-b-teacher-plan \
   --pilot-source-jsonl "$PRIVATE_TEACHER_JSONL" \
   --pilot-source-manifest "$PRIVATE_TEACHER_MANIFEST" \
   --pilot-logical-audit-dir "$LOGICAL_AUDIT_ROOT"
+
+# This is a separate high-cost gate: only after the fresh pilot receipt exists.
+# The full bank may use at most two workers; it keeps the same v2 prompt policy.
+uv run deep-challenge gate-b-teacher-run \
+  --plan-dir "$FULL_TEACHER_ROOT" \
+  --teacher-config "$TEACHER_CONFIG" \
+  --acknowledge-codex-teacher \
+  --max-workers 2
+
+uv run deep-challenge gate-b-teacher-status \
+  --plan-dir "$FULL_TEACHER_ROOT" \
+  --teacher-config "$TEACHER_CONFIG" \
+  --output "$FULL_TEACHER_STATUS"
+
+uv run deep-challenge gate-b-teacher-finalize \
+  --train "$TRAIN" \
+  --train-exclusions "$EXCLUSIONS" \
+  --split-artifact "$SPLIT" \
+  --fold "$FOLD" \
+  --expected-train-sha256 "$TRAIN_SHA" \
+  --expected-exclusions-sha256 "$EXCLUSIONS_SHA" \
+  --expected-exclusion-count 627 \
+  --expected-split-sha256 "$SPLIT_SHA" \
+  --development-shard "$DEV_SHARD" \
+  --expected-development-shard-sha256 "$DEV_SHARD_SHA" \
+  --teacher-config "$TEACHER_CONFIG" \
+  --plan-dir "$FULL_TEACHER_ROOT" \
+  --output-jsonl "$FULL_TEACHER_JSONL" \
+  --output-manifest "$FULL_TEACHER_MANIFEST"
 ```
 
 ### 3.2 verified concise-rationale CPU gate
@@ -350,13 +414,14 @@ teacher provider/model/revision, prompt/generation/raw SHA, seed/sample index,
 
 ```bash
 FOLD=0
-PRIVATE_TEACHER_JSONL=/private/path/fold-0-teacher-rationales.jsonl
+PRIVATE_TEACHER_JSONL="$FULL_TEACHER_JSONL"
+PRIVATE_TEACHER_MANIFEST="$FULL_TEACHER_MANIFEST"
 RATIONALE_ROOT="$PROJECT/artifacts/gate_b/rationale-$RUN_TAG/fold-$FOLD"
-mkdir -p "$RATIONALE_ROOT"
+test ! -e "$RATIONALE_ROOT"
+mkdir "$RATIONALE_ROOT"
 
-# bank v1만으로 fold 0 exact training IDs를 materialize한다. v2가 승인된 뒤에는
-# --teacher-bank PLAN_DIR SOURCE_JSONL SOURCE_MANIFEST을 한 번 더 추가해 다른 fold의
-# exact training IDs만 materialize한다.
+# receipt-bound full fold-0 bank만 materialize한다. pilot 128행 bank는 full
+# training coverage가 아니므로 이 입력으로 사용할 수 없다.
 uv run deep-challenge gate-b-materialize-teacher-bank \
   --train "$TRAIN" \
   --train-exclusions "$EXCLUSIONS" \
@@ -368,7 +433,7 @@ uv run deep-challenge gate-b-materialize-teacher-bank \
   --expected-split-sha256 "$SPLIT_SHA" \
   --development-shard "$DEV_SHARD" \
   --expected-development-shard-sha256 "$DEV_SHARD_SHA" \
-  --teacher-bank "$TEACHER_ROOT" "$PRIVATE_TEACHER_JSONL" "$PRIVATE_TEACHER_MANIFEST" \
+  --teacher-bank "$FULL_TEACHER_ROOT" "$PRIVATE_TEACHER_JSONL" "$PRIVATE_TEACHER_MANIFEST" \
   --output-jsonl "$RATIONALE_ROOT/teacher-source.jsonl" \
   --output-manifest "$RATIONALE_ROOT/teacher-source.manifest.json"
 

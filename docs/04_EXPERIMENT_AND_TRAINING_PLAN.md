@@ -49,9 +49,13 @@
   raw-free audit, SFT preflight v4와 adapter provenance 경로까지 구현했다. teacher prompt에는
   organizer reference answer를 제공하지 않고(`reference_answer_in_prompt=false`), 생성 후
   organizer answer/parser exact match로 rejection한다. production corpus와 모델 점수는 아직 없다.
-- no-API teacher 실행은 ChatGPT 로그인 Codex CLI `gpt-5.6-sol`만 허용한다. immutable
-  question-only plan과 64문제 chunk SHA, append-only event/parsed/assessment ledger,
-  retry cap 3, initial high/repair xhigh, 최대 worker 2, raw-free status/lock PID를 고정한다.
+- no-API teacher 실행은 ChatGPT 로그인 Codex CLI `gpt-5.6-sol`만 허용한다. historic v1와
+  fresh `teacher-pilot-v2` ledger는 모두 forensic failure evidence로만 남긴다. v2는
+  first pass 105/128(82.03%) 뒤 최대 3회에서 106/128 승인·7 exhaustion으로 fail-closed됐으므로,
+  재개하지 않는다. 다음 teacher 후보는 새 immutable prompt/config version과 별도 plan tag를
+  사용해야 하며, question-only plan, 32문제×4 initial chunk SHA, append-only
+  event/parsed/assessment ledger, retry cap 3, initial high/repair xhigh, pilot worker 1/full
+  bank 최대 worker 2, raw-free status/lock PID를 고정한다.
   CLI는 빈 workdir와 auth-only temporary `CODEX_HOME`을 사용해 전역 skill/config/API token을
   넘기지 않는다. Codex tool/error/schema/ID/order violation은 fail-closed이며, reference
   answer는 local finalizer에만 있고 prompt에는 절대 들어가지 않는다.

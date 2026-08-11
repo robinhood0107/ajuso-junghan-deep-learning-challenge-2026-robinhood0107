@@ -36,6 +36,7 @@ id_rsa
 *.p12
 *.pfx
 *.pem
+NUL
 NU_
 이어서 하기 프롬프트.txt
 

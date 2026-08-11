@@ -120,6 +120,7 @@ from .teacher_rationale import (
     TeacherExecutionConfig,
     TeacherLogicalAuditPlan,
     TeacherPlan,
+    TeacherPromptPolicy,
     create_teacher_logical_audit_plan,
     create_teacher_plan,
     finalize_teacher_bank,
@@ -160,6 +161,39 @@ _LOCKED_CODEX_TEACHER_CONFIG: dict[str, object] = {
     "reference_answer_in_prompt": False,
     "allow_tool_use": False,
     "network_scope": "training_only",
+}
+
+# This profile is intentionally separate from the historic v1 teacher ledger
+# and from the later ``gate-b-teacher-v2-*`` development-CV expansion commands.
+# It creates a fresh 128-row pilot with the same safety limits but a versioned
+# question-only prompt and smaller, immutable initial chunks.
+_LOCKED_CODEX_TEACHER_PILOT_V2_CONFIG: dict[str, object] = {
+    "schema_version": "gate-b-codex-teacher-pilot-config-v2",
+    "label": "codex-gpt-5.6-sol-teacher-pilot-v2",
+    "version": "pilot-v2",
+    "provider": "chatgpt_codex_cli",
+    "model_id": "gpt-5.6-sol",
+    "model_revision": "gpt-5.6-sol",
+    "initial_reasoning_effort": "high",
+    "repair_reasoning_effort": "xhigh",
+    "seed": 20_260_731,
+    "initial_chunk_size": 32,
+    "repair_chunk_size": 16,
+    "max_attempts": 3,
+    "pilot_size": 128,
+    "max_concurrent_workers": 2,
+    "reference_answer_in_prompt": False,
+    "allow_tool_use": False,
+    "network_scope": "training_only",
+    "prompt_version": "gate-b-codex-teacher-prompt-v2",
+    "prompt_template_sha256": "743fb09547055475a8d73856859e9f068d6332cdb2a2bcd9802052c3d5b917b0",
+}
+
+_LOCKED_CODEX_TEACHER_CONFIGS = {
+    str(_LOCKED_CODEX_TEACHER_CONFIG["schema_version"]): _LOCKED_CODEX_TEACHER_CONFIG,
+    str(_LOCKED_CODEX_TEACHER_PILOT_V2_CONFIG["schema_version"]): (
+        _LOCKED_CODEX_TEACHER_PILOT_V2_CONFIG
+    ),
 }
 
 # This is a separate immutable profile from the rationale-generation profile
@@ -1909,6 +1943,7 @@ def _command_gate_b_teacher_plan(args: argparse.Namespace) -> int:
         label=_teacher_config_string(teacher_config, "label"),
         version=_teacher_config_string(teacher_config, "version"),
         execution=execution,
+        prompt_policy=_teacher_prompt_policy_from_config(teacher_config),
     )
     full_v1_authorization_payload_sha256 = None
     if pilot_receipt is not None:
@@ -2424,6 +2459,7 @@ def _command_gate_b_teacher_v2_plan(args: argparse.Namespace) -> int:
         label=_CODEX_TEACHER_V2_PLAN_LABEL,
         version=_CODEX_TEACHER_V2_PLAN_VERSION,
         execution=execution,
+        prompt_policy=_teacher_prompt_policy_from_config(teacher_config),
     )
     authorization_sha256 = _write_teacher_v2_authorization(
         plan,
@@ -3123,10 +3159,13 @@ def _load_locked_codex_teacher_config(path: Path) -> tuple[dict[str, object], st
     if not isinstance(stored_sha256, str):
         raise ValueError("Codex teacher config is missing config_sha256")
     semantic_sha256 = _teacher_config_sha256(payload)
-    if (
-        payload != _LOCKED_CODEX_TEACHER_CONFIG
-        or stored_sha256 != semantic_sha256
-    ):
+    schema_version = payload.get("schema_version")
+    expected = (
+        _LOCKED_CODEX_TEACHER_CONFIGS.get(schema_version)
+        if isinstance(schema_version, str)
+        else None
+    )
+    if payload != expected or stored_sha256 != semantic_sha256:
         raise ValueError("Codex teacher config differs from the locked no-API profile")
     return payload, sha256_file(path)
 
@@ -3153,6 +3192,21 @@ def _teacher_config_int(config: dict[str, object], field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):  # pragma: no cover
         raise RuntimeError(f"locked Codex teacher config field is not an integer: {field}")
     return value
+
+
+def _teacher_prompt_policy_from_config(config: dict[str, object]) -> TeacherPromptPolicy:
+    """Return the only prompt policy approved by one immutable config profile."""
+
+    prompt_version = config.get("prompt_version", "gate-b-codex-teacher-prompt-v1")
+    if not isinstance(prompt_version, str):  # pragma: no cover - locked config check above
+        raise RuntimeError("locked Codex teacher prompt version is not text")
+    template_sha256 = config.get("prompt_template_sha256")
+    if template_sha256 is not None and not isinstance(template_sha256, str):  # pragma: no cover
+        raise RuntimeError("locked Codex teacher prompt template SHA is not text")
+    return TeacherPromptPolicy(
+        prompt_version=prompt_version,
+        prompt_template_sha256=template_sha256,
+    )
 
 
 def _teacher_execution_from_config(
@@ -3261,6 +3315,9 @@ def _teacher_pilot_authorization_contract(
     return TeacherPilotAuthorizationContract(
         teacher_config_sha256=_teacher_config_sha256(teacher_config),
         teacher_config_file_sha256=config_file_sha256,
+        teacher_prompt_policy_sha256=_teacher_prompt_policy_from_config(
+            teacher_config
+        ).sha256,
         train_sha256=train.manifest.sha256,
         exclusions_sha256=exclusions.manifest.sha256,
         exclusion_count=len(exclusions),
@@ -3347,6 +3404,7 @@ def _require_teacher_plan_matches_config(
         != _teacher_config_string(config, "initial_reasoning_effort")
         or plan.execution.seed != _teacher_config_int(config, "seed")
         or plan.execution.codex_cli_version == "unknown"
+        or plan.prompt_policy != _teacher_prompt_policy_from_config(config)
     ):
         raise ValueError("teacher plan does not match the locked Codex teacher profile")
 
@@ -3435,6 +3493,7 @@ def _require_teacher_v2_plan_matches_config(
         != _teacher_config_string(config, "initial_reasoning_effort")
         or plan.execution.seed != _teacher_config_int(config, "seed")
         or plan.execution.codex_cli_version == "unknown"
+        or plan.prompt_policy != _teacher_prompt_policy_from_config(config)
     ):
         raise ValueError("v2 teacher plan does not match its locked scope/profile")
 

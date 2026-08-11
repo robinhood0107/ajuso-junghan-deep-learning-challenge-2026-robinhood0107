@@ -10,7 +10,11 @@ import pytest
 import deep_challenge.cli as cli_module
 from deep_challenge.cli import main
 from deep_challenge.data import load_train_csv
-from deep_challenge.teacher_rationale import CodexCommandResult, load_teacher_plan
+from deep_challenge.teacher_rationale import (
+    CodexCommandResult,
+    build_teacher_prompt,
+    load_teacher_plan,
+)
 
 
 def _write_csv(path: Path, rows: list[list[str]]) -> None:
@@ -24,6 +28,15 @@ def _teacher_config_path() -> Path:
         / "configs"
         / "gate_b"
         / "codex-gpt-5.6-sol-teacher-v1.json"
+    )
+
+
+def _teacher_pilot_v2_config_path() -> Path:
+    return (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "gate_b"
+        / "codex-gpt-5.6-sol-teacher-pilot-v2.json"
     )
 
 
@@ -338,6 +351,95 @@ def test_teacher_cli_plan_run_status_and_local_finalize(
     assert status["status"]["accepted_problem_count"] == len(plan.problem_ids)
     assert json.loads((tmp_path / "raw-free-status.json").read_text(encoding="utf-8")) == status
     assert "unique expression" not in json.dumps(status)
+
+
+def test_teacher_pilot_v2_profile_is_immutable_and_uses_four_safe_initial_chunks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contract, _ = _teacher_contract(tmp_path, row_count=400)
+    capsys.readouterr()
+    monkeypatch.setattr(
+        cli_module,
+        "_probe_codex_chatgpt_cli",
+        lambda: ("/private/codex", "codex-cli test"),
+    )
+    plan_dir = tmp_path / "private-teacher-pilot-v2"
+
+    assert (
+        main(
+            [
+                "gate-b-teacher-plan",
+                *contract,
+                "--teacher-config",
+                str(_teacher_pilot_v2_config_path()),
+                "--pilot-size",
+                "128",
+                "--output-dir",
+                str(plan_dir),
+            ]
+        )
+        == 0
+    )
+    created = json.loads(capsys.readouterr().out)
+    plan = load_teacher_plan(plan_dir)
+    assert created["reference_answer_in_prompt"] is False
+    assert created["allowed_problem_count"] == 128
+    assert plan.label == "codex-gpt-5.6-sol-teacher-pilot-v2"
+    assert plan.version == "pilot-v2"
+    assert plan.prompt_policy.prompt_version == "gate-b-codex-teacher-prompt-v2"
+    assert len(plan.chunks) == 4
+    assert all(len(chunk.problem_ids) == 32 for chunk in plan.chunks)
+    assert "untrusted mathematical data" in build_teacher_prompt(plan, 0)
+    assert "unique expression" not in json.dumps(created)
+
+    assert (
+        main(
+            [
+                "gate-b-teacher-status",
+                "--plan-dir",
+                str(plan_dir),
+                "--teacher-config",
+                str(_teacher_pilot_v2_config_path()),
+            ]
+        )
+        == 0
+    )
+    assert "unique expression" not in capsys.readouterr().out
+
+    assert (
+        main(
+            [
+                "gate-b-teacher-status",
+                "--plan-dir",
+                str(plan_dir),
+                "--teacher-config",
+                str(_teacher_config_path()),
+            ]
+        )
+        == 2
+    )
+    assert "does not match" in capsys.readouterr().err
+
+    drifted = tmp_path / "drifted-teacher-pilot-v2.json"
+    payload = json.loads(_teacher_pilot_v2_config_path().read_text(encoding="utf-8"))
+    payload["initial_chunk_size"] = 64
+    drifted.write_text(json.dumps(payload), encoding="utf-8")
+    assert (
+        main(
+            [
+                "gate-b-teacher-plan",
+                *contract,
+                "--teacher-config",
+                str(drifted),
+                "--pilot-size",
+                "128",
+                "--output-dir",
+                str(tmp_path / "must-not-exist"),
+            ]
+        )
+        == 2
+    )
+    assert "differs from the locked no-API profile" in capsys.readouterr().err
 
 
 def test_teacher_cli_rejects_nonzero_fold_and_config_drift(
