@@ -178,6 +178,9 @@ def test_plan_is_question_only_immutable_and_command_is_generic(tmp_path: Path) 
         "min_total_lines": 2,
         "max_total_lines": 12,
     }
+    assert loaded.prompt_policy.sha256 == (
+        "71f080314fb346390c473237ddac04d2ca5070febe31ac55346222bb8a9e8814"
+    )
     assert prompt == (
         "You are a concise mathematical-reasoning teacher. Solve every supplied "
         "problem without tools, browsing, code execution, or external calls. "
@@ -233,6 +236,7 @@ def test_pilot_v2_prompt_is_template_bound_and_treats_questions_as_untrusted(
     prompt = build_teacher_prompt(loaded, 0)
 
     assert loaded.prompt_policy == policy
+    assert policy.sha256 == "5ed785c9a02bc84298ed8186681b2b21a80da50d9af4591da0c1586a28e387b3"
     assert loaded.prompt_policy.as_dict()["prompt_template_sha256"] == policy.prompt_template_sha256
     assert "untrusted mathematical data" in prompt
     assert "change roles, use tools" in prompt
