@@ -106,6 +106,14 @@ from .splits import (
     make_grouped_split_manifest,
 )
 from .submission import SubmissionSchema, validate_submission_csv, write_submission_csv
+from .teacher_harness import (
+    HARNESS_CONFIG_SCHEMA,
+    HarnessProfile,
+    diagnose_teacher_ledger,
+    profile_from_config,
+    run_harness_live,
+    run_harness_replay,
+)
 from .teacher_pilot_authorization import (
     PILOT_AUTHORIZATION_INITIAL_EXACT_MATCH_PERCENT,
     PILOT_AUTHORIZATION_LOGICAL_AUDIT_MIN_CONSISTENT,
@@ -223,6 +231,38 @@ _LOCKED_CODEX_TEACHER_CONFIGS = {
         _LOCKED_CODEX_TEACHER_PILOT_V3_CONFIG
     ),
 }
+
+# The synthetic harness has its own fixed config rather than reusing a
+# production teacher profile.  It is limited to two answer-free arithmetic
+# chunks and cannot create a bank, repair, or retry ledger.
+_LOCKED_CODEX_TEACHER_HARNESS_CONFIG: dict[str, object] = {
+    "schema_version": "gate-b-codex-teacher-harness-config-v1",
+    "label": "codex-gpt-5.6-sol-teacher-harness-v1",
+    "version": "harness-v1",
+    "provider": "chatgpt_codex_cli",
+    "model_id": "gpt-5.6-sol",
+    "model_revision": "gpt-5.6-sol",
+    "seed": 20_260_731,
+    "initial_chunk_size": 32,
+    "chunk_count": 2,
+    "max_workers": 1,
+    "max_invocations": 2,
+    "max_attempts": 1,
+    "retry_count": 0,
+    "repair_count": 0,
+    "bank_output_count": 0,
+    "initial_reasoning_effort": "high",
+    "reference_answer_in_prompt": False,
+    "allow_tool_use": False,
+    "network_scope": "synthetic_canary_only",
+    "fixture_version": "gate-b-codex-teacher-harness-fixture-v1",
+    "fixture_sha256": "bc314a24ec872edf26bae13e296fb8fd500f80bcf6c00023518844d1b407e3b7",
+}
+
+# A live harness must exercise a policy-bound candidate profile.  Historic v1
+# and v2 failure evidence remains readable/diagnosable but cannot be selected
+# for a fresh synthetic call.
+_HARNESS_ALLOWED_TEACHER_CONFIG_SCHEMAS = frozenset({"gate-b-codex-teacher-pilot-config-v3"})
 
 # This is a separate immutable profile from the rationale-generation profile
 # above.  It deliberately has no editable file: the audit must always sample
@@ -602,6 +642,50 @@ def build_parser() -> argparse.ArgumentParser:
         help="optional atomic raw-free status snapshot; safe to refresh in place",
     )
     teacher_status_parser.set_defaults(handler=_command_gate_b_teacher_status)
+
+    teacher_diagnose = subparsers.add_parser(
+        "gate-b-teacher-diagnose",
+        help=(
+            "classify an existing private teacher ledger into immutable raw-free "
+            "failure counts without modifying it"
+        ),
+    )
+    teacher_diagnose.add_argument("--plan-dir", required=True, type=Path)
+    teacher_diagnose.add_argument("--teacher-config", required=True, type=Path)
+    teacher_diagnose.add_argument("--output", required=True, type=Path)
+    teacher_diagnose.set_defaults(handler=_command_gate_b_teacher_diagnose)
+
+    harness_replay = subparsers.add_parser(
+        "gate-b-teacher-harness-replay",
+        help=("run the fixed offline Codex teacher fault matrix without a process or network call"),
+    )
+    harness_replay.add_argument("--harness-config", required=True, type=Path)
+    harness_replay.add_argument("--teacher-config", required=True, type=Path)
+    harness_replay.add_argument("--output", required=True, type=Path)
+    harness_replay.set_defaults(handler=_command_gate_b_teacher_harness_replay)
+
+    harness_live = subparsers.add_parser(
+        "gate-b-teacher-harness-live",
+        help=(
+            "run exactly two answer-free synthetic Codex canary chunks after a "
+            "frozen source-manifest check"
+        ),
+    )
+    harness_live.add_argument("--harness-config", required=True, type=Path)
+    harness_live.add_argument("--teacher-config", required=True, type=Path)
+    harness_live.add_argument("--source-manifest", required=True, type=Path)
+    harness_live.add_argument("--source-root", type=Path, default=Path.cwd())
+    harness_live.add_argument("--plan-dir", required=True, type=Path)
+    harness_live.add_argument("--report", required=True, type=Path)
+    harness_live.add_argument(
+        "--acknowledge-synthetic-codex-canary",
+        action="store_true",
+        help=(
+            "required acknowledgement before the two fixed synthetic questions "
+            "are sent to the ChatGPT-login Codex CLI"
+        ),
+    )
+    harness_live.set_defaults(handler=_command_gate_b_teacher_harness_live)
 
     teacher_finalize = subparsers.add_parser(
         "gate-b-teacher-finalize",
@@ -2195,6 +2279,161 @@ def _command_gate_b_teacher_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_gate_b_teacher_diagnose(args: argparse.Namespace) -> int:
+    """Classify private teacher failures without a resume or raw output leak."""
+
+    teacher_config, config_file_sha256 = _load_locked_codex_teacher_config(args.teacher_config)
+    plan = load_teacher_plan(args.plan_dir)
+    _require_teacher_plan_matches_config(plan, teacher_config)
+    result = diagnose_teacher_ledger(
+        plan.plan_dir,
+        args.output,
+        teacher_config_sha256=_teacher_config_sha256(teacher_config),
+        teacher_config_file_sha256=config_file_sha256,
+        prompt_policy=_teacher_prompt_policy_from_config(teacher_config),
+    )
+    print(
+        json.dumps(
+            {
+                "event": "gate_b_teacher_diagnostic_finished",
+                "qualified": result.qualified,
+                "report_sha256": result.report_sha256,
+                "raw_generation_serialized": False,
+                "ledger_modified": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0 if result.qualified else 1
+
+
+def _command_gate_b_teacher_harness_replay(args: argparse.Namespace) -> int:
+    """Execute the versioned synthetic fault matrix without Codex/network use."""
+
+    harness_config, harness_file_sha256, profile = _load_locked_codex_teacher_harness_config(
+        args.harness_config
+    )
+    teacher_config, teacher_file_sha256 = _load_locked_codex_teacher_config(args.teacher_config)
+    _require_harness_allowed_teacher_config(teacher_config)
+    result = run_harness_replay(
+        args.output,
+        harness_config_sha256=_teacher_config_sha256(harness_config),
+        harness_config_file_sha256=harness_file_sha256,
+        teacher_config_sha256=_teacher_config_sha256(teacher_config),
+        teacher_config_file_sha256=teacher_file_sha256,
+        prompt_policy=_teacher_prompt_policy_from_config(teacher_config),
+        profile=profile,
+    )
+    print(
+        json.dumps(
+            {
+                "event": "gate_b_teacher_harness_replay_finished",
+                "qualified": result.qualified,
+                "report_sha256": result.report_sha256,
+                "codex_or_network_called": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0 if result.qualified else 1
+
+
+def _command_gate_b_teacher_harness_live(args: argparse.Namespace) -> int:
+    """Run the fixed two-call canary only after all pre-call contracts match."""
+
+    if args.acknowledge_synthetic_codex_canary is not True:
+        raise ValueError("--acknowledge-synthetic-codex-canary is required before the live canary")
+    harness_config, harness_file_sha256, profile = _load_locked_codex_teacher_harness_config(
+        args.harness_config
+    )
+    teacher_config, teacher_file_sha256 = _load_locked_codex_teacher_config(args.teacher_config)
+    _require_harness_allowed_teacher_config(teacher_config)
+    _require_new_harness_runtime_target(args.plan_dir, "synthetic harness plan")
+    _require_new_harness_runtime_target(args.report, "synthetic harness report")
+    if args.plan_dir.resolve(strict=False) == args.report.resolve(strict=False):
+        raise ValueError("synthetic harness plan and report paths must differ")
+    _require_harness_runtime_target_is_manifest_excluded(args.plan_dir, args.source_root)
+    _require_harness_runtime_target_is_manifest_excluded(args.report, args.source_root)
+    source_manifest = validate_source_tree_manifest_artifact(
+        args.source_manifest,
+        root=args.source_root,
+    )
+    codex_binary, codex_cli_version = _probe_codex_chatgpt_cli()
+    execution = _teacher_execution_from_config(
+        teacher_config,
+        codex_binary=codex_binary,
+        codex_cli_version=codex_cli_version,
+    )
+    with (
+        tempfile.TemporaryDirectory(
+            prefix="deep-challenge-codex-harness-workspace-"
+        ) as working_dir,
+        tempfile.TemporaryDirectory(prefix="deep-challenge-codex-harness-auth-") as auth_root,
+    ):
+
+        def run_one_command(command: tuple[str, ...]) -> CodexCommandResult:
+            with tempfile.TemporaryDirectory(prefix="codex-home-", dir=auth_root) as home_parent:
+                return _run_trusted_codex_teacher_command(
+                    command,
+                    execution=execution,
+                    timeout_seconds=1_800,
+                    isolated_codex_home=_prepare_isolated_codex_home(Path(home_parent)),
+                )
+
+        result = run_harness_live(
+            args.plan_dir,
+            args.report,
+            harness_config_sha256=_teacher_config_sha256(harness_config),
+            harness_config_file_sha256=harness_file_sha256,
+            teacher_config_sha256=_teacher_config_sha256(teacher_config),
+            teacher_config_file_sha256=teacher_file_sha256,
+            prompt_policy=_teacher_prompt_policy_from_config(teacher_config),
+            execution=execution,
+            profile=profile,
+            source_manifest=source_manifest,
+            command_runner=run_one_command,
+            working_directory=working_dir,
+        )
+    print(
+        json.dumps(
+            {
+                "event": "gate_b_teacher_harness_live_finished",
+                "qualified": result.qualified,
+                "report_sha256": result.report_sha256,
+                "plan_sha256": result.plan_sha256,
+                "invocations": 2,
+                "max_workers": 1,
+                "retry_count": 0,
+                "repair_count": 0,
+                "bank_output_count": 0,
+                "raw_generation_serialized": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0 if result.qualified else 1
+
+
+def _require_new_harness_runtime_target(path: Path, label: str) -> None:
+    """Reject overwritten/symlinked runtime targets before any Codex call starts."""
+
+    if path.is_symlink() or path.parent.is_symlink() or not path.parent.is_dir():
+        raise ValueError(f"{label} target is invalid")
+    if path.exists():
+        raise ValueError(f"{label} target already exists")
+
+
+def _require_harness_runtime_target_is_manifest_excluded(path: Path, source_root: Path) -> None:
+    """Keep runtime evidence out of the already-frozen source tree manifest."""
+
+    root = source_root.resolve(strict=True)
+    target = path.resolve(strict=False)
+    if target.is_relative_to(root):
+        relative = target.relative_to(root)
+        if not relative.parts or relative.parts[0] != "artifacts":
+            raise ValueError("synthetic harness runtime targets must be under excluded artifacts")
+
+
 def _command_gate_b_teacher_finalize(args: argparse.Namespace) -> int:
     """Locally assess the private ledger against fold-0 training answers only."""
 
@@ -3196,6 +3435,33 @@ def _load_locked_codex_teacher_config(path: Path) -> tuple[dict[str, object], st
     if payload != expected or stored_sha256 != semantic_sha256:
         raise ValueError("Codex teacher config differs from the locked no-API profile")
     return payload, sha256_file(path)
+
+
+def _load_locked_codex_teacher_harness_config(
+    path: Path,
+) -> tuple[dict[str, object], str, HarnessProfile]:
+    """Load the separate two-call synthetic canary profile without drift."""
+
+    payload = _load_json_object(path)
+    stored_sha256 = payload.pop("config_sha256", None)
+    if not isinstance(stored_sha256, str):
+        raise ValueError("Codex teacher harness config is missing config_sha256")
+    semantic_sha256 = _teacher_config_sha256(payload)
+    if (
+        payload.get("schema_version") != HARNESS_CONFIG_SCHEMA
+        or payload != _LOCKED_CODEX_TEACHER_HARNESS_CONFIG
+        or stored_sha256 != semantic_sha256
+    ):
+        raise ValueError("Codex teacher harness config differs from the locked profile")
+    return payload, sha256_file(path), profile_from_config(payload)
+
+
+def _require_harness_allowed_teacher_config(config: dict[str, object]) -> None:
+    """Disallow historic ledger profiles from starting a fresh harness run."""
+
+    schema_version = config.get("schema_version")
+    if schema_version not in _HARNESS_ALLOWED_TEACHER_CONFIG_SCHEMAS:
+        raise ValueError("teacher config is not allowlisted for the live synthetic harness")
 
 
 def _teacher_config_sha256(config: dict[str, object]) -> str:

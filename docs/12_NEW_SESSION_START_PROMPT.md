@@ -31,8 +31,9 @@ rationale bank를 만든 뒤, 고정 Qwen base에 QLoRA SFT하는 경로다.
 - historic v1, fresh v2, v3의 128문제 teacher pilot은 모두 fail-closed됐다.
 - 세 실패 pilot을 재개하거나 고쳐 쓰지 않는다. v3는 initial 52/128로 103/128 gate에
   미달해 repair 없이 종료됐다.
-- versioned synthetic live-eval harness가 설계·승인되기 전에는 v4 config를 allowlist에
-  추가하거나 actual teacher를 다시 호출하지 않는다.
+- harness v1의 CPU implementation은 있으나, committed clean source의 qualified offline replay와
+  explicit 2×32 synthetic live canary 및 immutable authorization 전에는 v4 config를
+  allowlist에 추가하거나 organizer-data teacher를 다시 호출하지 않는다.
 - 향후 승인된 pilot, source bank, logical audit, corpus/SFT preflight가 모두 green이 되기 전에는
   GPU rationale 학습을 시작하지 않는다.
 - leaderboard/test/locked holdout은 teacher, 학습, prompt 개선, self-training seed에 절대
@@ -128,14 +129,17 @@ rg --files \
 15. `LICENSE`
 16. `pyproject.toml`
 17. `configs/gate_b/codex-gpt-5.6-sol-teacher-pilot-v3.json`
-18. `configs/gate_b/codex-gpt-5.6-sol-teacher-pilot-v2.json` (failed forensic evidence only)
-19. `configs/gate_b/codex-gpt-5.6-sol-teacher-v1.json` (historic forensic evidence only)
-20. `configs/gate_b/rtx4070-super-12gb-direct-answer-v1.json`
-21. `configs/gate_b/rtx4070-super-12gb-concise-rationale-v1.json`
+18. `configs/gate_b/codex-gpt-5.6-sol-teacher-harness-v1.json`
+19. `docs/13_SYNTHETIC_TEACHER_HARNESS_V1.md`
+20. `configs/gate_b/codex-gpt-5.6-sol-teacher-pilot-v2.json` (failed forensic evidence only)
+21. `configs/gate_b/codex-gpt-5.6-sol-teacher-v1.json` (historic forensic evidence only)
+22. `configs/gate_b/rtx4070-super-12gb-direct-answer-v1.json`
+23. `configs/gate_b/rtx4070-super-12gb-concise-rationale-v1.json`
 
 그 다음 현재 작업과 직접 관련된 source/test를 읽는다.
 
 - `src/deep_challenge/teacher_rationale.py`
+- `src/deep_challenge/teacher_harness.py`
 - `src/deep_challenge/teacher_pilot_authorization.py`
 - `src/deep_challenge/rationale_materialization.py`
 - `src/deep_challenge/rationale_corpus.py`
@@ -353,15 +357,16 @@ teacher-pilot-v3 snapshot:
 v1/v2/v3 artifact는 모두 실패 evidence로만 보존한다. status/finalize를 읽는 것은 허용하지만
 어느 ledger에도 teacher run을 추가하지 않는다.
 
-6. 다음 실제 개발 목표: versioned synthetic live-eval harness 설계·승인
-=================================================================
+6. 다음 실제 개발 목표: synthetic live-eval harness v1 검증·authorization
+===================================================================
 
 GPU 없이 다음을 수행한다.
 
-1. `TODOS.md`의 조건대로 v1/v2/v3 prompt bytes와 plan/receipt/sidecar 역사 schema를
-   보존하는 synthetic live-eval harness를 먼저 설계하고 별도 승인을 받는다.
-2. raw ledger를 재해석하지 않고 공개-safe aggregate 실패 사실과 synthetic cases만 사용한다.
-3. v1/v2/v3 config나 artifact를 덮어쓰지 않는다. 승인 전 v4 filename/schema/config를
+1. `docs/13_SYNTHETIC_TEACHER_HARNESS_V1.md`의 v1/v2/v3 prompt bytes와
+   plan/receipt/sidecar 역사 schema를 보존하는 harness implementation을 먼저 CPU 검증한다.
+2. raw ledger를 재해석하지 않고 공개-safe aggregate 실패 사실과 fixed synthetic cases만 사용한다.
+3. committed clean source에서 fresh manifest를 만든 뒤 offline replay와 explicit 2×32
+   canary를 실행한다. qualified reports와 authorization 전에는 v4 filename/schema/config를
    source allowlist에 추가하지 않는다.
 4. 아래 safety fields와 실행 정책은 완화하지 않는다.
    - provider: ChatGPT-login Codex CLI
@@ -807,20 +812,21 @@ historical diagnostic, parser-only rescore를 current selection score로 표현�
 2. mandatory docs/config/source/tests 완독
 3. mandatory CPU validation 재실행
 4. v3 raw-free final/status/checksum과 source JSONL/manifest 부재 재검증
-5. `TODOS.md`의 synthetic live-eval harness 요구사항 정리
+5. `docs/13_SYNTHETIC_TEACHER_HARNESS_V1.md`의 freeze/replay/live requirements 재확인
 6. v1/v2/v3 prompt/config/receipt/sidecar compatibility regression 유지
-7. harness design을 문서화하되 v4 config/allowlist는 만들지 않기
-8. 별도 사용자 승인 전 actual teacher 호출하지 않기
+7. qualified harness authorization 전에는 v4 config/allowlist를 만들지 않기
+8. explicit synthetic canary acknowledgement 또는 별도 사용자 승인 전 organizer-data teacher 호출하지 않기
 9. full bank, logical audit, corpus, GPU가 잠긴 상태인지 확인
 10. Kaggle upload는 계속 별도 명시 요청 전 금지
 
-이 순서를 바꾸지 말고, harness와 새 version이 별도 승인되기 전에는 teacher, full bank, GPU
-작업을 시작하지 않는다.
+이 순서를 바꾸지 말고, qualified harness authorization과 새 version의 별도 승인 전에는
+organizer-data teacher, full bank, GPU 작업을 시작하지 않는다.
 ````
 
 ## 이 handoff의 핵심
 
 새 세션이 가장 먼저 해결할 문제는 GPU 학습이나 v4 prompt가 아니다. v3가 initial
 **52/128**로 실패한 뒤 같은 live loop를 반복하지 않도록 **versioned synthetic live-eval
-harness**를 설계하고 승인받는 것이다. 승인된 새 candidate가 나중에 128/128과 60/64 audit을
-통과한 뒤에만 full fold-0 bank, rationale corpus, GPU harm screen 순서로 진행한다.
+harness v1**을 committed source에서 replay/live qualification과 authorization까지 닫는 것이다.
+승인된 새 candidate가 나중에 128/128과 60/64 audit을 통과한 뒤에만 full fold-0 bank,
+rationale corpus, GPU harm screen 순서로 진행한다.

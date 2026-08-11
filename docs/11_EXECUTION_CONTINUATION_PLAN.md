@@ -70,7 +70,7 @@ PYTHONPATH=src python3 -m deep_challenge.public_repo_guard --all
 | B1.0 | fold 0 base direct-answer | B0.3 green | `20260810T234907KST` JSONL + **v2 provenance manifest**, 1,653/2,942 | invalid parser/artifact or any source/B0/config hash mismatch |
 | B1.1 | parser golden corpus | B1.0 real generations | added regression tests + full CPU suite | conflict is hidden or test fails |
 | B2.0 | fold 0 answer-only QLoRA | same-fold base manifest | 627/2,942; significant harm로 candidate 중단 | train IDs or provenance mismatch |
-| B2.1 | concise-rationale CPU gate | **BLOCKED:** v3 initial 52/128; synthetic live-eval harness 설계·승인 필요 | versioned harness 승인 뒤 새 후보만 별도 검토 | v1/v2/v3 resume, v4 allowlist 조기 추가, initial <103/128 |
+| B2.1 | concise-rationale CPU gate | **harness v1 CPU-ready / organizer-data teacher BLOCKED:** v3 initial 52/128 | qualified replay/live authorization 뒤 새 후보만 별도 검토 | v1/v2/v3 resume, v4 allowlist 조기 추가, initial <103/128 |
 | B2.2 | fold 0 rationale QLoRA probe | B2.1와 새 source/B0 green | adapter v4 + generation + paired harm screen | corpus/adapter binding mismatch 또는 significant harm |
 | B1/B2.3 | folds 1–4 repeat | fold 0 harm screen authorizes exact candidate | five base + five candidate OOF runs | any fold incomplete or method fingerprint drift |
 | B2.4 | complete OOF comparison | all five folds | grouped paired bootstrap, exact McNemar, Holm | single fold/reused run/mixed method |
@@ -323,8 +323,8 @@ rationale adapter, GPU generation과 모델 점수는 아직 없다. 다음 GPU 
     `6b5014b3da16fb31a1334ba101ffa1e6031a1aaac8db0369ac7b9ae81790f5e7`이다.
 16. **R9-C (blocked, CPU→GPU):** R9-B4가 green이 아니므로 logical audit, authorization,
     full 11,794행 bank, corpus/SFT preflight, source manifest/B0 pair, fold 0 rationale QLoRA,
-    adapter generation, paired harm screen을 실행하지 않는다. v4는 `TODOS.md`의 versioned
-    synthetic live-eval harness 설계·승인 전 allowlist에 추가하지 않는다.
+    adapter generation, paired harm screen을 실행하지 않는다. synthetic harness v1 CPU path는
+    구현됐지만 qualified replay/live authorization 전에는 v4를 allowlist에 추가하지 않는다.
 17. **R9-D (조건부 GPU):** R9-C가 `candidate_full_oof_authorized=true`일 때만 folds 1--4의
     fold별 corpus/adapter/base/generation을 완성하고 complete OOF grouped paired bootstrap,
     exact McNemar, Holm을 수행한다.
@@ -372,10 +372,11 @@ teacher JSONL, logical audit, bank/corpus/preflight/GPU는 시작하지 않았�
 ledger/tag를 재개하지 않으며 Kaggle token은 대회 metadata 확인용이지 teacher credential이
 아니다.
 
-다음 safe task는 `TODOS.md`의 versioned synthetic live-eval harness를 설계해 별도 승인을
-받는 것이다. 승인 전 v4 config를 allowlist에 추가하거나 새 actual teacher를 호출하지 않는다.
-아래 source-manifest 명령은 향후 승인된 새 candidate의 no-overwrite pattern일 뿐 현재 실행
-명령이 아니다.
+다음 safe task는 `docs/13_SYNTHETIC_TEACHER_HARNESS_V1.md`의 harness v1을 committed clean
+source에서 CPU 검증하고, fresh manifest를 만든 뒤 offline replay와 explicit 2×32 synthetic
+live canary를 qualified로 닫는 것이다. replay/live authorization 전에는 v4 config를
+allowlist에 추가하거나 organizer-data teacher를 호출하지 않는다. 아래 source-manifest 명령은
+그 no-overwrite pattern을 따른다.
 
 ```bash
 test ! -e "$SOURCE_MANIFEST"
