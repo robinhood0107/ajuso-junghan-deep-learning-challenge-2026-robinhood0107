@@ -23,7 +23,7 @@
 | Gate B0 final GPU smoke | **READY / 다음 GPU workload 전 재실행** | `gpu-smoke-20260810T234907KST.json`은 local `2+3` only, pinned NF4 load, LoRA backward/optimizer step, cache-on generation을 green으로 닫았다. 다음 source에서는 같은 smoke를 새 no-overwrite tag로 다시 실행한다. |
 | Gate B1 base direct-answer | **current-source v2 완료** | `20260810T234907KST` organizer-only fold 0 run은 parser v2 stored/current 일치 상태로 1,653/2,942 EM (56.1863%), parser `2705/3/234`, finish `2134/808`을 atomic 기록했다. records/manifest와 raw-free parser audit v6 checksum을 검증했다. |
 | Gate B2 QLoRA SFT | **fold 0 완료 / candidate 중단** | 첫 시도 `20260810T192204KST`는 tokenizer byte drift를 publish 전에 fail-closed로 거부했다. 수정 뒤 `20260810T210605KST` 재시도는 738/738 step, runtime 5,171.3711초, loss 0.4800419로 완료했고 exact pinned tokenizer와 504 LoRA tensor를 검증한 adapter를 atomic publish했다. adapter EM은 627/2,942(21.3120%)로 base보다 -19.8165%p여서 나머지 fold를 중단했다. |
-| concise-rationale candidate | **v1/v2/v3 fail-closed / teacher·GPU 후속 잠금** | v1은 111/128 승인·17 exhaustion, v2는 106/128 승인·7 exhaustion으로 종료됐다. v3 `20260811T153322KST`는 동일 128행 initial 4호출 중 parsed 2/failed 2였고 local 승인 52/128로 103/128 gate에 미달해 repair 없이 종료했다. 세 ledger는 재개하지 않는다. source bank, logical audit, canonical corpus, rationale QLoRA, 새 generation과 모델 점수는 없다. v4는 versioned synthetic live-eval harness 설계·승인 전 allowlist에 추가하지 않는다. |
+| concise-rationale candidate | **v1/v2/v3 fail-closed / harness v1 CPU-ready / teacher·GPU 후속 잠금** | v1은 111/128 승인·17 exhaustion, v2는 106/128 승인·7 exhaustion으로 종료됐다. v3 `20260811T153322KST`는 동일 128행 initial 4호출 중 parsed 2/failed 2였고 local 승인 52/128로 103/128 gate에 미달해 repair 없이 종료했다. 세 ledger는 재개하지 않는다. source bank, logical audit, canonical corpus, rationale QLoRA, 새 generation과 모델 점수는 없다. synthetic harness v1은 raw-free diagnostic, offline replay, fixed 2×32 live canary와 authorization sidecar를 구현했지만 qualified live artifact 전까지 v4 allowlist와 organizer-data teacher는 계속 잠근다. |
 | parser v2 | **current-source 재현 완료** | 기존 immutable raw의 CPU rescore는 진단 전용이지만, `20260810T234907KST`에서 새 generation을 atomic publish해 1,653/2,942와 conflict 3건을 selection-eligible stored parse로 재현했다. |
 | leaderboard prediction/submission | **미실행** | 모델 prediction 0건; leaderboard를 학습/API 입력에 쓰지 않음 |
 
@@ -135,7 +135,10 @@ diagnostic generation과 CPU rescore는 새 bundle 대신 selection 근거로 �
   76으로 103/128 gate가 복구 불가능해 repair 0회로 종료했다. source JSONL/manifest는
   생성되지 않았고 raw-free final artifact는
   `artifacts/analysis/gate-b-teacher-pilot-v3-20260811T153322KST-final-v3.json` (SHA-256
-  `6b5014b3da16fb31a1334ba101ffa1e6031a1aaac8db0369ac7b9ae81790f5e7`)이다.
+  `6b5014b3da16fb31a1334ba101ffa1e6031a1aaac8db0369ac7b9ae81790f5e7`)이다. Harness v1의
+  read-only diagnostic은 ledger digest 불변을 확인하고 4개 redacted classifications 중
+  2개를 `output_structure/cardinality_mismatch` 32→33, duplicate 1로 재현했다. diagnostic
+  SHA-256은 `dd3c986d0f764b614af3b179a1385040462f270cf121a6c6f47d8216d47aea5c`다.
 - `teacher_pilot_authorization.py`: full v1 bank plan은 deterministic 128-row pilot의
   first-pass 80% 이상, 최대 3회 내 전원 승인, source-bank provenance, passed 64→60 audit을
   재검증한 immutable raw-free receipt 없이는 만들 수 없다. historic v1 receipt/sidecar는
@@ -828,8 +831,8 @@ drift를 추적하는 역사적 trace이며 새 실험 입력으로 사용하지
   `qlora-concise-rationale-v1`로 분리했으며 CPU corpus/audit/SFT-preflight/adapter provenance
   경로까지 구현했다.
 - v3 teacher pilot의 initial 52/128 threshold 실패로 production teacher JSONL, logical audit,
-  full bank, corpus/GPU 진입은 잠겼다. `TODOS.md`의 synthetic live-eval harness가 설계·승인될
-  때까지 v4 allowlist 확장도 금지한다.
+  full bank, corpus/GPU 진입은 잠겼다. synthetic harness v1의 qualified replay/live report와
+  immutable authorization이 확인될 때까지 v4 allowlist 확장도 금지한다.
 - production teacher JSONL은 exact fold-training ID 전체를 덮고 각 row가 organizer reference,
   current parser, canonical final marker, teacher/prompt/generation/raw SHA, reference answer가
   teacher prompt에서 숨겨졌다는 명시적 false flag, training-only/no-tool/no-test/no-holdout를

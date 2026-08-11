@@ -988,6 +988,19 @@ def load_teacher_plan(plan_dir: str | Path) -> TeacherPlan:
     )
 
 
+def load_teacher_attempts(plan_dir: str | Path) -> tuple[TeacherAttempt, ...]:
+    """Load verified attempt evidence for a private teacher plan.
+
+    This additive reader is deliberately narrower than a status snapshot: it
+    is intended for local, raw-free diagnostics that must re-hash every linked
+    attempt artifact before classifying it.  Callers remain responsible for
+    keeping any referenced event streams private.
+    """
+
+    plan = load_teacher_plan(plan_dir)
+    return _load_attempts(plan)
+
+
 def build_teacher_prompt(
     plan: TeacherPlan,
     chunk: TeacherChunk | int,

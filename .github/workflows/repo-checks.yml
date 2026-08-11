@@ -1,0 +1,26 @@
+name: Repository checks
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  cpu-public-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v5
+      - name: Install locked development tools
+        run: uv sync --all-groups
+      - name: Ruff
+        run: uv run ruff check .
+      - name: CPU pytest
+        run: CUDA_VISIBLE_DEVICES='' uv run pytest -s -q
+      - name: Public repository guard
+        run: uv run python -m deep_challenge.public_repo_guard --all
+      - name: Pull-request diff whitespace check
+        run: git diff --check "${{ github.event.pull_request.base.sha }}...HEAD"
