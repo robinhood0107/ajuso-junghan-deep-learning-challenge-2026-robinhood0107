@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import tempfile
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
@@ -175,6 +176,7 @@ def write_run_context(
         raise GateBValidationError("run context source_root must be a real directory")
     if _COMMIT_RE.fullmatch(source_commit) is None:
         raise GateBValidationError("run context source_commit is invalid")
+    _require_clean_source_commit(root, source_commit)
     if _RUN_TAG_RE.fullmatch(run_tag) is None:
         raise GateBValidationError("run context run_tag is invalid")
     if not config_paths:
@@ -189,6 +191,8 @@ def write_run_context(
     ):
         raise GateBValidationError("run context fold outputs are invalid")
 
+    snapshots: list[tuple[Path, str, str]] = []
+
     def file_evidence(path: str | Path, label: str) -> dict[str, object]:
         source = Path(path)
         if source.is_symlink():
@@ -196,9 +200,11 @@ def write_run_context(
         resolved = source.resolve(strict=True)
         if not resolved.is_file() or not resolved.is_relative_to(root):
             raise GateBValidationError(f"run context {label} must be a source-root file")
+        digest = sha256_file(resolved)
+        snapshots.append((resolved, digest, label))
         return {
             "path": resolved.relative_to(root).as_posix(),
-            "sha256": sha256_file(resolved),
+            "sha256": digest,
         }
 
     configurations = {
@@ -237,6 +243,24 @@ def write_run_context(
         "fold_output_paths": fold_paths,
         "planned_stages": list(planned_stages),
     }
+    for source, expected_sha256, label in snapshots:
+        if sha256_file(source) != expected_sha256:
+            raise GateBValidationError(
+                f"run context {label} changed during evidence snapshot"
+            )
+    try:
+        final_manifest = validate_source_tree_manifest_artifact(
+            root / str(source_manifest["path"]),
+            root=root,
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise GateBValidationError("run context source manifest changed during snapshot") from exc
+    if (
+        final_manifest.tree_sha256 != source_manifest["tree_sha256"]
+        or final_manifest.file_count != source_manifest["file_count"]
+    ):
+        raise GateBValidationError("run context source tree changed during snapshot")
+    _require_clean_source_commit(root, source_commit)
     payload_sha256 = hashlib.sha256(canonical_json_bytes(payload_without_hash)).hexdigest()
     payload = {**payload_without_hash, "payload_sha256": payload_sha256}
     target = Path(output_path).resolve(strict=False)
@@ -285,6 +309,31 @@ def _required_sha256(value: object, label: str) -> str:
     if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
         raise GateBValidationError(f"{label} is invalid")
     return value
+
+
+def _require_clean_source_commit(root: Path, source_commit: str) -> None:
+    def run_git(*arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ("git", "-C", str(root), *arguments),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    top_level = run_git("rev-parse", "--show-toplevel")
+    head = run_git("rev-parse", "HEAD")
+    if top_level.returncode != 0 or head.returncode != 0:
+        raise GateBValidationError("run context source_root must be a Git checkout")
+    try:
+        resolved_top_level = Path(top_level.stdout.strip()).resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise GateBValidationError("run context Git root is invalid") from exc
+    if resolved_top_level != root or head.stdout.strip() != source_commit:
+        raise GateBValidationError("run context source_commit does not match source_root HEAD")
+    clean = run_git("diff", "--quiet", "HEAD", "--")
+    if clean.returncode != 0:
+        raise GateBValidationError("run context requires a clean tracked source tree")
 
 
 def _fsync_directory(path: Path) -> None:

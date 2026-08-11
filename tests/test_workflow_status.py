@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
 
+import deep_challenge.workflow_status as workflow_status_module
 from deep_challenge.gate_b import DevelopmentResumeStatus, GateBValidationError
 from deep_challenge.gate_b_runtime import TrainingResumeStatus
 from deep_challenge.provenance import build_source_tree_manifest, write_json_atomic
@@ -170,6 +172,28 @@ def _write(path: Path, content: str) -> Path:
     return path
 
 
+def _commit_source_tree(root: Path) -> str:
+    subprocess.run(("git", "init", "-q", str(root)), check=True)
+    subprocess.run(
+        ("git", "-C", str(root), "config", "user.email", "tests@example.invalid"),
+        check=True,
+    )
+    subprocess.run(
+        ("git", "-C", str(root), "config", "user.name", "Gate B Tests"),
+        check=True,
+    )
+    subprocess.run(("git", "-C", str(root), "add", "."), check=True)
+    subprocess.run(
+        ("git", "-C", str(root), "commit", "-q", "-m", "fixture"), check=True
+    )
+    return subprocess.run(
+        ("git", "-C", str(root), "rev-parse", "HEAD"),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
 def test_run_context_is_immutable_relative_and_hash_bound(tmp_path: Path) -> None:
     root = tmp_path / "source"
     root.mkdir()
@@ -182,6 +206,7 @@ def test_run_context_is_immutable_relative_and_hash_bound(tmp_path: Path) -> Non
     smoke = _write(
         root / "artifacts" / "analysis" / "smoke.json", '{"ready":true}\n'
     )
+    source_commit = _commit_source_tree(root)
     output = root / "artifacts" / "analysis" / "run-context.json"
     write_json_atomic(
         manifest,
@@ -191,7 +216,7 @@ def test_run_context_is_immutable_relative_and_hash_bound(tmp_path: Path) -> Non
     result = write_run_context(
         output,
         source_root=root,
-        source_commit="2" * 40,
+        source_commit=source_commit,
         run_tag="base-oof-20260811-001",
         config_paths={"base": config},
         source_manifest_path=manifest,
@@ -206,7 +231,7 @@ def test_run_context_is_immutable_relative_and_hash_bound(tmp_path: Path) -> Non
     )
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["schema_version"] == RUN_CONTEXT_SCHEMA
-    assert payload["source_commit"] == "2" * 40
+    assert payload["source_commit"] == source_commit
     assert payload["source_manifest"]["path"] == (
         "artifacts/analysis/source-manifest.json"
     )
@@ -234,7 +259,7 @@ def test_run_context_is_immutable_relative_and_hash_bound(tmp_path: Path) -> Non
         write_run_context(
             output,
             source_root=root,
-            source_commit="2" * 40,
+            source_commit=source_commit,
             run_tag="base-oof-20260811-001",
             config_paths={"base": config},
             source_manifest_path=manifest,
@@ -246,11 +271,13 @@ def test_run_context_is_immutable_relative_and_hash_bound(tmp_path: Path) -> Non
         )
 
     config.write_text('{"base":false}\n', encoding="utf-8")
-    with pytest.raises(GateBValidationError, match="source manifest is invalid"):
+    with pytest.raises(
+        GateBValidationError, match="clean tracked source tree|source manifest is invalid"
+    ):
         write_run_context(
             root / "artifacts" / "analysis" / "drift-context.json",
             source_root=root,
-            source_commit="2" * 40,
+            source_commit=source_commit,
             run_tag="source-drift",
             config_paths={"base": config},
             source_manifest_path=manifest,
@@ -267,7 +294,7 @@ def test_run_context_is_immutable_relative_and_hash_bound(tmp_path: Path) -> Non
         write_run_context(
             root / "artifacts" / "analysis" / "outside-context.json",
             source_root=root,
-            source_commit="2" * 40,
+            source_commit=source_commit,
             run_tag="outside",
             config_paths={"base": outside},
             source_manifest_path=manifest,
@@ -284,7 +311,7 @@ def test_run_context_is_immutable_relative_and_hash_bound(tmp_path: Path) -> Non
         write_run_context(
             root / "artifacts" / "analysis" / "symlink-context.json",
             source_root=root_link,
-            source_commit="2" * 40,
+            source_commit=source_commit,
             run_tag="symlink",
             config_paths={"base": config},
             source_manifest_path=manifest,
@@ -316,13 +343,14 @@ def test_run_context_rejects_invalid_contract_inputs(
     split = _write(root / "artifacts" / "analysis" / "split.json", "{}\n")
     preflight = _write(root / "artifacts" / "analysis" / "preflight.json", "{}\n")
     smoke = _write(root / "artifacts" / "analysis" / "smoke.json", "{}\n")
+    source_commit = _commit_source_tree(root)
     write_json_atomic(
         manifest,
         build_source_tree_manifest(root, excluded_paths=(manifest,)).as_dict(),
     )
     arguments: dict[str, object] = {
         "source_root": root,
-        "source_commit": "2" * 40,
+        "source_commit": source_commit,
         "run_tag": "base-oof-20260811-002",
         "config_paths": {"base": config},
         "source_manifest_path": manifest,
@@ -339,4 +367,59 @@ def test_run_context_rejects_invalid_contract_inputs(
         write_run_context(
             root / "artifacts" / "analysis" / f"invalid-{override}.json",
             **arguments,  # type: ignore[arg-type]
+        )
+
+
+def test_run_context_rejects_commit_mismatch_and_snapshot_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "source"
+    root.mkdir()
+    config = _write(root / "configs" / "base.json", '{"base":true}\n')
+    split = _write(root / "artifacts" / "analysis" / "split.json", "{}\n")
+    preflight = _write(root / "artifacts" / "analysis" / "preflight.json", "{}\n")
+    smoke = _write(root / "artifacts" / "analysis" / "smoke.json", "{}\n")
+    source_commit = _commit_source_tree(root)
+    manifest = root / "artifacts" / "analysis" / "source-manifest.json"
+    write_json_atomic(
+        manifest,
+        build_source_tree_manifest(root, excluded_paths=(manifest,)).as_dict(),
+    )
+    common = {
+        "source_root": root,
+        "run_tag": "base-oof-20260811-003",
+        "config_paths": {"base": config},
+        "source_manifest_path": manifest,
+        "split_artifact_path": split,
+        "preflight_report_path": preflight,
+        "gpu_smoke_report_path": smoke,
+        "fold_output_paths": {0: root / "artifacts" / "gate_b" / "fold-0"},
+        "planned_stages": ("base_oof",),
+    }
+    with pytest.raises(GateBValidationError, match="does not match"):
+        write_run_context(
+            root / "artifacts" / "analysis" / "wrong-commit.json",
+            source_commit="f" * 40,
+            **common,
+        )
+
+    original_sha256_file = workflow_status_module.sha256_file
+    mutated = False
+
+    def mutate_after_first_preflight_hash(path: str | Path) -> str:
+        nonlocal mutated
+        digest = original_sha256_file(path)
+        if Path(path) == preflight and not mutated:
+            mutated = True
+            preflight.write_text('{"changed":true}\n', encoding="utf-8")
+        return digest
+
+    monkeypatch.setattr(
+        workflow_status_module, "sha256_file", mutate_after_first_preflight_hash
+    )
+    with pytest.raises(GateBValidationError, match="changed during evidence snapshot"):
+        write_run_context(
+            root / "artifacts" / "analysis" / "drift.json",
+            source_commit=source_commit,
+            **common,
         )

@@ -30,6 +30,7 @@ from deep_challenge.gate_b_runtime import (
     GPU_EXECUTION_ACKNOWLEDGEMENT,
     PINNED_QWEN_ALL_LINEAR_TARGET_MODULES,
     RuntimeTrainingResult,
+    TrainingArtifact,
     build_fold_sft_plan,
     create_adapted_development_backend,
     create_base_development_backend,
@@ -892,6 +893,79 @@ def test_qlora_training_resume_keeps_checkpoint_and_reuses_exact_contract(
     completion_marker.write_text(json.dumps(completion_payload), encoding="utf-8")
     with pytest.raises(GateBValidationError, match="changed adapter evidence"):
         read_training_resume_status(resume_dir)
+
+
+def test_qlora_training_resume_repairs_marker_after_atomic_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight, smoke = _gate_artifacts(tmp_path)
+    manifest = _split_manifest()
+    training_ids = eligible_training_ids(manifest, 0, ())
+    validation_ids = eligible_validation_ids(manifest, 0, ())
+    source_manifest = _source_manifest_evidence(tmp_path)
+    output = tmp_path / "adapter-fold-0"
+    resume_dir = tmp_path / "resume-fold-0"
+    runtime = _ResumableTrainingRuntime()
+    original_mark_complete = runtime_module._mark_training_resume_complete
+    marker_calls = 0
+
+    def interrupt_marker_write(
+        context: object, artifact: TrainingArtifact
+    ) -> None:
+        nonlocal marker_calls
+        marker_calls += 1
+        if marker_calls == 1:
+            raise RuntimeError("simulated interruption after adapter publish")
+        original_mark_complete(context, artifact)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        runtime_module, "_mark_training_resume_complete", interrupt_marker_write
+    )
+    with pytest.raises(RuntimeError, match="after adapter publish"):
+        train_qlora_fold(
+            _records(training_ids),
+            _records(validation_ids),
+            split_manifest=manifest,
+            fold=0,
+            excluded_ids=(),
+            **_data_provenance_args(),
+            source_manifest=source_manifest,
+            preflight_artifact=preflight,
+            gpu_smoke_artifact=smoke,
+            output_dir=output,
+            gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+            resume_dir=resume_dir,
+            runtime_factory=lambda _evidence: runtime,
+        )
+    assert output.is_dir()
+    assert not (resume_dir / "training-complete.json").exists()
+
+    factory_called = False
+
+    def unexpected_factory(_evidence: object) -> _TrainingRuntime:
+        nonlocal factory_called
+        factory_called = True
+        return _TrainingRuntime()
+
+    artifact = train_qlora_fold(
+        _records(training_ids),
+        _records(validation_ids),
+        split_manifest=manifest,
+        fold=0,
+        excluded_ids=(),
+        **_data_provenance_args(),
+        source_manifest=source_manifest,
+        preflight_artifact=preflight,
+        gpu_smoke_artifact=smoke,
+        output_dir=output,
+        gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+        resume_dir=resume_dir,
+        runtime_factory=unexpected_factory,
+    )
+    assert factory_called is False
+    assert marker_calls == 2
+    assert artifact.path == str(output.resolve())
+    assert read_training_resume_status(resume_dir).state == "complete"
 
 
 def test_qlora_training_resume_rejects_contract_mismatch_and_quarantines_corruption(

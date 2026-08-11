@@ -578,7 +578,7 @@ def train_qlora_fold(
         rationale_config=rationale_config,
         config=config,
     )
-    target = _validated_new_directory_target(output_dir)
+    target = _validated_adapter_directory_target_path(output_dir)
     resume = _prepare_training_resume_context(
         resume_dir,
         output_dir=target,
@@ -588,6 +588,18 @@ def train_qlora_fold(
         source_manifest=source_evidence,
         config=config,
     )
+    if target.exists():
+        if resume is None:
+            raise GateBArtifactExistsError(
+                f"refusing to overwrite adapter directory: {target}"
+            )
+        with _locked_training_resume(resume):
+            return _recover_published_training_artifact(
+                resume,
+                target=target,
+                plan=plan,
+                config=config,
+            )
     factory = runtime_factory or (
         lambda evidence: TransformersQLoRATrainingRuntime(
             evidence=evidence,
@@ -1957,10 +1969,10 @@ def _validate_training_resume_contract(
 
 
 @contextmanager
-def _locked_training_resume_checkpoint(
+def _locked_training_resume(
     context: _TrainingResumeContext,
-) -> Iterable[Path | None]:
-    """Hold an exclusive fail-closed lock while selecting a checkpoint."""
+) -> Iterable[None]:
+    """Hold an exclusive fail-closed lock for one resume-ledger mutation."""
 
     if context.root.is_symlink() or not context.root.is_dir():
         raise GateBValidationError("resume_dir disappeared or is no longer a real directory")
@@ -1998,9 +2010,19 @@ def _locked_training_resume_checkpoint(
         expected = _training_resume_contract_from_root(context.root)
         if expected != context.contract_sha256:
             raise GateBValidationError("training resume contract changed while acquiring lock")
-        yield _select_resume_checkpoint(context)
+        yield
     finally:
         os.close(descriptor)
+
+
+@contextmanager
+def _locked_training_resume_checkpoint(
+    context: _TrainingResumeContext,
+) -> Iterable[Path | None]:
+    """Hold the resume lock while selecting one reusable checkpoint."""
+
+    with _locked_training_resume(context):
+        yield _select_resume_checkpoint(context)
 
 
 def _training_resume_contract_from_root(root: Path) -> str:
@@ -2258,6 +2280,42 @@ def _mark_training_resume_complete(
         raise GateBValidationError("training completion marker already exists")
     _atomic_write_new_file(target, payload)
     _fsync_directory(context.root)
+
+
+def _recover_published_training_artifact(
+    context: _TrainingResumeContext,
+    *,
+    target: Path,
+    plan: FoldSFTPlan,
+    config: GateBConfig,
+) -> TrainingArtifact:
+    """Repair only the marker after an already-verified atomic publish."""
+
+    completion = context.root / _TRAINING_RESUME_COMPLETE_FILENAME
+    if completion.exists() or completion.is_symlink():
+        raise GateBArtifactExistsError(
+            "training completion marker already exists; use status verification"
+        )
+    started = context.root / _TRAINING_RESUME_STARTED_FILENAME
+    _validate_training_resume_started(started, context.contract_sha256)
+    if not started.exists():
+        raise GateBValidationError(
+            "existing adapter is not bound to a started training resume"
+        )
+    published = validate_adapter_artifact(target, config=config)
+    _validate_adapter_target_binding(published, plan)
+    artifact = TrainingArtifact(
+        path=published.path,
+        artifact_sha256=published.artifact_sha256,
+        manifest_sha256=published.manifest_sha256,
+        checksums_sha256=published.checksums_sha256,
+        file_count=published.file_count,
+        training_count=len(plan.training_ids),
+        validation_count=len(plan.validation_ids),
+        training_target_kind=plan.training_target_kind,
+    )
+    _mark_training_resume_complete(context, artifact)
+    return artifact
 
 
 def _validate_training_resume_started(path: Path, contract_sha256: str) -> None:
@@ -2775,13 +2833,23 @@ def _validated_new_file_target(path: str | Path, label: str) -> Path:
 
 
 def _validated_new_directory_target(path: str | Path) -> Path:
-    target = Path(path).resolve(strict=False)
+    target = _validated_adapter_directory_target_path(path)
+    if target.exists():
+        raise GateBArtifactExistsError(f"refusing to overwrite adapter directory: {target}")
+    return target
+
+
+def _validated_adapter_directory_target_path(path: str | Path) -> Path:
+    supplied = Path(path)
+    if supplied.is_symlink():
+        raise GateBArtifactExistsError(f"refusing symbolic-link adapter target: {supplied}")
+    target = supplied.resolve(strict=False)
     if not target.name or target.name in {".", ".."}:
         raise GateBValidationError("output_dir must name a child directory")
     if not target.parent.is_dir() or target.parent.is_symlink():
         raise GateBValidationError("output_dir parent must be an existing real directory")
-    if target.exists() or target.is_symlink():
-        raise GateBArtifactExistsError(f"refusing to overwrite adapter directory: {target}")
+    if target.exists() and not target.is_dir():
+        raise GateBArtifactExistsError(f"adapter target is not a directory: {target}")
     return target
 
 
