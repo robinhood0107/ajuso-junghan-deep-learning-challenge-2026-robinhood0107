@@ -46,6 +46,11 @@ HARNESS_LIVE_SCHEMA = "gate-b-codex-teacher-harness-live-v1"
 HARNESS_AUTHORIZATION_SCHEMA = "gate-b-codex-teacher-harness-authorization-v1"
 HARNESS_AUTHORIZATION_FILENAME = "harness-authorization-v1.json"
 
+HARNESS_REPLAY_V2_SCHEMA = "gate-b-codex-teacher-harness-replay-v2"
+HARNESS_LIVE_V2_SCHEMA = "gate-b-codex-teacher-harness-live-v2"
+HARNESS_AUTHORIZATION_V2_SCHEMA = "gate-b-codex-teacher-harness-authorization-v2"
+HARNESS_AUTHORIZATION_V2_FILENAME = "harness-authorization-v2.json"
+
 HARNESS_CONFIG_SCHEMA = "gate-b-codex-teacher-harness-config-v1"
 HARNESS_FIXTURE_SCHEMA = "gate-b-codex-teacher-harness-fixture-v1"
 HARNESS_LABEL = "codex-gpt-5.6-sol-teacher-harness-v1"
@@ -54,6 +59,15 @@ HARNESS_CHUNK_SIZE = 32
 HARNESS_CHUNK_COUNT = 2
 HARNESS_FIXTURE_SIZE = HARNESS_CHUNK_SIZE * HARNESS_CHUNK_COUNT
 HARNESS_REPLAY_FAULT_COUNT = 20
+
+HARNESS_CONFIG_V2_SCHEMA = "gate-b-codex-teacher-harness-config-v2"
+HARNESS_FIXTURE_V2_SCHEMA = "gate-b-codex-teacher-harness-fixture-v2"
+HARNESS_V2_LABEL = "codex-gpt-5.6-sol-teacher-harness-v2"
+HARNESS_V2_VERSION = "harness-v2"
+HARNESS_V2_CHUNK_SIZE = 16
+HARNESS_V2_CHUNK_COUNT = 8
+HARNESS_V2_FIXTURE_SIZE = HARNESS_V2_CHUNK_SIZE * HARNESS_V2_CHUNK_COUNT
+HARNESS_V2_REPLAY_FAULT_COUNT = 20
 
 _SHA256_HEX_LENGTH = 64
 _ALLOWED_EVENT_TYPES = frozenset(
@@ -179,6 +193,76 @@ _FIXTURE_OPERANDS: tuple[tuple[int, int], ...] = (
     (34, -56),
 )
 
+# Harness v2 deliberately keeps the original 64 public synthetic rows as a
+# prefix and adds another fixed, contest-independent 64-row block.  The v1
+# fixture function and hash remain byte-for-byte unchanged.
+_FIXTURE_OPERANDS_V2: tuple[tuple[int, int], ...] = _FIXTURE_OPERANDS + (
+    (83, -29),
+    (-47, 18),
+    (25, 49),
+    (-62, -11),
+    (90, -45),
+    (13, -72),
+    (-39, 64),
+    (56, -8),
+    (-85, 27),
+    (44, 38),
+    (-21, -55),
+    (77, -32),
+    (-58, 43),
+    (36, -69),
+    (92, 5),
+    (-74, 16),
+    (27, 63),
+    (-66, 31),
+    (10, -57),
+    (48, -81),
+    (-15, 73),
+    (61, -24),
+    (-53, -28),
+    (32, 47),
+    (-88, 39),
+    (41, -65),
+    (-19, 84),
+    (70, -36),
+    (-46, 12),
+    (23, -78),
+    (59, 34),
+    (-79, -6),
+    (35, -22),
+    (-43, 56),
+    (87, -41),
+    (-31, -48),
+    (7, 75),
+    (-82, 26),
+    (54, -54),
+    (40, 17),
+    (-18, 79),
+    (95, -52),
+    (-49, -25),
+    (21, 68),
+    (-63, 37),
+    (78, -20),
+    (-30, 30),
+    (51, -67),
+    (-37, 23),
+    (29, 46),
+    (-91, 42),
+    (16, -74),
+    (-60, -19),
+    (86, 9),
+    (-12, 50),
+    (65, -33),
+    (-52, 52),
+    (38, -17),
+    (-69, 24),
+    (57, 31),
+    (-34, -44),
+    (8, 80),
+    (-84, 22),
+    (45, -71),
+)
+
 
 class TeacherHarnessValidationError(ValueError):
     """Raised for an invalid synthetic harness contract or evidence artifact."""
@@ -229,15 +313,23 @@ class HarnessProfile:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int):
                 raise TeacherHarnessValidationError(f"synthetic harness {name} is invalid")
-        if self.label != HARNESS_LABEL or self.version != HARNESS_VERSION:
+        if (self.label, self.version) not in {
+            (HARNESS_LABEL, HARNESS_VERSION),
+            (HARNESS_V2_LABEL, HARNESS_V2_VERSION),
+        }:
             raise TeacherHarnessValidationError("synthetic harness label/version is invalid")
         if self.seed != 20_260_731:
             raise TeacherHarnessValidationError("synthetic harness seed is invalid")
-        if self.initial_chunk_size != HARNESS_CHUNK_SIZE:
+        expected_chunk_size, expected_chunk_count = (
+            (HARNESS_CHUNK_SIZE, HARNESS_CHUNK_COUNT)
+            if self.version == HARNESS_VERSION
+            else (HARNESS_V2_CHUNK_SIZE, HARNESS_V2_CHUNK_COUNT)
+        )
+        if self.initial_chunk_size != expected_chunk_size:
             raise TeacherHarnessValidationError("synthetic harness chunk size is invalid")
-        if self.chunk_count != HARNESS_CHUNK_COUNT:
+        if self.chunk_count != expected_chunk_count:
             raise TeacherHarnessValidationError("synthetic harness chunk count is invalid")
-        if self.max_workers != 1 or self.max_invocations != HARNESS_CHUNK_COUNT:
+        if self.max_workers != 1 or self.max_invocations != expected_chunk_count:
             raise TeacherHarnessValidationError("synthetic harness execution cap is invalid")
         if self.max_attempts != 1 or self.retry_count != 0 or self.repair_count != 0:
             raise TeacherHarnessValidationError("synthetic harness retry policy is invalid")
@@ -328,6 +420,42 @@ def synthetic_fixture_sha256() -> str:
     ).hexdigest()
 
 
+def synthetic_fixture_rows_v2() -> tuple[SyntheticFixtureRow, ...]:
+    """Return the fixed 128-row v2 fixture in canonical 8x16 order."""
+
+    rows = tuple(
+        SyntheticFixtureRow(
+            problem_id=f"train-{900_000 + index:06d}",
+            question=(f"Compute the signed integer sum ({left}) + ({right}). Return the integer."),
+            expected_answer=left + right,
+        )
+        for index, (left, right) in enumerate(_FIXTURE_OPERANDS_V2, start=1)
+    )
+    if len(rows) != HARNESS_V2_FIXTURE_SIZE:  # pragma: no cover - static tuple guard
+        raise RuntimeError("synthetic harness v2 fixture size drifted")
+    return rows
+
+
+def synthetic_fixture_v2_sha256() -> str:
+    """Hash the exact v2 fixture without changing the historic v1 digest."""
+
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "schema_version": HARNESS_FIXTURE_V2_SCHEMA,
+                "items": [
+                    {
+                        "problem_id": row.problem_id,
+                        "question": row.question,
+                        "expected_answer": row.expected_answer,
+                    }
+                    for row in synthetic_fixture_rows_v2()
+                ],
+            }
+        )
+    ).hexdigest()
+
+
 def profile_from_config(config: Mapping[str, object]) -> HarnessProfile:
     """Construct the immutable harness profile from an already locked config."""
 
@@ -356,7 +484,7 @@ def profile_from_config(config: Mapping[str, object]) -> HarnessProfile:
     }
     if set(config) != required:
         raise TeacherHarnessValidationError("synthetic harness config keys are invalid")
-    if config["schema_version"] != HARNESS_CONFIG_SCHEMA:
+    if config["schema_version"] not in {HARNESS_CONFIG_SCHEMA, HARNESS_CONFIG_V2_SCHEMA}:
         raise TeacherHarnessValidationError("synthetic harness config schema is invalid")
     for name in (
         "schema_version",
@@ -395,8 +523,20 @@ def profile_from_config(config: Mapping[str, object]) -> HarnessProfile:
         or config["reference_answer_in_prompt"] is not False
         or config["allow_tool_use"] is not False
         or config["network_scope"] != "synthetic_canary_only"
-        or config["fixture_version"] != HARNESS_FIXTURE_SCHEMA
-        or config["fixture_sha256"] != synthetic_fixture_sha256()
+        or (
+            config["schema_version"] == HARNESS_CONFIG_SCHEMA
+            and (
+                config["fixture_version"] != HARNESS_FIXTURE_SCHEMA
+                or config["fixture_sha256"] != synthetic_fixture_sha256()
+            )
+        )
+        or (
+            config["schema_version"] == HARNESS_CONFIG_V2_SCHEMA
+            and (
+                config["fixture_version"] != HARNESS_FIXTURE_V2_SCHEMA
+                or config["fixture_sha256"] != synthetic_fixture_v2_sha256()
+            )
+        )
     ):
         raise TeacherHarnessValidationError("synthetic harness config contract is invalid")
     values = {
@@ -417,6 +557,74 @@ def profile_from_config(config: Mapping[str, object]) -> HarnessProfile:
         )
     }
     return HarnessProfile(**values)  # type: ignore[arg-type]
+
+
+def _v1_profile() -> HarnessProfile:
+    return HarnessProfile(
+        label=HARNESS_LABEL,
+        version=HARNESS_VERSION,
+        seed=20_260_731,
+        initial_chunk_size=HARNESS_CHUNK_SIZE,
+        chunk_count=HARNESS_CHUNK_COUNT,
+        max_workers=1,
+        max_invocations=HARNESS_CHUNK_COUNT,
+        max_attempts=1,
+        retry_count=0,
+        repair_count=0,
+        bank_output_count=0,
+        initial_reasoning_effort="high",
+    )
+
+
+def _fixture_rows_for_profile(profile: HarnessProfile) -> tuple[SyntheticFixtureRow, ...]:
+    if profile.version == HARNESS_VERSION:
+        return synthetic_fixture_rows()
+    if profile.version == HARNESS_V2_VERSION:
+        return synthetic_fixture_rows_v2()
+    raise TeacherHarnessValidationError("synthetic harness profile version is unsupported")
+
+
+def _profile_wire_contract(profile: HarnessProfile) -> tuple[str, str, str, str]:
+    if profile.version == HARNESS_VERSION:
+        return (
+            HARNESS_REPLAY_SCHEMA,
+            HARNESS_LIVE_SCHEMA,
+            HARNESS_AUTHORIZATION_SCHEMA,
+            synthetic_fixture_sha256(),
+        )
+    if profile.version == HARNESS_V2_VERSION:
+        return (
+            HARNESS_REPLAY_V2_SCHEMA,
+            HARNESS_LIVE_V2_SCHEMA,
+            HARNESS_AUTHORIZATION_V2_SCHEMA,
+            synthetic_fixture_v2_sha256(),
+        )
+    raise TeacherHarnessValidationError("synthetic harness profile version is unsupported")
+
+
+def _v2_profile() -> HarnessProfile:
+    return HarnessProfile(
+        label=HARNESS_V2_LABEL,
+        version=HARNESS_V2_VERSION,
+        seed=20_260_731,
+        initial_chunk_size=HARNESS_V2_CHUNK_SIZE,
+        chunk_count=HARNESS_V2_CHUNK_COUNT,
+        max_workers=1,
+        max_invocations=HARNESS_V2_CHUNK_COUNT,
+        max_attempts=1,
+        retry_count=0,
+        repair_count=0,
+        bank_output_count=0,
+        initial_reasoning_effort="high",
+    )
+
+
+def _profile_for_report_schema(schema: str) -> HarnessProfile:
+    if schema in {HARNESS_REPLAY_SCHEMA, HARNESS_LIVE_SCHEMA}:
+        return _v1_profile()
+    if schema in {HARNESS_REPLAY_V2_SCHEMA, HARNESS_LIVE_V2_SCHEMA}:
+        return _v2_profile()
+    raise TeacherHarnessValidationError("harness report schema is unsupported")
 
 
 def classify_codex_result(
@@ -456,40 +664,51 @@ def classify_codex_result(
     if decoded is None:
         return _classification("event_json", "malformed_event_json", counts)
     events = decoded
-    agent_message: str | None = None
-    terminal_index: int | None = None
+    agent_messages: list[str] = []
+    invalid_agent_message = False
+    terminal_indices: list[int] = []
+    invalid_terminal_usage = False
+    unsafe_code: str | None = None
     for index, event in enumerate(events):
         event_type = event.get("type")
         if not isinstance(event_type, str) or event_type not in _ALLOWED_EVENT_TYPES:
-            return _classification("unsafe_error_event", "unsafe_event_type", counts)
+            unsafe_code = unsafe_code or "unsafe_event_type"
+            continue
         if "error" in event or event_type in {"turn.failed", "error"}:
-            return _classification("unsafe_error_event", "error_event", counts)
+            unsafe_code = unsafe_code or "error_event"
         if event_type.startswith("item."):
             item = event.get("item")
             if not isinstance(item, Mapping):
-                return _classification("unsafe_error_event", "invalid_item_event", counts)
-            item_type = item.get("type")
-            if item_type not in {"agent_message", "reasoning"}:
-                return _classification("unsafe_error_event", "unsafe_item", counts)
-            if event_type == "item.completed" and item_type == "agent_message":
-                text = item.get("text")
-                if not isinstance(text, str) or not text:
-                    return _classification("agent_json", "missing_agent_message", counts)
-                if agent_message is not None:
-                    return _classification("agent_json", "multiple_agent_messages", counts)
-                agent_message = text
+                unsafe_code = unsafe_code or "invalid_item_event"
+            else:
+                item_type = item.get("type")
+                if item_type not in {"agent_message", "reasoning"}:
+                    unsafe_code = unsafe_code or "unsafe_item"
+                elif event_type == "item.completed" and item_type == "agent_message":
+                    text = item.get("text")
+                    if not isinstance(text, str) or not text:
+                        invalid_agent_message = True
+                    else:
+                        agent_messages.append(text)
         if event_type == "turn.completed":
-            if terminal_index is not None:
-                return _classification("terminal_usage", "multiple_terminal_events", counts)
-            terminal_index = index
+            terminal_indices.append(index)
             if not _valid_usage(event.get("usage")):
-                return _classification("terminal_usage", "invalid_usage", counts)
-    if terminal_index is None:
+                invalid_terminal_usage = True
+    if unsafe_code is not None:
+        return _classification("unsafe_error_event", unsafe_code, counts)
+    if len(terminal_indices) > 1:
+        return _classification("terminal_usage", "multiple_terminal_events", counts)
+    if invalid_terminal_usage:
+        return _classification("terminal_usage", "invalid_usage", counts)
+    if not terminal_indices:
         return _classification("terminal_usage", "missing_terminal_event", counts)
-    if terminal_index != len(events) - 1:
+    if terminal_indices[0] != len(events) - 1:
         return _classification("terminal_usage", "terminal_not_final", counts)
-    if agent_message is None:
+    if invalid_agent_message or not agent_messages:
         return _classification("agent_json", "missing_agent_message", counts)
+    if len(agent_messages) > 1:
+        return _classification("agent_json", "multiple_agent_messages", counts)
+    agent_message = agent_messages[0]
 
     payload = _decode_json_object(agent_message)
     if payload is None:
@@ -625,9 +844,13 @@ def run_harness_replay(
         teacher_config_file_sha256=teacher_config_file_sha256,
         prompt_policy=prompt_policy,
     )
-    classifications, qualified = _replay_classifications_for_policy(prompt_policy)
+    replay_schema, _, _, fixture_sha256 = _profile_wire_contract(profile)
+    classifications, qualified = _replay_classifications_for_policy(
+        prompt_policy,
+        profile=profile,
+    )
     payload_without_hash = {
-        "schema_version": HARNESS_REPLAY_SCHEMA,
+        "schema_version": replay_schema,
         "failure_classifier_schema_version": FAILURE_CLASSIFIER_SCHEMA,
         "harness_config_sha256": harness_config_sha256,
         "harness_config_file_sha256": harness_config_file_sha256,
@@ -635,7 +858,7 @@ def run_harness_replay(
         "teacher_config_file_sha256": teacher_config_file_sha256,
         "teacher_prompt_policy_sha256": prompt_policy.sha256,
         "prompt_template_sha256": _required_template_sha(prompt_policy),
-        "fixture_sha256": synthetic_fixture_sha256(),
+        "fixture_sha256": fixture_sha256,
         "classifications": [item.as_dict() for item in classifications],
         "qualified": qualified,
     }
@@ -663,7 +886,7 @@ def run_harness_live(
     command_runner: Callable[[tuple[str, ...]], CodexCommandResult],
     working_directory: str | Path,
 ) -> HarnessReportResult:
-    """Execute exactly two immutable synthetic canary chunks through Codex.
+    """Execute the immutable versioned synthetic canary chunks through Codex.
 
     The generic teacher plan is only a private command/evidence container; it
     receives answer-free fixture records, is run once with one worker, and is
@@ -690,7 +913,8 @@ def run_harness_live(
         raise TeacherHarnessValidationError("synthetic live command runner is invalid")
     _new_harness_plan_directory_target(plan_dir)
     _new_file_target(report_path, "synthetic harness report")
-    rows = synthetic_fixture_rows()
+    _, live_schema, _, fixture_sha256 = _profile_wire_contract(profile)
+    rows = _fixture_rows_for_profile(profile)
     records = tuple(
         MathRecord(
             id=row.problem_id,
@@ -706,7 +930,7 @@ def run_harness_live(
         records,
         tuple(row.problem_id for row in rows),
         plan_dir,
-        chunk_size=HARNESS_CHUNK_SIZE,
+        chunk_size=profile.initial_chunk_size,
         label=profile.label,
         version=profile.version,
         execution=execution,
@@ -722,14 +946,21 @@ def run_harness_live(
         working_directory=working_directory,
     )
     attempts = load_teacher_attempts(plan.plan_dir)
-    if result.attempts_written != HARNESS_CHUNK_COUNT or len(attempts) != HARNESS_CHUNK_COUNT:
-        raise TeacherHarnessValidationError("synthetic live canary did not make exactly two calls")
-    classifications = _classify_harness_live_attempts(plan, attempts, prompt_policy)
-    qualified = len(classifications) == HARNESS_CHUNK_COUNT and all(
+    if result.attempts_written != profile.chunk_count or len(attempts) != profile.chunk_count:
+        raise TeacherHarnessValidationError(
+            "synthetic live canary did not make the exact fixed call count"
+        )
+    classifications = _classify_harness_live_attempts(
+        plan,
+        attempts,
+        prompt_policy,
+        profile=profile,
+    )
+    qualified = len(classifications) == profile.chunk_count and all(
         item.stage == "success" and item.code == "qualified" for item in classifications
     )
     payload_without_hash = {
-        "schema_version": HARNESS_LIVE_SCHEMA,
+        "schema_version": live_schema,
         "failure_classifier_schema_version": FAILURE_CLASSIFIER_SCHEMA,
         "harness_config_sha256": harness_config_sha256,
         "harness_config_file_sha256": harness_config_file_sha256,
@@ -737,7 +968,7 @@ def run_harness_live(
         "teacher_config_file_sha256": teacher_config_file_sha256,
         "teacher_prompt_policy_sha256": prompt_policy.sha256,
         "prompt_template_sha256": _required_template_sha(prompt_policy),
-        "fixture_sha256": synthetic_fixture_sha256(),
+        "fixture_sha256": fixture_sha256,
         "source_manifest": source_manifest.as_dict(),
         "codex_binary_sha256": _codex_binary_sha256(execution),
         "codex_cli_version_sha256": _text_sha256(execution.codex_cli_version),
@@ -760,17 +991,21 @@ def _classify_harness_live_attempts(
     plan: TeacherPlan,
     attempts: Sequence[TeacherAttempt],
     prompt_policy: TeacherPromptPolicy,
+    *,
+    profile: HarnessProfile | None = None,
 ) -> tuple[FailureClassification, ...]:
-    """Reclassify the two private canary attempts without exposing their text."""
+    """Reclassify private versioned canary attempts without exposing text."""
 
-    expected_ids = tuple(row.problem_id for row in synthetic_fixture_rows())
+    selected_profile = profile or _v1_profile()
+    rows = _fixture_rows_for_profile(selected_profile)
+    expected_ids = tuple(row.problem_id for row in rows)
     expected_chunks = tuple(
-        expected_ids[offset : offset + HARNESS_CHUNK_SIZE]
-        for offset in range(0, len(expected_ids), HARNESS_CHUNK_SIZE)
+        expected_ids[offset : offset + selected_profile.initial_chunk_size]
+        for offset in range(0, len(expected_ids), selected_profile.initial_chunk_size)
     )
     if (
-        plan.label != HARNESS_LABEL
-        or plan.version != HARNESS_VERSION
+        plan.label != selected_profile.label
+        or plan.version != selected_profile.version
         or plan.prompt_policy != prompt_policy
         or plan.problem_ids != expected_ids
         or tuple(
@@ -782,7 +1017,7 @@ def _classify_harness_live_attempts(
         raise TeacherHarnessValidationError("synthetic live plan differs from the fixed fixture")
     ordered_attempts = tuple(sorted(attempts, key=lambda item: item.key))
     if (
-        len(ordered_attempts) != HARNESS_CHUNK_COUNT
+        len(ordered_attempts) != selected_profile.chunk_count
         or tuple(
             (
                 attempt.chunk_index,
@@ -794,7 +1029,7 @@ def _classify_harness_live_attempts(
         != tuple((index, 1, chunk_ids) for index, chunk_ids in enumerate(expected_chunks))
     ):
         raise TeacherHarnessValidationError("synthetic live attempt layout is invalid")
-    expected_answers = {row.problem_id: row.expected_answer for row in synthetic_fixture_rows()}
+    expected_answers = {row.problem_id: row.expected_answer for row in rows}
     classifications: list[FailureClassification] = []
     for attempt in ordered_attempts:
         try:
@@ -831,6 +1066,7 @@ def _verify_harness_live_plan_evidence(
     *,
     live_payload: Mapping[str, object],
     prompt_policy: TeacherPromptPolicy,
+    profile: HarnessProfile | None = None,
 ) -> str:
     """Re-derive a live report from its private no-bank plan before promotion."""
 
@@ -850,6 +1086,7 @@ def _verify_harness_live_plan_evidence(
         plan,
         load_teacher_attempts(plan.plan_dir),
         prompt_policy,
+        profile=profile,
     )
     if [item.as_dict() for item in classifications] != live_payload.get("classifications"):
         raise TeacherHarnessValidationError(
@@ -873,6 +1110,7 @@ def create_harness_authorization(
     teacher_config_file_sha256: str,
     prompt_policy: TeacherPromptPolicy,
     source_manifest: SourceTreeArtifactEvidence,
+    profile: HarnessProfile | None = None,
 ) -> str:
     """Bind qualified replay/live evidence for a later teacher-pilot plan."""
 
@@ -886,6 +1124,7 @@ def create_harness_authorization(
         teacher_config_file_sha256=teacher_config_file_sha256,
         prompt_policy=prompt_policy,
         source_manifest=source_manifest,
+        profile=profile,
     )
     _write_json_noreplace(output_path, payload)
     return str(payload["payload_sha256"])
@@ -902,6 +1141,7 @@ def validate_harness_evidence(
     teacher_config_file_sha256: str,
     prompt_policy: TeacherPromptPolicy,
     source_manifest: SourceTreeArtifactEvidence,
+    profile: HarnessProfile | None = None,
 ) -> str:
     """Re-verify qualified harness evidence before reserving a teacher plan.
 
@@ -920,6 +1160,7 @@ def validate_harness_evidence(
         teacher_config_file_sha256=teacher_config_file_sha256,
         prompt_policy=prompt_policy,
         source_manifest=source_manifest,
+        profile=profile,
     )
     return str(payload["payload_sha256"])
 
@@ -928,6 +1169,7 @@ def require_harness_live_execution_matches(
     live_report: str | Path,
     *,
     execution: TeacherExecutionConfig,
+    profile: HarnessProfile | None = None,
 ) -> None:
     """Require the organizer plan to use the binary/version proved by canary.
 
@@ -936,7 +1178,9 @@ def require_harness_live_execution_matches(
     a qualified canary from being copied to a different Codex installation.
     """
 
-    payload, _ = _load_harness_report(live_report, HARNESS_LIVE_SCHEMA)
+    selected_profile = profile or _v1_profile()
+    _, live_schema, _, _ = _profile_wire_contract(selected_profile)
+    payload, _ = _load_harness_report(live_report, live_schema)
     if (
         payload.get("codex_binary_sha256") != _codex_binary_sha256(execution)
         or payload.get("codex_cli_version_sha256")
@@ -958,24 +1202,16 @@ def _build_harness_authorization_payload(
     teacher_config_file_sha256: str,
     prompt_policy: TeacherPromptPolicy,
     source_manifest: SourceTreeArtifactEvidence,
+    profile: HarnessProfile | None = None,
 ) -> dict[str, object]:
     """Recompute the raw-free authorization payload without publishing it."""
 
+    selected_profile = profile or _v1_profile()
+    replay_schema, live_schema, authorization_schema, fixture_sha256 = (
+        _profile_wire_contract(selected_profile)
+    )
     _validate_profile_and_hashes(
-        HarnessProfile(
-            label=HARNESS_LABEL,
-            version=HARNESS_VERSION,
-            seed=20_260_731,
-            initial_chunk_size=HARNESS_CHUNK_SIZE,
-            chunk_count=HARNESS_CHUNK_COUNT,
-            max_workers=1,
-            max_invocations=HARNESS_CHUNK_COUNT,
-            max_attempts=1,
-            retry_count=0,
-            repair_count=0,
-            bank_output_count=0,
-            initial_reasoning_effort="high",
-        ),
+        selected_profile,
         harness_config_sha256=harness_config_sha256,
         harness_config_file_sha256=harness_config_file_sha256,
         teacher_config_sha256=teacher_config_sha256,
@@ -984,10 +1220,10 @@ def _build_harness_authorization_payload(
     )
     replay_payload, replay_file_sha256 = _load_harness_report(
         replay_report,
-        HARNESS_REPLAY_SCHEMA,
+        replay_schema,
         prompt_policy=prompt_policy,
     )
-    live_payload, live_file_sha256 = _load_harness_report(live_report, HARNESS_LIVE_SCHEMA)
+    live_payload, live_file_sha256 = _load_harness_report(live_report, live_schema)
     expected = {
         "harness_config_sha256": harness_config_sha256,
         "harness_config_file_sha256": harness_config_file_sha256,
@@ -995,7 +1231,7 @@ def _build_harness_authorization_payload(
         "teacher_config_file_sha256": teacher_config_file_sha256,
         "teacher_prompt_policy_sha256": prompt_policy.sha256,
         "prompt_template_sha256": _required_template_sha(prompt_policy),
-        "fixture_sha256": synthetic_fixture_sha256(),
+        "fixture_sha256": fixture_sha256,
     }
     for key, value in expected.items():
         if replay_payload.get(key) != value or live_payload.get(key) != value:
@@ -1010,9 +1246,10 @@ def _build_harness_authorization_payload(
         live_plan_dir,
         live_payload=live_payload,
         prompt_policy=prompt_policy,
+        profile=selected_profile,
     )
     payload_without_hash = {
-        "schema_version": HARNESS_AUTHORIZATION_SCHEMA,
+        "schema_version": authorization_schema,
         **expected,
         "replay_report_file_sha256": replay_file_sha256,
         "replay_report_payload_sha256": replay_payload["payload_sha256"],
@@ -1037,6 +1274,7 @@ def verify_harness_authorization(
     teacher_config_file_sha256: str,
     prompt_policy: TeacherPromptPolicy,
     source_manifest: SourceTreeArtifactEvidence,
+    profile: HarnessProfile | None = None,
 ) -> str:
     """Recompute and require an exact immutable harness-authorization sidecar."""
 
@@ -1052,6 +1290,7 @@ def verify_harness_authorization(
         teacher_config_file_sha256=teacher_config_file_sha256,
         prompt_policy=prompt_policy,
         source_manifest=source_manifest,
+        profile=profile,
     )
     if payload != expected_payload:
         raise TeacherHarnessValidationError(
@@ -1062,6 +1301,8 @@ def verify_harness_authorization(
 
 def _fault_matrix(
     policy: TeacherPromptPolicy,
+    *,
+    profile: HarnessProfile | None = None,
 ) -> tuple[
     tuple[
         CodexCommandResult,
@@ -1075,7 +1316,8 @@ def _fault_matrix(
 ]:
     """Return fixed local faults and their immutable expected classifications."""
 
-    rows = synthetic_fixture_rows()[:HARNESS_CHUNK_SIZE]
+    selected_profile = profile or _v1_profile()
+    rows = _fixture_rows_for_profile(selected_profile)[: selected_profile.initial_chunk_size]
     expected_ids = tuple(row.problem_id for row in rows)
     answers = {row.problem_id: row.expected_answer for row in rows}
     good_items = _output_items(expected_ids, answers)
@@ -1240,6 +1482,8 @@ def _fault_matrix(
 
 def _replay_classifications_for_policy(
     policy: TeacherPromptPolicy,
+    *,
+    profile: HarnessProfile | None = None,
 ) -> tuple[tuple[FailureClassification, ...], bool]:
     """Recompute every fixed replay result for report verification.
 
@@ -1250,6 +1494,7 @@ def _replay_classifications_for_policy(
 
     classifications: list[FailureClassification] = []
     expected_outcomes: list[tuple[str, str]] = []
+    selected_profile = profile or _v1_profile()
     for (
         result,
         expected_ids,
@@ -1257,7 +1502,7 @@ def _replay_classifications_for_policy(
         failure_reason,
         expected_stage,
         expected_code,
-    ) in _fault_matrix(policy):
+    ) in _fault_matrix(policy, profile=selected_profile):
         classifications.append(
             classify_codex_result(
                 result,
@@ -1596,7 +1841,13 @@ def _validate_harness_report(
     *,
     prompt_policy: TeacherPromptPolicy | None = None,
 ) -> None:
-    if expected_schema not in {DIAGNOSTIC_SCHEMA, HARNESS_REPLAY_SCHEMA, HARNESS_LIVE_SCHEMA}:
+    if expected_schema not in {
+        DIAGNOSTIC_SCHEMA,
+        HARNESS_REPLAY_SCHEMA,
+        HARNESS_LIVE_SCHEMA,
+        HARNESS_REPLAY_V2_SCHEMA,
+        HARNESS_LIVE_V2_SCHEMA,
+    }:
         raise TeacherHarnessValidationError("harness report schema is unsupported")
     schema = payload.get("schema_version")
     if schema != expected_schema:
@@ -1628,7 +1879,7 @@ def _validate_harness_report(
             "classifications",
             "payload_sha256",
         }
-    elif expected_schema == HARNESS_LIVE_SCHEMA:
+    elif expected_schema in {HARNESS_LIVE_SCHEMA, HARNESS_LIVE_V2_SCHEMA}:
         common.update(
             {
                 "source_manifest",
@@ -1682,7 +1933,7 @@ def _validate_harness_report(
         )
     if expected_schema != DIAGNOSTIC_SCHEMA and not isinstance(payload.get("qualified"), bool):
         raise TeacherHarnessValidationError("harness report qualification is invalid")
-    if expected_schema == HARNESS_LIVE_SCHEMA:
+    if expected_schema in {HARNESS_LIVE_SCHEMA, HARNESS_LIVE_V2_SCHEMA}:
         qualified = payload["qualified"]
         assert isinstance(qualified, bool)
         if qualified != all(
@@ -1692,15 +1943,21 @@ def _validate_harness_report(
                 "harness report qualification does not match its classifications"
             )
     if (
-        expected_schema == HARNESS_REPLAY_SCHEMA
-        and len(parsed_classifications) != HARNESS_REPLAY_FAULT_COUNT
+        expected_schema in {HARNESS_REPLAY_SCHEMA, HARNESS_REPLAY_V2_SCHEMA}
+        and len(parsed_classifications)
+        != (
+            HARNESS_REPLAY_FAULT_COUNT
+            if expected_schema == HARNESS_REPLAY_SCHEMA
+            else HARNESS_V2_REPLAY_FAULT_COUNT
+        )
     ):
         raise TeacherHarnessValidationError("harness replay fault-matrix count is invalid")
-    if expected_schema == HARNESS_REPLAY_SCHEMA:
+    if expected_schema in {HARNESS_REPLAY_SCHEMA, HARNESS_REPLAY_V2_SCHEMA}:
         if not isinstance(prompt_policy, TeacherPromptPolicy):
             raise TeacherHarnessValidationError("harness replay prompt policy is required")
         expected_classifications, expected_qualified = _replay_classifications_for_policy(
-            prompt_policy
+            prompt_policy,
+            profile=_profile_for_report_schema(expected_schema),
         )
         if (
             tuple(parsed_classifications) != expected_classifications
@@ -1709,12 +1966,13 @@ def _validate_harness_report(
             raise TeacherHarnessValidationError(
                 "harness replay report does not match the fixed fault matrix"
             )
-    if expected_schema == HARNESS_LIVE_SCHEMA:
-        if len(parsed_classifications) != HARNESS_CHUNK_COUNT:
+    if expected_schema in {HARNESS_LIVE_SCHEMA, HARNESS_LIVE_V2_SCHEMA}:
+        live_profile = _profile_for_report_schema(expected_schema)
+        if len(parsed_classifications) != live_profile.chunk_count:
             raise TeacherHarnessValidationError("harness live invocation count is invalid")
         if payload["qualified"] is True and any(
-            item.requested_count != HARNESS_CHUNK_SIZE
-            or item.returned_count != HARNESS_CHUNK_SIZE
+            item.requested_count != live_profile.initial_chunk_size
+            or item.returned_count != live_profile.initial_chunk_size
             or item.duplicate_count != 0
             or item.missing_count != 0
             or item.unexpected_count != 0

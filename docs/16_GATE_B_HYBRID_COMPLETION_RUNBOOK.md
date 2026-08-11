@@ -93,6 +93,10 @@ authorization v2를 새 schema로 추가하되 v1 bytes는 유지한다. live는
 cardinality, duplicate/omission/reorder, oversize와 raw/path 누출을 offline fault matrix로
 검증한다.
 
+고정 config, schema, SHA와 실행 명령은
+`docs/17_SYNTHETIC_TEACHER_HARNESS_V2.md`를 따른다. 실제 live 8회 호출은 v5 config가
+착륙한 committed clean source에서만 수행한다.
+
 Teacher v5는 v4 prompt/template/policy bytes를 그대로 두고 chunk만 16으로 바꾼다. initial
 8×16, worker 1, high다. output-structure/protocol failure인 chunk에만 동일 ID·동일 prompt로
 high protocol retry를 정확히 한 번 허용한다. semantic rejection은 gold 없이 xhigh로 최대

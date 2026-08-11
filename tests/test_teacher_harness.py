@@ -15,10 +15,15 @@ from deep_challenge.provenance import (
     canonical_json_bytes,
 )
 from deep_challenge.teacher_harness import (
+    HARNESS_AUTHORIZATION_V2_SCHEMA,
     HARNESS_CHUNK_SIZE,
     HARNESS_LIVE_SCHEMA,
+    HARNESS_LIVE_V2_SCHEMA,
     HARNESS_REPLAY_FAULT_COUNT,
     HARNESS_REPLAY_SCHEMA,
+    HARNESS_REPLAY_V2_SCHEMA,
+    HARNESS_V2_CHUNK_SIZE,
+    HARNESS_V2_REPLAY_FAULT_COUNT,
     FailureClassification,
     HarnessProfile,
     TeacherHarnessArtifactExistsError,
@@ -30,7 +35,9 @@ from deep_challenge.teacher_harness import (
     run_harness_live,
     run_harness_replay,
     synthetic_fixture_rows,
+    synthetic_fixture_rows_v2,
     synthetic_fixture_sha256,
+    synthetic_fixture_v2_sha256,
     validate_harness_evidence,
     verify_harness_authorization,
 )
@@ -47,6 +54,12 @@ _FIXTURE_SHA256 = "bc314a24ec872edf26bae13e296fb8fd500f80bcf6c00023518844d1b407e
 _PROMPT_TEMPLATE_SHA256 = "cf56fc2c021410337f8be8f5f519912eabf6390aa8892ecd92cac1ced6175c72"
 _HARNESS_CONFIG_FILE_SHA256 = "5e31d82fa7dcd5e3b2dcdcaa4cdcf7b0db1efd40009ed5c0ee53aa23cf4f300c"
 _HARNESS_CONFIG_SEMANTIC_SHA256 = "628dd255ad33ca1995f409060e7daeb4f9ed8a26805ac9e4458b1cdfffbfe4b1"
+_FIXTURE_V2_SHA256 = "dea9b4cc3c3262de831abba2c7ce36bf6ac2612ee215cbccd34c5d4b3d1a3388"
+_HARNESS_V2_CONFIG_FILE_SHA256 = "de1ac317f8f9df581a93951cc8ad42cb8113b12ca9ea3d39b98473cdd77a9029"
+_HARNESS_V2_CONFIG_SEMANTIC_SHA256 = (
+    "70f300a4e44b2426593ff873b87736ecaa2fe9eb2dff99ccbbb27623f27618a5"
+)
+_V1_REPLAY_GOLDEN_SHA256 = "654e01edbb154c6f6b43b0284a211fc596268b67b3dfb179e54b5b11868d97be"
 
 
 def _profile() -> HarnessProfile:
@@ -58,6 +71,23 @@ def _profile() -> HarnessProfile:
         chunk_count=2,
         max_workers=1,
         max_invocations=2,
+        max_attempts=1,
+        retry_count=0,
+        repair_count=0,
+        bank_output_count=0,
+        initial_reasoning_effort="high",
+    )
+
+
+def _profile_v2() -> HarnessProfile:
+    return HarnessProfile(
+        label="codex-gpt-5.6-sol-teacher-harness-v2",
+        version="harness-v2",
+        seed=20_260_731,
+        initial_chunk_size=16,
+        chunk_count=8,
+        max_workers=1,
+        max_invocations=8,
         max_attempts=1,
         retry_count=0,
         repair_count=0,
@@ -137,6 +167,21 @@ def _live_runner(calls: list[tuple[str, ...]]):
     return run
 
 
+def _live_runner_v2(calls: list[tuple[str, ...]]):
+    answers = {row.problem_id: row.expected_answer for row in synthetic_fixture_rows_v2()}
+
+    def run(command: tuple[str, ...]) -> CodexCommandResult:
+        calls.append(command)
+        payload = json.loads(command[-1].rsplit("INPUT_JSON:\n", 1)[1])
+        items = [
+            {"problem_id": raw["problem_id"], "target_text": _target(answers[raw["problem_id"]])}
+            for raw in payload["items"]
+        ]
+        return CodexCommandResult(stdout=_events(items), stderr="", returncode=0, latency_ms=1)
+
+    return run
+
+
 def _binary(tmp_path: Path) -> Path:
     binary = tmp_path / "codex"
     binary.write_text("synthetic test binary\n", encoding="utf-8")
@@ -157,6 +202,7 @@ def test_fixture_is_fixed_and_replay_qualifies_without_raw_content(tmp_path: Pat
         profile=_profile(),
     )
     assert result.qualified
+    assert hashlib.sha256(report.read_bytes()).hexdigest() == _V1_REPLAY_GOLDEN_SHA256
     payload = json.loads(_safe_report_text(report))
     assert payload["schema_version"] == HARNESS_REPLAY_SCHEMA
     assert payload["qualified"] is True
@@ -186,6 +232,153 @@ def test_harness_config_semantic_and_file_hashes_are_locked() -> None:
     assert hashlib.sha256(canonical_json_bytes(payload)).hexdigest() == stored
     assert hashlib.sha256(config_path.read_bytes()).hexdigest() == _HARNESS_CONFIG_FILE_SHA256
     assert payload["fixture_sha256"] == _FIXTURE_SHA256
+
+
+def test_v2_fixture_config_and_replay_are_locked_and_v1_is_unchanged(tmp_path: Path) -> None:
+    assert len(synthetic_fixture_rows()) == 64
+    assert synthetic_fixture_sha256() == _FIXTURE_SHA256
+    assert len(synthetic_fixture_rows_v2()) == 128
+    assert len({row.problem_id for row in synthetic_fixture_rows_v2()}) == 128
+    assert synthetic_fixture_v2_sha256() == _FIXTURE_V2_SHA256
+    config_path = _repo_config("codex-gpt-5.6-sol-teacher-harness-v2.json")
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    stored = payload.pop("config_sha256")
+    assert stored == _HARNESS_V2_CONFIG_SEMANTIC_SHA256
+    assert hashlib.sha256(canonical_json_bytes(payload)).hexdigest() == stored
+    assert hashlib.sha256(config_path.read_bytes()).hexdigest() == _HARNESS_V2_CONFIG_FILE_SHA256
+    report = tmp_path / "replay-v2.json"
+    result = run_harness_replay(
+        report,
+        **_hashes(),
+        prompt_policy=_policy(),
+        profile=_profile_v2(),
+    )
+    assert result.qualified
+    replay = json.loads(_safe_report_text(report))
+    assert replay["schema_version"] == HARNESS_REPLAY_V2_SCHEMA
+    assert len(replay["classifications"]) == HARNESS_V2_REPLAY_FAULT_COUNT
+    cardinalities = {
+        (item["requested_count"], item["returned_count"])
+        for item in replay["classifications"]
+        if item["code"] == "cardinality_mismatch"
+    }
+    assert cardinalities == {(16, 15), (16, 17)}
+    assert any(item["code"] == "order_mismatch" for item in replay["classifications"])
+    assert any(item["code"] == "target_policy_invalid" for item in replay["classifications"])
+
+
+def test_v2_live_runs_exactly_eight_chunks_and_binds_v2_authorization(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    execution = TeacherExecutionConfig(
+        codex_binary=str(_binary(tmp_path)),
+        codex_cli_version="codex synthetic-test",
+        reasoning_effort="high",
+    )
+    live_report = tmp_path / "live-v2.json"
+    result = run_harness_live(
+        tmp_path / "private-live-v2",
+        live_report,
+        **_hashes(),
+        prompt_policy=_policy(),
+        execution=execution,
+        profile=_profile_v2(),
+        source_manifest=_source_evidence(tmp_path),
+        command_runner=_live_runner_v2(calls),
+        working_directory=tmp_path,
+    )
+    assert result.qualified
+    assert len(calls) == 8
+    assert [
+        len(json.loads(command[-1].rsplit("INPUT_JSON:\n", 1)[1])["items"])
+        for command in calls
+    ] == [HARNESS_V2_CHUNK_SIZE] * 8
+    assert json.loads(_safe_report_text(live_report))["schema_version"] == HARNESS_LIVE_V2_SCHEMA
+    replay_report = tmp_path / "replay-v2.json"
+    run_harness_replay(
+        replay_report,
+        **_hashes(),
+        prompt_policy=_policy(),
+        profile=_profile_v2(),
+    )
+    authorization = tmp_path / "authorization-v2.json"
+    payload_sha = create_harness_authorization(
+        authorization,
+        replay_report=replay_report,
+        live_report=live_report,
+        live_plan_dir=tmp_path / "private-live-v2",
+        **_hashes(),
+        prompt_policy=_policy(),
+        source_manifest=_source_evidence(tmp_path),
+        profile=_profile_v2(),
+    )
+    authorization_payload = json.loads(authorization.read_text(encoding="utf-8"))
+    assert authorization_payload["schema_version"] == HARNESS_AUTHORIZATION_V2_SCHEMA
+    assert verify_harness_authorization(
+        authorization,
+        replay_report=replay_report,
+        live_report=live_report,
+        live_plan_dir=tmp_path / "private-live-v2",
+        **_hashes(),
+        prompt_policy=_policy(),
+        source_manifest=_source_evidence(tmp_path),
+        profile=_profile_v2(),
+    ) == payload_sha
+    with pytest.raises(TeacherHarnessValidationError):
+        verify_harness_authorization(
+            authorization,
+            replay_report=replay_report,
+            live_report=live_report,
+            live_plan_dir=tmp_path / "private-live-v2",
+            **_hashes(),
+            prompt_policy=_policy(),
+            source_manifest=_source_evidence(tmp_path),
+        )
+    require_harness_live_execution_matches(
+        live_report,
+        execution=execution,
+        profile=_profile_v2(),
+    )
+    authorization_text = authorization.read_text(encoding="utf-8")
+    for forbidden in (
+        "problem_id",
+        "question",
+        "target_text",
+        "stderr",
+        "INPUT_JSON",
+        "train-900001",
+        str(tmp_path),
+    ):
+        assert forbidden not in authorization_text
+
+
+def test_v2_profile_rejects_third_party_execution_overrides() -> None:
+    for field, value in (
+        ("max_invocations", 9),
+        ("max_workers", 2),
+        ("retry_count", 1),
+        ("repair_count", 1),
+        ("bank_output_count", 1),
+        ("initial_reasoning_effort", "xhigh"),
+    ):
+        values = {
+            "label": "codex-gpt-5.6-sol-teacher-harness-v2",
+            "version": "harness-v2",
+            "seed": 20_260_731,
+            "initial_chunk_size": 16,
+            "chunk_count": 8,
+            "max_workers": 1,
+            "max_invocations": 8,
+            "max_attempts": 1,
+            "retry_count": 0,
+            "repair_count": 0,
+            "bank_output_count": 0,
+            "initial_reasoning_effort": "high",
+        }
+        values[field] = value
+        with pytest.raises(TeacherHarnessValidationError):
+            HarnessProfile(**values)  # type: ignore[arg-type]
 
 
 def test_classifier_prioritizes_cardinality_and_redacts_duplicate_ids() -> None:
@@ -241,6 +434,50 @@ def test_classifier_multi_fault_precedence_is_fixed() -> None:
         classify_codex_result(
             CodexCommandResult(
                 stdout=unsafe_then_bad_usage,
+                stderr="",
+                returncode=0,
+                latency_ms=1,
+            ),
+            expected_ids,
+            prompt_policy=_policy(),
+            expected_answers=answers,
+        ).code
+        == "unsafe_item"
+    )
+    empty_agent_then_bad_usage = "\n".join(
+        json.dumps(event, separators=(",", ":"))
+        for event in (
+            {"type": "thread.started"},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": ""}},
+            {"type": "turn.completed", "usage": {"input_tokens": -1}},
+        )
+    )
+    assert (
+        classify_codex_result(
+            CodexCommandResult(
+                stdout=empty_agent_then_bad_usage,
+                stderr="",
+                returncode=0,
+                latency_ms=1,
+            ),
+            expected_ids,
+            prompt_policy=_policy(),
+            expected_answers=answers,
+        ).code
+        == "invalid_usage"
+    )
+    bad_usage_then_unsafe = "\n".join(
+        json.dumps(event, separators=(",", ":"))
+        for event in (
+            {"type": "thread.started"},
+            {"type": "turn.completed", "usage": {"input_tokens": -1}},
+            {"type": "item.completed", "item": {"type": "tool"}},
+        )
+    )
+    assert (
+        classify_codex_result(
+            CodexCommandResult(
+                stdout=bad_usage_then_unsafe,
                 stderr="",
                 returncode=0,
                 latency_ms=1,
@@ -520,12 +757,34 @@ def test_live_harness_runs_exactly_two_chunks_and_authorization_revalidates(
         )
 
 
+@pytest.mark.parametrize(
+    ("harness_config_name", "fixture_rows", "expected_calls", "chunk_size"),
+    (
+        (
+            "codex-gpt-5.6-sol-teacher-harness-v1.json",
+            synthetic_fixture_rows,
+            2,
+            32,
+        ),
+        (
+            "codex-gpt-5.6-sol-teacher-harness-v2.json",
+            synthetic_fixture_rows_v2,
+            8,
+            16,
+        ),
+    ),
+)
 def test_cli_replay_and_live_profile_failure_are_redacted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    harness_config_name: str,
+    fixture_rows: object,
+    expected_calls: int,
+    chunk_size: int,
 ) -> None:
-    harness_config = _repo_config("codex-gpt-5.6-sol-teacher-harness-v1.json")
+    assert callable(fixture_rows)
+    harness_config = _repo_config(harness_config_name)
     teacher_config = _repo_config("codex-gpt-5.6-sol-teacher-pilot-v3.json")
     replay = tmp_path / "replay.json"
     assert (
@@ -573,7 +832,7 @@ def test_cli_replay_and_live_profile_failure_are_redacted(
         lambda path: path,
     )
     calls: list[tuple[str, ...]] = []
-    answers = {row.problem_id: row.expected_answer for row in synthetic_fixture_rows()}
+    answers = {row.problem_id: row.expected_answer for row in fixture_rows()}
 
     def failed_canary(
         command: tuple[str, ...],
@@ -616,16 +875,22 @@ def test_cli_replay_and_live_profile_failure_are_redacted(
         )
         == 1
     )
-    assert len(calls) == 2
+    assert len(calls) == expected_calls
     live_stdout = capsys.readouterr().out
     assert "problem_id" not in live_stdout
     assert "target_text" not in live_stdout
+    live_event = json.loads(live_stdout)
+    assert live_event["invocations"] == expected_calls
+    assert live_event["max_workers"] == 1
+    assert live_event["retry_count"] == 0
+    assert live_event["repair_count"] == 0
+    assert live_event["bank_output_count"] == 0
     payload = json.loads(_safe_report_text(report))
     assert all(
         item["stage"] == "output_structure"
         and item["code"] == "cardinality_mismatch"
-        and item["requested_count"] == 32
-        and item["returned_count"] == 33
+        and item["requested_count"] == chunk_size
+        and item["returned_count"] == chunk_size + 1
         and item["duplicate_count"] == 1
         for item in payload["classifications"]
     )
