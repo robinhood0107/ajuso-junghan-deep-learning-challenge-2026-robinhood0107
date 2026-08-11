@@ -28,6 +28,8 @@
 > [hybrid completion runbook](docs/16_GATE_B_HYBRID_COMPLETION_RUNBOOK.md)이 권위 문서다.
 > Harness v2의 고정 128행·8×16 계약과 실행 경계는
 > [synthetic teacher harness v2](docs/17_SYNTHETIC_TEACHER_HARNESS_V2.md)에 있다.
+> 마지막 teacher profile의 고정 실행 계약은
+> [teacher v5 runbook](docs/18_GATE_B_TEACHER_V5_RUNBOOK.md)에 있다.
 
 ## 한 줄 결론
 

@@ -18,6 +18,7 @@ from deep_challenge.teacher_harness import (
     run_harness_live,
     run_harness_replay,
     synthetic_fixture_rows,
+    synthetic_fixture_rows_v2,
 )
 from deep_challenge.teacher_rationale import (
     CodexCommandResult,
@@ -68,12 +69,30 @@ def _teacher_pilot_v4_config_path() -> Path:
     )
 
 
+def _teacher_pilot_v5_config_path() -> Path:
+    return (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "gate_b"
+        / "codex-gpt-5.6-sol-teacher-pilot-v5.json"
+    )
+
+
 def _harness_config_path() -> Path:
     return (
         Path(__file__).resolve().parents[1]
         / "configs"
         / "gate_b"
         / "codex-gpt-5.6-sol-teacher-harness-v1.json"
+    )
+
+
+def _harness_v2_config_path() -> Path:
+    return (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "gate_b"
+        / "codex-gpt-5.6-sol-teacher-harness-v2.json"
     )
 
 
@@ -237,6 +256,8 @@ def _qualified_v4_harness_arguments(
         json.dumps(build_source_tree_manifest(source_root).as_dict()),
         encoding="utf-8",
     )
+
+
     source_evidence = validate_source_tree_manifest_artifact(
         source_manifest,
         root=source_root,
@@ -298,6 +319,96 @@ def _qualified_v4_harness_arguments(
         [
             "--harness-config",
             str(_harness_config_path()),
+            "--harness-replay-report",
+            str(replay_report),
+            "--harness-live-report",
+            str(live_report),
+            "--harness-live-plan-dir",
+            str(live_plan_dir),
+            "--harness-source-root",
+            str(source_root),
+            "--harness-source-manifest",
+            str(source_manifest),
+        ],
+        binary,
+        version,
+    )
+
+
+def _qualified_v5_harness_arguments(
+    tmp_path: Path,
+) -> tuple[list[str], Path, str]:
+    """Create private, answer-free qualified v2 evidence for one v5 CLI test."""
+
+    source_root = tmp_path / "frozen-source-v5"
+    source_root.mkdir()
+    (source_root / "frozen.py").write_text("VALUE = 5\n", encoding="utf-8")
+    source_manifest = tmp_path / "source-manifest-v5.json"
+    source_manifest.write_text(
+        json.dumps(build_source_tree_manifest(source_root).as_dict()),
+        encoding="utf-8",
+    )
+    source_evidence = validate_source_tree_manifest_artifact(
+        source_manifest,
+        root=source_root,
+    )
+    harness_config, harness_file_sha256, profile = (
+        cli_module._load_locked_codex_teacher_harness_config(_harness_v2_config_path())
+    )
+    teacher_config, teacher_file_sha256 = cli_module._load_locked_codex_teacher_config(
+        _teacher_pilot_v5_config_path()
+    )
+    replay_report = tmp_path / "replay-v5.json"
+    run_harness_replay(
+        replay_report,
+        harness_config_sha256=cli_module._teacher_config_sha256(harness_config),
+        harness_config_file_sha256=harness_file_sha256,
+        teacher_config_sha256=cli_module._teacher_config_sha256(teacher_config),
+        teacher_config_file_sha256=teacher_file_sha256,
+        prompt_policy=cli_module._teacher_prompt_policy_from_config(teacher_config),
+        profile=profile,
+    )
+    binary = tmp_path / "codex-v5"
+    binary.write_text("synthetic v5 Codex binary\n", encoding="utf-8")
+    version = "codex-cli v5 synthetic"
+    expected_answers = {
+        row.problem_id: row.expected_answer for row in synthetic_fixture_rows_v2()
+    }
+
+    def runner(command: tuple[str, ...]) -> CodexCommandResult:
+        return CodexCommandResult(
+            stdout=_event_stream_for_prompt(command[-1], expected_answers),
+            stderr="",
+            returncode=0,
+            latency_ms=1,
+        )
+
+    live_plan_dir = tmp_path / "private-live-plan-v5"
+    live_report = tmp_path / "live-v5.json"
+    live = run_harness_live(
+        live_plan_dir,
+        live_report,
+        harness_config_sha256=cli_module._teacher_config_sha256(harness_config),
+        harness_config_file_sha256=harness_file_sha256,
+        teacher_config_sha256=cli_module._teacher_config_sha256(teacher_config),
+        teacher_config_file_sha256=teacher_file_sha256,
+        prompt_policy=cli_module._teacher_prompt_policy_from_config(teacher_config),
+        execution=TeacherExecutionConfig(
+            codex_binary=str(binary),
+            codex_cli_version=version,
+            reasoning_effort="high",
+            seed=20_260_731,
+        ),
+        profile=profile,
+        source_manifest=source_evidence,
+        command_runner=runner,
+        working_directory=tmp_path,
+    )
+    assert live.qualified
+    return (
+        [
+            "--harness-config",
+            str(_harness_v2_config_path()),
             "--harness-replay-report",
             str(replay_report),
             "--harness-live-report",
@@ -787,6 +898,158 @@ def test_teacher_pilot_v4_requires_reverified_harness_authorization(
             == 2
         )
         assert "does not match" in capsys.readouterr().err
+
+
+def test_teacher_pilot_v5_keeps_v4_prompt_and_requires_harness_v2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config_path = _teacher_pilot_v5_config_path()
+    config, file_sha256 = cli_module._load_locked_codex_teacher_config(config_path)
+    assert cli_module._teacher_config_sha256(config) == (
+        "5ef82e71418c872b56f47e4f94124a1c25041e853b9267710082e93369839f88"
+    )
+    assert file_sha256 == "43ee741ab417b191bb5de31c09c48cf93d693cff3021d5e7a6025ae0487514e5"
+    assert config["initial_chunk_size"] == config["repair_chunk_size"] == 16
+    v4_config, _ = cli_module._load_locked_codex_teacher_config(
+        _teacher_pilot_v4_config_path()
+    )
+    assert config["prompt_version"] == v4_config["prompt_version"]
+    assert config["prompt_template_sha256"] == v4_config["prompt_template_sha256"]
+    assert (
+        cli_module._teacher_prompt_policy_from_config(config)
+        == cli_module._teacher_prompt_policy_from_config(v4_config)
+    )
+
+    contract, _ = _teacher_contract(tmp_path, row_count=400)
+    capsys.readouterr()
+    harness_args, binary, version = _qualified_v5_harness_arguments(tmp_path)
+    monkeypatch.setattr(
+        cli_module,
+        "_probe_codex_chatgpt_cli",
+        lambda: (str(binary), version),
+    )
+    plan_dir = tmp_path / "private-teacher-pilot-v5"
+    command = [
+        "gate-b-teacher-plan",
+        *contract,
+        "--teacher-config",
+        str(config_path),
+        "--pilot-size",
+        "128",
+        "--output-dir",
+        str(plan_dir),
+    ]
+    assert main(command) == 2
+    assert "requires harness config" in capsys.readouterr().err
+    wrong_harness_args = list(harness_args)
+    wrong_harness_args[wrong_harness_args.index("--harness-config") + 1] = str(
+        _harness_config_path()
+    )
+    assert main([*command, *wrong_harness_args]) == 2
+    assert "matching versioned synthetic harness" in capsys.readouterr().err
+    assert main([*command, *harness_args]) == 0
+    created = json.loads(capsys.readouterr().out)
+    plan = load_teacher_plan(plan_dir)
+    assert plan.label == "codex-gpt-5.6-sol-teacher-pilot-v5"
+    assert plan.version == "pilot-v5"
+    assert len(plan.chunks) == 8
+    assert all(len(chunk.problem_ids) == 16 for chunk in plan.chunks)
+    assert created["harness_authorization_payload_sha256"] is not None
+    sidecar = plan_dir / "harness-authorization-v2.json"
+    assert sidecar.is_file()
+
+    status_command = [
+        "gate-b-teacher-status",
+        "--plan-dir",
+        str(plan_dir),
+        "--teacher-config",
+        str(config_path),
+    ]
+    assert main(status_command) == 2
+    capsys.readouterr()
+    assert main([*status_command, *harness_args]) == 0
+    capsys.readouterr()
+    original_sidecar = sidecar.read_bytes()
+    sidecar.write_bytes(b"{}")
+    assert main([*status_command, *harness_args]) == 2
+    assert "harness authorization" in capsys.readouterr().err
+    sidecar.write_bytes(original_sidecar)
+
+
+    monkeypatch.setattr(
+        cli_module,
+        "_prepare_isolated_codex_home",
+        lambda working_directory: working_directory,
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def invalid_structure(
+        command: tuple[str, ...],
+        *,
+        timeout_seconds: int,
+        isolated_codex_home: Path | None = None,
+    ) -> CodexCommandResult:
+        del timeout_seconds, isolated_codex_home
+        calls.append(command)
+        return CodexCommandResult(stdout="{not-json", stderr="", returncode=0, latency_ms=1)
+
+    monkeypatch.setattr(cli_module, "_run_codex_teacher_command", invalid_structure)
+
+    def run_command(invocations: int) -> list[str]:
+        return [
+            "gate-b-teacher-run",
+            "--plan-dir",
+            str(plan_dir),
+            "--teacher-config",
+            str(config_path),
+            "--acknowledge-codex-teacher",
+            "--max-invocations",
+            str(invocations),
+            "--max-workers",
+            "1",
+            *harness_args,
+        ]
+
+    assert main(run_command(4)) == 2
+    assert not calls
+    assert main(run_command(8)) == 0
+    assert len(calls) == 8
+    capsys.readouterr()
+    premature_jsonl = tmp_path / "premature.jsonl"
+    premature_manifest = tmp_path / "premature.manifest.json"
+    assert (
+        main(
+            [
+                "gate-b-teacher-finalize",
+                *contract,
+                "--teacher-config",
+                str(config_path),
+                "--plan-dir",
+                str(plan_dir),
+                "--pilot-size",
+                "128",
+                "--output-jsonl",
+                str(premature_jsonl),
+                "--output-manifest",
+                str(premature_manifest),
+                *harness_args,
+            ]
+        )
+        == 2
+    )
+    assert "before every required protocol retry resolves" in capsys.readouterr().err
+    assert not list((plan_dir / "assessments").iterdir())
+    assert not (plan_dir / "initial-threshold-failure-v1.json").exists()
+    assert not premature_jsonl.exists()
+    assert not premature_manifest.exists()
+    assert main(run_command(2)) == 2
+    assert len(calls) == 8
+    assert main(run_command(8)) == 0
+    assert len(calls) == 16
+    capsys.readouterr()
+    assert main(run_command(1)) == 2
+    assert "protocol retry" in capsys.readouterr().err
+    assert len(calls) == 16
 
 
 def test_teacher_pilot_v4_initial_threshold_failure_blocks_all_resume(

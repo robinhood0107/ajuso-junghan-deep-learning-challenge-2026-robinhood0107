@@ -107,6 +107,9 @@ exhausted/retryable/unassessed 0, source JSONL/manifest 재검증, answer-hidden
 60/64 이상과 receipt 생성까지다. 실패하면 raw-free count/hash/category만 남기고 v6를
 만들지 않는다.
 
+v5 config SHA, harness v2 sidecar, protocol retry와 terminal 경계의 정확한 명령은
+`docs/18_GATE_B_TEACHER_V5_RUNBOOK.md`를 따른다.
+
 ## 4. candidate 성공 뒤 승인 gate
 
 v5 pilot과 audit가 성공해도 full bank 전에 멈춘다. 사용자에게 fold-0 11,794행,

@@ -113,9 +113,11 @@ from .splits import (
 from .submission import SubmissionSchema, validate_submission_csv, write_submission_csv
 from .teacher_harness import (
     HARNESS_AUTHORIZATION_FILENAME,
+    HARNESS_AUTHORIZATION_V2_FILENAME,
     HARNESS_CONFIG_SCHEMA,
     HARNESS_CONFIG_V2_SCHEMA,
     HarnessProfile,
+    classify_codex_result,
     create_harness_authorization,
     diagnose_teacher_ledger,
     profile_from_config,
@@ -136,6 +138,7 @@ from .teacher_pilot_authorization import (
 )
 from .teacher_rationale import (
     CodexCommandResult,
+    TeacherAttempt,
     TeacherBankFinalizeResult,
     TeacherExecutionConfig,
     TeacherLogicalAuditPlan,
@@ -145,6 +148,7 @@ from .teacher_rationale import (
     create_teacher_plan,
     finalize_teacher_bank,
     finalize_teacher_logical_audit,
+    load_teacher_attempts,
     load_teacher_logical_audit_plan,
     load_teacher_plan,
     run_teacher_logical_audit,
@@ -264,6 +268,30 @@ _LOCKED_CODEX_TEACHER_PILOT_V4_CONFIG: dict[str, object] = {
     "prompt_template_sha256": "3029e9297bdda504e0f48e1ce4d57e363e5d3a5342edf18253b11c4f75ecd8a7",
 }
 
+# V5 changes execution reliability only.  The prompt version and template hash
+# remain byte-identical to v4 while each initial/protocol chunk is capped at 16.
+_LOCKED_CODEX_TEACHER_PILOT_V5_CONFIG: dict[str, object] = {
+    "schema_version": "gate-b-codex-teacher-pilot-config-v5",
+    "label": "codex-gpt-5.6-sol-teacher-pilot-v5",
+    "version": "pilot-v5",
+    "provider": "chatgpt_codex_cli",
+    "model_id": "gpt-5.6-sol",
+    "model_revision": "gpt-5.6-sol",
+    "initial_reasoning_effort": "high",
+    "repair_reasoning_effort": "xhigh",
+    "seed": 20_260_731,
+    "initial_chunk_size": 16,
+    "repair_chunk_size": 16,
+    "max_attempts": 3,
+    "pilot_size": 128,
+    "max_concurrent_workers": 2,
+    "reference_answer_in_prompt": False,
+    "allow_tool_use": False,
+    "network_scope": "training_only",
+    "prompt_version": "gate-b-codex-teacher-prompt-v4",
+    "prompt_template_sha256": "3029e9297bdda504e0f48e1ce4d57e363e5d3a5342edf18253b11c4f75ecd8a7",
+}
+
 _LOCKED_CODEX_TEACHER_CONFIGS = {
     str(_LOCKED_CODEX_TEACHER_CONFIG["schema_version"]): _LOCKED_CODEX_TEACHER_CONFIG,
     str(_LOCKED_CODEX_TEACHER_PILOT_V2_CONFIG["schema_version"]): (
@@ -274,6 +302,9 @@ _LOCKED_CODEX_TEACHER_CONFIGS = {
     ),
     str(_LOCKED_CODEX_TEACHER_PILOT_V4_CONFIG["schema_version"]): (
         _LOCKED_CODEX_TEACHER_PILOT_V4_CONFIG
+    ),
+    str(_LOCKED_CODEX_TEACHER_PILOT_V5_CONFIG["schema_version"]): (
+        _LOCKED_CODEX_TEACHER_PILOT_V5_CONFIG
     ),
 }
 
@@ -340,12 +371,16 @@ _HARNESS_ALLOWED_TEACHER_CONFIG_SCHEMAS = frozenset(
     {
         "gate-b-codex-teacher-pilot-config-v3",
         "gate-b-codex-teacher-pilot-config-v4",
+        "gate-b-codex-teacher-pilot-config-v5",
     }
 )
 _V4_TEACHER_CONFIG_SCHEMA = "gate-b-codex-teacher-pilot-config-v4"
 _V4_INITIAL_THRESHOLD_FAILURE_SCHEMA = "gate-b-codex-teacher-pilot-v4-initial-threshold-v1"
 _V4_INITIAL_THRESHOLD_FAILURE_FILENAME = "initial-threshold-failure-v1.json"
 _V4_INITIAL_MIN_ACCEPTED = 103
+_V5_TEACHER_CONFIG_SCHEMA = "gate-b-codex-teacher-pilot-config-v5"
+_V5_INITIAL_THRESHOLD_FAILURE_SCHEMA = "gate-b-codex-teacher-pilot-v5-initial-threshold-v1"
+_V5_INITIAL_THRESHOLD_FAILURE_FILENAME = "initial-threshold-failure-v1.json"
 
 # This is a separate immutable profile from the rationale-generation profile
 # above.  It deliberately has no editable file: the audit must always sample
@@ -2221,6 +2256,7 @@ def _command_gate_b_teacher_plan(args: argparse.Namespace) -> int:
         require_harness_live_execution_matches(
             harness_evidence.live_report,
             execution=execution,
+            profile=harness_evidence.profile,
         )
     plan = create_teacher_plan(
         _records_for_ids(train.records, allowed_ids),
@@ -2426,6 +2462,11 @@ def _command_gate_b_teacher_run(args: argparse.Namespace) -> int:
             max_workers=args.max_workers,
             working_directory=working_dir,
             allow_stale_lock_recovery=args.recover_stale_lock,
+            protocol_retry_attempt_keys=(
+                _v5_protocol_retryable_attempt_keys(plan)
+                if teacher_config.get("schema_version") == _V5_TEACHER_CONFIG_SCHEMA
+                else None
+            ),
         )
     status = teacher_status(
         plan.plan_dir,
@@ -2676,6 +2717,7 @@ def _command_gate_b_teacher_finalize(args: argparse.Namespace) -> int:
         raise ValueError(
             "teacher plan IDs do not exactly match the derived fold-0 training scope"
         )
+    _require_v5_protocol_retry_resolved_before_finalize(plan, teacher_config)
     result = finalize_teacher_bank(
         plan.plan_dir,
         _records_for_ids(train.records, expected_ids),
@@ -3728,7 +3770,7 @@ def _load_locked_codex_teacher_harness_config(
 
 @dataclass(frozen=True, slots=True)
 class _TeacherHarnessEvidence:
-    """Verified private paths and portable hashes for one v4 authorization."""
+    """Verified private paths and portable hashes for one versioned authorization."""
 
     harness_config_sha256: str
     harness_config_file_sha256: str
@@ -3736,6 +3778,7 @@ class _TeacherHarnessEvidence:
     live_report: Path
     live_plan_dir: Path
     source_manifest: SourceTreeArtifactEvidence
+    profile: HarnessProfile
 
 
 def _teacher_harness_argument_values(args: argparse.Namespace) -> tuple[object, ...]:
@@ -3758,7 +3801,7 @@ def _require_v4_teacher_harness_evidence(
     teacher_config_file_sha256: str,
     plan_dir: Path | None = None,
 ) -> _TeacherHarnessEvidence | None:
-    """Fail closed unless v4 replay/live evidence matches the current source.
+    """Fail closed unless v4/v5 replay/live evidence matches current source.
 
     Historic profiles neither require nor accept these new arguments, preserving
     their established CLI behavior and serialized ledgers.  V4 validates the
@@ -3767,14 +3810,18 @@ def _require_v4_teacher_harness_evidence(
     """
 
     values = _teacher_harness_argument_values(args)
-    is_v4 = teacher_config.get("schema_version") == _V4_TEACHER_CONFIG_SCHEMA
-    if not is_v4:
+    teacher_schema = teacher_config.get("schema_version")
+    expected_harness_version = {
+        _V4_TEACHER_CONFIG_SCHEMA: "harness-v1",
+        _V5_TEACHER_CONFIG_SCHEMA: "harness-v2",
+    }.get(teacher_schema)
+    if expected_harness_version is None:
         if any(value is not None for value in values):
-            raise ValueError("synthetic harness evidence is only valid for teacher-pilot-v4")
+            raise ValueError("synthetic harness evidence is only valid for teacher-pilot-v4/v5")
         return None
     if any(value is None for value in values):
         raise ValueError(
-            "teacher-pilot-v4 requires harness config, qualified replay/live evidence, "
+            "teacher-pilot-v4/v5 requires harness config, qualified replay/live evidence, "
             "and a current harness source manifest"
         )
 
@@ -3791,9 +3838,11 @@ def _require_v4_teacher_harness_evidence(
     assert isinstance(source_root, Path)
     assert isinstance(source_manifest_path, Path)
 
-    harness_config, harness_config_file_sha256, _profile = (
+    harness_config, harness_config_file_sha256, profile = (
         _load_locked_codex_teacher_harness_config(harness_config_path)
     )
+    if profile.version != expected_harness_version:
+        raise ValueError("teacher profile requires its matching versioned synthetic harness")
     _require_harness_allowed_teacher_config(teacher_config)
     source_manifest = validate_source_tree_manifest_artifact(
         source_manifest_path,
@@ -3806,6 +3855,7 @@ def _require_v4_teacher_harness_evidence(
         live_report=live_report,
         live_plan_dir=live_plan_dir,
         source_manifest=source_manifest,
+        profile=profile,
     )
     authorization_kwargs = {
         "replay_report": evidence.replay_report,
@@ -3817,17 +3867,19 @@ def _require_v4_teacher_harness_evidence(
         "teacher_config_file_sha256": teacher_config_file_sha256,
         "prompt_policy": _teacher_prompt_policy_from_config(teacher_config),
         "source_manifest": evidence.source_manifest,
+        "profile": evidence.profile,
     }
     if plan_dir is None:
         validate_harness_evidence(**authorization_kwargs)
     else:
         verify_harness_authorization(
-            plan_dir / HARNESS_AUTHORIZATION_FILENAME,
+            plan_dir / _harness_authorization_filename(evidence.profile),
             **authorization_kwargs,
         )
         require_harness_live_execution_matches(
             evidence.live_report,
             execution=load_teacher_plan(plan_dir).execution,
+            profile=evidence.profile,
         )
     return evidence
 
@@ -3846,9 +3898,10 @@ def _write_v4_teacher_harness_authorization(
     require_harness_live_execution_matches(
         evidence.live_report,
         execution=plan.execution,
+        profile=evidence.profile,
     )
     return create_harness_authorization(
-        plan.plan_dir / HARNESS_AUTHORIZATION_FILENAME,
+        plan.plan_dir / _harness_authorization_filename(evidence.profile),
         replay_report=evidence.replay_report,
         live_report=evidence.live_report,
         live_plan_dir=evidence.live_plan_dir,
@@ -3858,7 +3911,16 @@ def _write_v4_teacher_harness_authorization(
         teacher_config_file_sha256=teacher_config_file_sha256,
         prompt_policy=_teacher_prompt_policy_from_config(teacher_config),
         source_manifest=evidence.source_manifest,
+        profile=evidence.profile,
     )
+
+
+def _harness_authorization_filename(profile: HarnessProfile) -> str:
+    if profile.version == "harness-v1":
+        return HARNESS_AUTHORIZATION_FILENAME
+    if profile.version == "harness-v2":
+        return HARNESS_AUTHORIZATION_V2_FILENAME
+    raise ValueError("unsupported synthetic harness authorization profile")
 
 
 def _load_v4_initial_threshold_failure(
@@ -3867,11 +3929,13 @@ def _load_v4_initial_threshold_failure(
     teacher_config: dict[str, object],
     teacher_config_file_sha256: str,
 ) -> dict[str, object] | None:
-    """Load a raw-free v4 fail-fast marker without weakening historic plans."""
+    """Load a raw-free v4/v5 fail-fast marker without weakening history."""
 
-    if teacher_config.get("schema_version") != _V4_TEACHER_CONFIG_SCHEMA:
+    contract = _initial_threshold_contract(teacher_config)
+    if contract is None:
         return None
-    path = plan.plan_dir / _V4_INITIAL_THRESHOLD_FAILURE_FILENAME
+    marker_schema, marker_filename = contract
+    path = plan.plan_dir / marker_filename
     if not path.exists():
         return None
     if path.is_symlink() or not path.is_file():
@@ -3922,7 +3986,7 @@ def _load_v4_initial_threshold_failure(
     ):
         raise ValueError("teacher-pilot-v4 initial threshold marker counts are invalid")
     if (
-        payload["schema_version"] != _V4_INITIAL_THRESHOLD_FAILURE_SCHEMA
+        payload["schema_version"] != marker_schema
         or payload["plan_sha256"] != plan.plan_sha256
         or payload["teacher_config_sha256"] != _teacher_config_sha256(teacher_config)
         or payload["teacher_config_file_sha256"] != teacher_config_file_sha256
@@ -3942,15 +4006,17 @@ def _write_v4_initial_threshold_failure(
     teacher_config_file_sha256: str,
     result: TeacherBankFinalizeResult,
 ) -> dict[str, object] | None:
-    """Atomically mark an unrecoverable v4 first-wave threshold failure.
+    """Atomically mark an unrecoverable versioned initial threshold failure.
 
     A marker is written only after every initial chunk has one finalized attempt.
     It contains counts and hashes only, and blocks every later teacher execution
     for this plan while preserving status inspection and forensic evidence.
     """
 
-    if teacher_config.get("schema_version") != _V4_TEACHER_CONFIG_SCHEMA:
+    contract = _initial_threshold_contract(teacher_config)
+    if contract is None:
         return None
+    marker_schema, marker_filename = contract
     existing = _load_v4_initial_threshold_failure(
         plan,
         teacher_config=teacher_config,
@@ -3971,11 +4037,12 @@ def _write_v4_initial_threshold_failure(
     if (
         status.total_problem_count != result.total_problem_count
         or status.accepted_problem_count != result.accepted_problem_count
-        or status.total_attempts != len(plan.chunks)
+        or status.total_attempts < len(plan.chunks)
+        or status.unassessed_problem_count != 0
     ):
         return None
     payload_without_hash: dict[str, object] = {
-        "schema_version": _V4_INITIAL_THRESHOLD_FAILURE_SCHEMA,
+        "schema_version": marker_schema,
         "plan_sha256": plan.plan_sha256,
         "teacher_config_sha256": _teacher_config_sha256(teacher_config),
         "teacher_config_file_sha256": teacher_config_file_sha256,
@@ -3994,7 +4061,7 @@ def _write_v4_initial_threshold_failure(
             canonical_json_bytes(payload_without_hash)
         ).hexdigest(),
     }
-    target = plan.plan_dir / _V4_INITIAL_THRESHOLD_FAILURE_FILENAME
+    target = plan.plan_dir / marker_filename
     if target.is_symlink() or target.exists():
         raise ValueError("teacher-pilot-v4 initial threshold marker already exists")
     descriptor, raw_temporary = tempfile.mkstemp(
@@ -4035,8 +4102,25 @@ def _require_v4_initial_threshold_not_failed(
         teacher_config_file_sha256=teacher_config_file_sha256,
     ) is not None:
         raise ValueError(
-            "teacher-pilot-v4 initial threshold failed; refusing further teacher execution"
+            "teacher pilot initial threshold failed; refusing further teacher execution"
         )
+
+
+def _initial_threshold_contract(
+    teacher_config: dict[str, object],
+) -> tuple[str, str] | None:
+    schema = teacher_config.get("schema_version")
+    if schema == _V4_TEACHER_CONFIG_SCHEMA:
+        return (
+            _V4_INITIAL_THRESHOLD_FAILURE_SCHEMA,
+            _V4_INITIAL_THRESHOLD_FAILURE_FILENAME,
+        )
+    if schema == _V5_TEACHER_CONFIG_SCHEMA:
+        return (
+            _V5_INITIAL_THRESHOLD_FAILURE_SCHEMA,
+            _V5_INITIAL_THRESHOLD_FAILURE_FILENAME,
+        )
+    return None
 
 
 def _require_v4_teacher_run_wave(
@@ -4053,6 +4137,13 @@ def _require_v4_teacher_run_wave(
     change historic profiles or their existing command behavior.
     """
 
+    if teacher_config.get("schema_version") == _V5_TEACHER_CONFIG_SCHEMA:
+        _require_v5_teacher_run_wave(
+            plan,
+            teacher_config=teacher_config,
+            max_invocations=max_invocations,
+        )
+        return
     if teacher_config.get("schema_version") != _V4_TEACHER_CONFIG_SCHEMA:
         return
     if len(plan.problem_ids) != _teacher_config_int(teacher_config, "pilot_size"):
@@ -4078,6 +4169,134 @@ def _require_v4_teacher_run_wave(
     if max_invocations not in (1, 2):
         raise ValueError(
             "teacher-pilot-v4 repair waves require --max-invocations 1 or 2"
+        )
+
+
+def _require_v5_teacher_run_wave(
+    plan: TeacherPlan,
+    *,
+    teacher_config: dict[str, object],
+    max_invocations: int | None,
+) -> None:
+    """Lock v5 to 8 initial chunks, one canonical protocol retry, then repairs."""
+
+    if len(plan.problem_ids) != _teacher_config_int(teacher_config, "pilot_size"):
+        return
+    status = teacher_status(
+        plan.plan_dir,
+        max_attempts=_teacher_config_int(teacher_config, "max_attempts"),
+    )
+    if status.total_attempts == 0:
+        if max_invocations != len(plan.chunks) or len(plan.chunks) != 8:
+            raise ValueError(
+                "teacher-pilot-v5 initial wave requires exactly --max-invocations 8"
+            )
+        return
+    attempts = load_teacher_attempts(plan.plan_dir)
+    protocol_retryable_keys = _v5_protocol_retryable_attempt_keys(plan)
+    attempts_by_chunk: dict[int, list[TeacherAttempt]] = {
+        chunk.chunk_index: [] for chunk in plan.chunks
+    }
+    for attempt in attempts:
+        attempts_by_chunk[attempt.chunk_index].append(attempt)
+    if any(not values for values in attempts_by_chunk.values()):
+        raise ValueError(
+            "teacher-pilot-v5 initial wave must complete all eight chunks before a resume"
+        )
+    protocol_retryable = 0
+    for values in attempts_by_chunk.values():
+        latest = max(values, key=lambda item: item.attempt_number)
+        if latest.status != "failed":
+            continue
+        if (
+            len(values) == 1
+            and latest.key in protocol_retryable_keys
+            and latest.input_ids == plan.chunks[latest.chunk_index].problem_ids
+        ):
+            protocol_retryable += 1
+            continue
+        raise ValueError(
+            "teacher-pilot-v5 protocol retry is unavailable or exhausted; "
+            "refusing further teacher execution"
+        )
+    if protocol_retryable:
+        if max_invocations != protocol_retryable:
+            raise ValueError(
+                "teacher-pilot-v5 protocol retry wave must cover every canonical "
+                "structure-failed chunk exactly once"
+            )
+        return
+    if status.unassessed_problem_count:
+        raise ValueError(
+            "teacher-pilot-v5 requires local finalization before any semantic repair wave"
+        )
+    if max_invocations not in (1, 2):
+        raise ValueError(
+            "teacher-pilot-v5 semantic repair waves require --max-invocations 1 or 2"
+        )
+
+
+def _v5_protocol_retryable_attempt_keys(
+    plan: TeacherPlan,
+) -> frozenset[tuple[int, int]]:
+    """Classify raw protocol/structure failures without organizer answers."""
+
+    attempts = load_teacher_attempts(plan.plan_dir)
+    attempts_by_chunk: dict[int, list[TeacherAttempt]] = {
+        chunk.chunk_index: [] for chunk in plan.chunks
+    }
+    for attempt in attempts:
+        attempts_by_chunk[attempt.chunk_index].append(attempt)
+    retryable: set[tuple[int, int]] = set()
+    retryable_stages = frozenset(
+        {"event_json", "terminal_usage", "agent_json", "output_schema", "output_structure"}
+    )
+    for values in attempts_by_chunk.values():
+        if len(values) != 1:
+            continue
+        attempt = values[0]
+        if attempt.status != "failed" or attempt.failure_reason != "invalid_event_stream":
+            continue
+        try:
+            stdout = attempt.event_stream_path.read_text(encoding="utf-8", errors="strict")
+        except (OSError, UnicodeError):
+            continue
+        classification = classify_codex_result(
+            CodexCommandResult(
+                stdout=stdout,
+                stderr="",
+                returncode=attempt.returncode if attempt.returncode is not None else 127,
+                latency_ms=attempt.latency_ms,
+            ),
+            attempt.input_ids,
+            prompt_policy=plan.prompt_policy,
+            failure_reason=attempt.failure_reason,
+        )
+        if classification.stage in retryable_stages:
+            retryable.add(attempt.key)
+    return frozenset(retryable)
+
+
+def _require_v5_protocol_retry_resolved_before_finalize(
+    plan: TeacherPlan,
+    teacher_config: dict[str, object],
+) -> None:
+    """Prevent a recoverable protocol fault from becoming a terminal score."""
+
+    if (
+        teacher_config.get("schema_version") != _V5_TEACHER_CONFIG_SCHEMA
+        or len(plan.problem_ids) != _teacher_config_int(teacher_config, "pilot_size")
+    ):
+        return
+    attempts = load_teacher_attempts(plan.plan_dir)
+    attempted_chunks = {attempt.chunk_index for attempt in attempts}
+    if attempted_chunks != {chunk.chunk_index for chunk in plan.chunks}:
+        raise ValueError(
+            "teacher-pilot-v5 cannot finalize before all eight initial chunks complete"
+        )
+    if _v5_protocol_retryable_attempt_keys(plan):
+        raise ValueError(
+            "teacher-pilot-v5 cannot finalize before every required protocol retry resolves"
         )
 
 

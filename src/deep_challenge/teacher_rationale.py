@@ -1290,6 +1290,7 @@ def run_teacher_plan(
     max_workers: int = 1,
     working_directory: str | Path | None = None,
     allow_stale_lock_recovery: bool = False,
+    protocol_retry_attempt_keys: frozenset[tuple[int, int]] | None = None,
 ) -> TeacherRunResult:
     """Run eligible chunks through an injected runner and append evidence only.
 
@@ -1321,6 +1322,13 @@ def run_teacher_plan(
         raise TeacherRationaleValidationError("max_chunks must be a positive integer when supplied")
     if not callable(command_runner):
         raise TeacherRationaleValidationError("command_runner must be callable")
+    if protocol_retry_attempt_keys is not None and any(
+        not isinstance(key, tuple)
+        or len(key) != 2
+        or any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in key)
+        for key in protocol_retry_attempt_keys
+    ):
+        raise TeacherRationaleValidationError("protocol retry attempt keys are invalid")
 
     plan = load_teacher_plan(plan_dir)
     attempted = parsed = failed = skipped_unassessed = skipped_exhausted = 0
@@ -1349,14 +1357,34 @@ def run_teacher_plan(
                 continue
             historical_attempts = attempts_by_chunk[chunk.chunk_index]
             is_initial_attempt = not historical_attempts
-            groups = (
-                (pending_ids,)
-                if is_initial_attempt
-                else tuple(
+            is_protocol_retry = False
+            if is_initial_attempt:
+                groups = (pending_ids,)
+            elif protocol_retry_attempt_keys is not None:
+                latest_attempt = max(historical_attempts, key=lambda item: item.attempt_number)
+                if latest_attempt.status == "failed":
+                    if (
+                        len(historical_attempts) == 1
+                        and latest_attempt.key in protocol_retry_attempt_keys
+                        and latest_attempt.input_ids == chunk.problem_ids
+                    ):
+                        groups = (latest_attempt.input_ids,)
+                        is_protocol_retry = True
+                    else:
+                        raise TeacherRationaleValidationError(
+                            "teacher protocol retry is unavailable or exhausted; "
+                            "refusing semantic repair"
+                        )
+                else:
+                    groups = tuple(
+                        tuple(pending_ids[offset : offset + repair_chunk_size])
+                        for offset in range(0, len(pending_ids), repair_chunk_size)
+                    )
+            else:
+                groups = tuple(
                     tuple(pending_ids[offset : offset + repair_chunk_size])
                     for offset in range(0, len(pending_ids), repair_chunk_size)
                 )
-            )
             next_number = max((item.attempt_number for item in historical_attempts), default=0) + 1
             for input_ids in groups:
                 if max_chunks is not None and len(jobs) >= max_chunks:
@@ -1368,7 +1396,7 @@ def run_teacher_plan(
                         input_ids=input_ids,
                         reasoning_effort=(
                             plan.execution.reasoning_effort
-                            if is_initial_attempt
+                            if is_initial_attempt or is_protocol_retry
                             else _TEACHER_REPAIR_REASONING_EFFORT
                         ),
                     )
