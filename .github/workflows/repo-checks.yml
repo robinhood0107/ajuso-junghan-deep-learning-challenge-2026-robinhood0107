@@ -15,7 +15,7 @@ jobs:
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v5
       - name: Install locked development tools
-        run: uv sync --all-groups
+        run: uv sync --all-groups --extra model --locked
       - name: Ruff
         run: uv run ruff check .
       - name: CPU pytest
