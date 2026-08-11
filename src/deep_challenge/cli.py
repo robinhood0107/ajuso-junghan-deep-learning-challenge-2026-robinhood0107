@@ -114,6 +114,7 @@ from .submission import SubmissionSchema, validate_submission_csv, write_submiss
 from .teacher_harness import (
     HARNESS_AUTHORIZATION_FILENAME,
     HARNESS_CONFIG_SCHEMA,
+    HARNESS_CONFIG_V2_SCHEMA,
     HarnessProfile,
     create_harness_authorization,
     diagnose_teacher_ledger,
@@ -301,6 +302,35 @@ _LOCKED_CODEX_TEACHER_HARNESS_CONFIG: dict[str, object] = {
     "network_scope": "synthetic_canary_only",
     "fixture_version": "gate-b-codex-teacher-harness-fixture-v1",
     "fixture_sha256": "bc314a24ec872edf26bae13e296fb8fd500f80bcf6c00023518844d1b407e3b7",
+}
+
+_LOCKED_CODEX_TEACHER_HARNESS_V2_CONFIG: dict[str, object] = {
+    "schema_version": "gate-b-codex-teacher-harness-config-v2",
+    "label": "codex-gpt-5.6-sol-teacher-harness-v2",
+    "version": "harness-v2",
+    "provider": "chatgpt_codex_cli",
+    "model_id": "gpt-5.6-sol",
+    "model_revision": "gpt-5.6-sol",
+    "seed": 20_260_731,
+    "initial_chunk_size": 16,
+    "chunk_count": 8,
+    "max_workers": 1,
+    "max_invocations": 8,
+    "max_attempts": 1,
+    "retry_count": 0,
+    "repair_count": 0,
+    "bank_output_count": 0,
+    "initial_reasoning_effort": "high",
+    "reference_answer_in_prompt": False,
+    "allow_tool_use": False,
+    "network_scope": "synthetic_canary_only",
+    "fixture_version": "gate-b-codex-teacher-harness-fixture-v2",
+    "fixture_sha256": "dea9b4cc3c3262de831abba2c7ce36bf6ac2612ee215cbccd34c5d4b3d1a3388",
+}
+
+_LOCKED_CODEX_TEACHER_HARNESS_CONFIGS = {
+    HARNESS_CONFIG_SCHEMA: _LOCKED_CODEX_TEACHER_HARNESS_CONFIG,
+    HARNESS_CONFIG_V2_SCHEMA: _LOCKED_CODEX_TEACHER_HARNESS_V2_CONFIG,
 }
 
 # A live harness must exercise a policy-bound candidate profile.  Historic v1
@@ -741,7 +771,7 @@ def build_parser() -> argparse.ArgumentParser:
     harness_live = subparsers.add_parser(
         "gate-b-teacher-harness-live",
         help=(
-            "run exactly two answer-free synthetic Codex canary chunks after a "
+            "run the exact versioned answer-free synthetic Codex canary chunks after a "
             "frozen source-manifest check"
         ),
     )
@@ -755,7 +785,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--acknowledge-synthetic-codex-canary",
         action="store_true",
         help=(
-            "required acknowledgement before the two fixed synthetic questions "
+            "required acknowledgement before the fixed synthetic questions "
             "are sent to the ChatGPT-login Codex CLI"
         ),
     )
@@ -2525,7 +2555,7 @@ def _command_gate_b_teacher_harness_replay(args: argparse.Namespace) -> int:
 
 
 def _command_gate_b_teacher_harness_live(args: argparse.Namespace) -> int:
-    """Run the fixed two-call canary only after all pre-call contracts match."""
+    """Run the fixed versioned canary only after all pre-call contracts match."""
 
     if args.acknowledge_synthetic_codex_canary is not True:
         raise ValueError("--acknowledge-synthetic-codex-canary is required before the live canary")
@@ -2587,11 +2617,11 @@ def _command_gate_b_teacher_harness_live(args: argparse.Namespace) -> int:
                 "qualified": result.qualified,
                 "report_sha256": result.report_sha256,
                 "plan_sha256": result.plan_sha256,
-                "invocations": 2,
-                "max_workers": 1,
-                "retry_count": 0,
-                "repair_count": 0,
-                "bank_output_count": 0,
+                "invocations": profile.chunk_count,
+                "max_workers": profile.max_workers,
+                "retry_count": profile.retry_count,
+                "repair_count": profile.repair_count,
+                "bank_output_count": profile.bank_output_count,
                 "raw_generation_serialized": False,
             },
             sort_keys=True,
@@ -3683,18 +3713,15 @@ def _load_locked_codex_teacher_config(path: Path) -> tuple[dict[str, object], st
 def _load_locked_codex_teacher_harness_config(
     path: Path,
 ) -> tuple[dict[str, object], str, HarnessProfile]:
-    """Load the separate two-call synthetic canary profile without drift."""
+    """Load an immutable versioned synthetic canary profile without drift."""
 
     payload = _load_json_object(path)
     stored_sha256 = payload.pop("config_sha256", None)
     if not isinstance(stored_sha256, str):
         raise ValueError("Codex teacher harness config is missing config_sha256")
     semantic_sha256 = _teacher_config_sha256(payload)
-    if (
-        payload.get("schema_version") != HARNESS_CONFIG_SCHEMA
-        or payload != _LOCKED_CODEX_TEACHER_HARNESS_CONFIG
-        or stored_sha256 != semantic_sha256
-    ):
+    expected = _LOCKED_CODEX_TEACHER_HARNESS_CONFIGS.get(payload.get("schema_version"))
+    if payload != expected or stored_sha256 != semantic_sha256:
         raise ValueError("Codex teacher harness config differs from the locked profile")
     return payload, sha256_file(path), profile_from_config(payload)
 

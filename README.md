@@ -26,6 +26,8 @@
 > [v4 실패 기록](docs/15_GATE_B_TEACHER_V4_FAILURE_RECORD.md)에 있다. v4 이후의 현재
 > base OOF 안전망 → harness v2 → teacher v5 → freeze/holdout/submission 순서는
 > [hybrid completion runbook](docs/16_GATE_B_HYBRID_COMPLETION_RUNBOOK.md)이 권위 문서다.
+> Harness v2의 고정 128행·8×16 계약과 실행 경계는
+> [synthetic teacher harness v2](docs/17_SYNTHETIC_TEACHER_HARNESS_V2.md)에 있다.
 
 ## 한 줄 결론
 
