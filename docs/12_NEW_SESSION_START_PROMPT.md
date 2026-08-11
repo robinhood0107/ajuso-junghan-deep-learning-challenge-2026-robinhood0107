@@ -1,6 +1,6 @@
 # 12. 새 세션 시작용 상세 handoff prompt
 
-기준 snapshot: **2026-08-11 KST**
+기준 snapshot: **2026-08-11 KST; v4 branch work in progress**
 목적: 현재 Codex 작업을 새 세션에서 그대로 이어가되, 과거 evidence를 잘못 승격하거나
 GPU·holdout·leaderboard gate를 건너뛰지 않도록 시작 문맥과 실행 계약을 한 번에 전달한다.
 
@@ -31,9 +31,11 @@ rationale bank를 만든 뒤, 고정 Qwen base에 QLoRA SFT하는 경로다.
 - historic v1, fresh v2, v3의 128문제 teacher pilot은 모두 fail-closed됐다.
 - 세 실패 pilot을 재개하거나 고쳐 쓰지 않는다. v3는 initial 52/128로 103/128 gate에
   미달해 repair 없이 종료됐다.
-- harness v1의 CPU implementation은 있으나, committed clean source의 qualified offline replay와
-  explicit 2×32 synthetic live canary 및 immutable authorization 전에는 v4 config를
-  allowlist에 추가하거나 organizer-data teacher를 다시 호출하지 않는다.
+- harness v1은 merged code다. v4 config는 policy-bound synthetic candidate로만 존재할 수
+  있으며, committed clean source의 **v4-qualified** offline replay, explicit 2×32 synthetic
+  live canary 및 immutable authorization 전에는 v4 organizer-data plan/run을 만들거나
+  organizer-data teacher를 호출하지 않는다. 실행 계약은 `docs/14_GATE_B_TEACHER_V4_RUNBOOK.md`가
+  권위 원본이다.
 - 향후 승인된 pilot, source bank, logical audit, corpus/SFT preflight가 모두 green이 되기 전에는
   GPU rationale 학습을 시작하지 않는다.
 - leaderboard/test/locked holdout은 teacher, 학습, prompt 개선, self-training seed에 절대
@@ -77,7 +79,10 @@ gh pr view 1 --json url,state,isDraft,baseRefName,headRefName,mergeable,reviewDe
 
 - PR #1은 2026-08-11에 squash merge됐고 merged `main` SHA는
   `f9a5e9f18f65701f8b1e5b0e02817c45bbc538ca`였다.
-- v3 작업 branch는 `agent/gate-b-teacher-v3`이며 위 main에서 시작했다.
+- v3 evidence PR #2는 merged commit
+  `e96e850f23d32bd35f907a9c2b06495b4910efa0`이고 harness PR #3는 merged commit
+  `d92dfb5cd5e00f74e368eb6a526dc120afc48303`이다. 현재 v4 work는 새 `main`에서
+  시작하며, live execution 전 Git/PR state를 반드시 다시 확인한다.
 - v1/v2 policy-bound 호환 refactor commit은 `8e09131`이다.
 - merged PR #1:
   `https://github.com/robinhood0107/ajuso-junghan-deep-learning-challenge-2026-robinhood0107/pull/1`
@@ -128,13 +133,15 @@ rg --files \
 14. `.gitignore`
 15. `LICENSE`
 16. `pyproject.toml`
-17. `configs/gate_b/codex-gpt-5.6-sol-teacher-pilot-v3.json`
+17. `configs/gate_b/codex-gpt-5.6-sol-teacher-pilot-v4.json`
 18. `configs/gate_b/codex-gpt-5.6-sol-teacher-harness-v1.json`
 19. `docs/13_SYNTHETIC_TEACHER_HARNESS_V1.md`
-20. `configs/gate_b/codex-gpt-5.6-sol-teacher-pilot-v2.json` (failed forensic evidence only)
-21. `configs/gate_b/codex-gpt-5.6-sol-teacher-v1.json` (historic forensic evidence only)
-22. `configs/gate_b/rtx4070-super-12gb-direct-answer-v1.json`
-23. `configs/gate_b/rtx4070-super-12gb-concise-rationale-v1.json`
+20. `docs/14_GATE_B_TEACHER_V4_RUNBOOK.md`
+21. `configs/gate_b/codex-gpt-5.6-sol-teacher-pilot-v3.json` (failed forensic evidence only)
+22. `configs/gate_b/codex-gpt-5.6-sol-teacher-pilot-v2.json` (failed forensic evidence only)
+23. `configs/gate_b/codex-gpt-5.6-sol-teacher-v1.json` (historic forensic evidence only)
+24. `configs/gate_b/rtx4070-super-12gb-direct-answer-v1.json`
+25. `configs/gate_b/rtx4070-super-12gb-concise-rationale-v1.json`
 
 그 다음 현재 작업과 직접 관련된 source/test를 읽는다.
 
@@ -357,17 +364,17 @@ teacher-pilot-v3 snapshot:
 v1/v2/v3 artifact는 모두 실패 evidence로만 보존한다. status/finalize를 읽는 것은 허용하지만
 어느 ledger에도 teacher run을 추가하지 않는다.
 
-6. 다음 실제 개발 목표: synthetic live-eval harness v1 검증·authorization
-===================================================================
+6. 다음 실제 개발 목표: v4 synthetic qualification과 bounded pilot
+=========================================================
 
 GPU 없이 다음을 수행한다.
 
 1. `docs/13_SYNTHETIC_TEACHER_HARNESS_V1.md`의 v1/v2/v3 prompt bytes와
-   plan/receipt/sidecar 역사 schema를 보존하는 harness implementation을 먼저 CPU 검증한다.
+   plan/receipt/sidecar 역사 schema를 보존하는 regression을 CPU 검증한다.
 2. raw ledger를 재해석하지 않고 공개-safe aggregate 실패 사실과 fixed synthetic cases만 사용한다.
-3. committed clean source에서 fresh manifest를 만든 뒤 offline replay와 explicit 2×32
-   canary를 실행한다. qualified reports와 authorization 전에는 v4 filename/schema/config를
-   source allowlist에 추가하지 않는다.
+3. `docs/14_GATE_B_TEACHER_V4_RUNBOOK.md`에 따라 committed clean source에서 fresh manifest를
+   만든 뒤 **v4** offline replay와 explicit 2×32 canary를 실행한다. qualified reports와
+   immutable authorization 전에는 v4 organizer-data plan/run을 만들지 않는다.
 4. 아래 safety fields와 실행 정책은 완화하지 않는다.
    - provider: ChatGPT-login Codex CLI
    - model: `gpt-5.6-sol`
@@ -392,17 +399,17 @@ GPU 없이 다음을 수행한다.
 8. event error, command/MCP/web/tool call, unexpected item, schema violation, missing/duplicate/extra
    ID, truncation, non-integer final, marker conflict는 chunk failure다.
 
-v3의 고정 hash는 다음과 같다.
+v3 hash는 forensic evidence 전용이다. active v4 binding은 다음과 같다.
 
-- config semantic SHA: `deafe380e20079ef5e5fb2917c9f91d7a235d1135a23c64dcbd4ea7dddd38613`
-- config file SHA: `54a2e31e716edfdd3d5a5d22a2d5124da14f552b4ceeab31fdf7c5ea11ddba01`
-- prompt template SHA: `cf56fc2c021410337f8be8f5f519912eabf6390aa8892ecd92cac1ced6175c72`
-- prompt policy SHA: `953d62e283d5237f29b2145b5ed513246d737acd7ec40879450d7bcc8d08402b`
+- config semantic SHA: `7a7f3e117a3f454c21dd9721ae432b9da6c0813e3b806a19af7f1d9a34d8adef`
+- config file SHA: `063881f7d72a96e25202736a8fe729a0d64271376019b281094a5350c92a0d97`
+- prompt template SHA: `3029e9297bdda504e0f48e1ce4d57e363e5d3a5342edf18253b11c4f75ecd8a7`
+- prompt policy SHA: `8de961862f2cabf245753ee276d4b833d8917934d4ba84fa8f9caa20a64ab924`
 
-이 hash는 v3 forensic evidence 전용이다. harness 설계는 transport/schema/model-quality
-failure를 synthetic하게 분리하고 versioned evaluation contract를 제시해야 한다. 사용자의 별도
-승인과 전체 CPU verification을 모두 통과하기 전 새 config나 actual teacher 호출로 넘어가지
-않는다.
+v4 prompt는 v3와 cardinality/ID/order 사전 확인 한 문장만 다르다. synthetic harness는
+transport/schema/model-quality failure를 분리하고 versioned evaluation contract를 제시한다.
+전체 CPU verification과 v4-qualified replay/live authorization을 모두 통과하기 전 organizer-data
+teacher 호출로 넘어가지 않는다.
 
 7. 매 구현 묶음의 mandatory CPU 검증
 ====================================
@@ -473,9 +480,9 @@ pilot scope:
 한 조건이라도 실패하면 full v1 bank와 GPU candidate를 시작하지 않는다. exhaustion이 하나라도
 생기면 남은 retryable row에도 teacher를 더 호출하지 않는다. partial source를 쓰지 않고
 raw-free failure artifact와 blocker만 남긴다. prompt를 수정하면 같은 output path를 덮어쓰지
-말고 새 version/tag에서 처음부터 다시 pilot한다. 다만 v4는 synthetic harness 설계·승인 전
-allowlist에 추가하지 않는다. 이 동일 128행 비교는 development prompt gate이며 일반화 성능
-증거로 주장하지 않는다.
+말고 새 version/tag에서 처음부터 다시 pilot한다. v4 organizer-data plan/run은 own synthetic
+harness qualification과 immutable authorization 전에는 시작하지 않는다. 이 동일 128행 비교는
+development prompt gate이며 일반화 성능 증거로 주장하지 않는다.
 
 9. logical audit와 pilot authorization
 =====================================
@@ -812,10 +819,11 @@ historical diagnostic, parser-only rescore를 current selection score로 표현�
 2. mandatory docs/config/source/tests 완독
 3. mandatory CPU validation 재실행
 4. v3 raw-free final/status/checksum과 source JSONL/manifest 부재 재검증
-5. `docs/13_SYNTHETIC_TEACHER_HARNESS_V1.md`의 freeze/replay/live requirements 재확인
+5. `docs/13_SYNTHETIC_TEACHER_HARNESS_V1.md`와 `docs/14_GATE_B_TEACHER_V4_RUNBOOK.md`의
+   freeze/replay/live requirements 재확인
 6. v1/v2/v3 prompt/config/receipt/sidecar compatibility regression 유지
-7. qualified harness authorization 전에는 v4 config/allowlist를 만들지 않기
-8. explicit synthetic canary acknowledgement 또는 별도 사용자 승인 전 organizer-data teacher 호출하지 않기
+7. qualified v4 harness authorization 전에는 v4 organizer-data plan/run을 만들지 않기
+8. explicit synthetic canary acknowledgement 전에는 v4 organizer-data teacher 호출하지 않기
 9. full bank, logical audit, corpus, GPU가 잠긴 상태인지 확인
 10. Kaggle upload는 계속 별도 명시 요청 전 금지
 
@@ -825,8 +833,8 @@ organizer-data teacher, full bank, GPU 작업을 시작하지 않는다.
 
 ## 이 handoff의 핵심
 
-새 세션이 가장 먼저 해결할 문제는 GPU 학습이나 v4 prompt가 아니다. v3가 initial
-**52/128**로 실패한 뒤 같은 live loop를 반복하지 않도록 **versioned synthetic live-eval
-harness v1**을 committed source에서 replay/live qualification과 authorization까지 닫는 것이다.
-승인된 새 candidate가 나중에 128/128과 60/64 audit을 통과한 뒤에만 full fold-0 bank,
-rationale corpus, GPU harm screen 순서로 진행한다.
+새 세션이 가장 먼저 해결할 문제는 GPU 학습이 아니다. v3가 initial **52/128**로 실패한 뒤
+같은 live loop를 반복하지 않도록, v4는 **versioned synthetic live-eval harness v1**의 own
+replay/live qualification과 immutable authorization을 먼저 닫는다. 그 뒤에만 bounded 128행
+pilot을 실행하며, 128/128과 60/64 audit을 통과한 뒤에도 full fold-0 bank는 별도 사용자
+승인 전까지 시작하지 않는다.

@@ -4,6 +4,12 @@
 대상 호스트: **WSL2 Ubuntu 24.04 + NVIDIA GeForce RTX 4070 SUPER 12GB**
 현재 판정: **parser v2 current-source base 완료, answer-only QLoRA 중단, teacher-pilot-v3 initial threshold fail-closed·후속 teacher/GPU 잠금**
 
+> **현재 실행 override:** 이 문서의 3.1절 v3 명령은 `20260811T153322KST` forensic
+> transcript이며 새 tag로 실행하거나 resume하지 않는다. v4 candidate의 synthetic freeze,
+> replay/live qualification, immutable sidecar, 128행 pilot은
+> [`14_GATE_B_TEACHER_V4_RUNBOOK.md`](14_GATE_B_TEACHER_V4_RUNBOOK.md)만 따른다. v4
+> organizer-data teacher는 그 런북의 v4-specific synthetic gate 전까지 잠겨 있다.
+
 이 문서는 현재 코드의 CLI와 정확히 일치하는 실행 순서다. GPU가 필요한 명령은 맨
 뒤의 별도 절에만 둔다. 2026-08-10 이전 source final smoke와 별도로, training cache-off와
 eval KV-cache-on을 분리한 당시 source는 run tag `20260810T062500KST`에서 새 tagged smoke를
@@ -67,8 +73,8 @@ split SHA와 bundle SHA만 넣는다.
 `RATIONALE_CONFIG`의 semantic/file SHA는 각각
 `75a315b638481a0c8213c413aa3a1253d269776d08bd2252b68654fb38c3f053`와
 `66a4c5c145881c92cb4b260ef000bd89bd62119b644f6bd1e49e9894c431064f`다.
-fresh `TEACHER_CONFIG` (`teacher-pilot-v3`)의 semantic/file/prompt-template/prompt-policy
-SHA는 각각
+이 절의 `TEACHER_CONFIG` (`teacher-pilot-v3`) hash는 forensic transcript 전용이며 semantic/file/
+prompt-template/prompt-policy SHA는 각각
 `deafe380e20079ef5e5fb2917c9f91d7a235d1135a23c64dcbd4ea7dddd38613`,
 `54a2e31e716edfdd3d5a5d22a2d5124da14f552b4ceeab31fdf7c5ea11ddba01`,
 `cf56fc2c021410337f8be8f5f519912eabf6390aa8892ecd92cac1ced6175c72`,
@@ -79,10 +85,11 @@ SHA는 각각
 evidence 전용으로 남긴다. failed `teacher-pilot-v2` config와 ledger도 forensic evidence
 전용이며 새 v3 plan/status/finalize 입력으로 쓰지 않는다.
 v3 config도 `20260811T153322KST` 한 번의 고정 pilot에서 실패 evidence가 됐다. 이 config로
-새 plan을 만들거나 기존 plan을 resume하지 않는다. versioned synthetic live-eval harness v1의
-committed CPU verification, qualified replay, qualified 2×32 live canary, immutable authorization
-sidecar가 모두 확인되기 전에는 v4 config를 allowlist에 추가하지 않는다. harness 명령과
-no-overwrite source-freeze 순서는 `docs/13_SYNTHETIC_TEACHER_HARNESS_V1.md`를 따른다.
+새 plan을 만들거나 기존 plan을 resume하지 않는다. v4 config는 separate policy-bound
+candidate이며, v4-specific qualified replay, qualified 2×32 live canary, immutable authorization
+sidecar 전에는 organizer-data plan/run을 만들 수 없다. harness와 no-overwrite source-freeze
+순서는 `docs/13_SYNTHETIC_TEACHER_HARNESS_V1.md` 및
+`docs/14_GATE_B_TEACHER_V4_RUNBOOK.md`를 따른다.
 
 현재 canonical 사실은 다음과 같다.
 

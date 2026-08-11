@@ -44,6 +44,7 @@ DIAGNOSTIC_SCHEMA = "gate-b-codex-teacher-diagnostic-v1"
 HARNESS_REPLAY_SCHEMA = "gate-b-codex-teacher-harness-replay-v1"
 HARNESS_LIVE_SCHEMA = "gate-b-codex-teacher-harness-live-v1"
 HARNESS_AUTHORIZATION_SCHEMA = "gate-b-codex-teacher-harness-authorization-v1"
+HARNESS_AUTHORIZATION_FILENAME = "harness-authorization-v1.json"
 
 HARNESS_CONFIG_SCHEMA = "gate-b-codex-teacher-harness-config-v1"
 HARNESS_FIXTURE_SCHEMA = "gate-b-codex-teacher-harness-fixture-v1"
@@ -888,6 +889,62 @@ def create_harness_authorization(
     )
     _write_json_noreplace(output_path, payload)
     return str(payload["payload_sha256"])
+
+
+def validate_harness_evidence(
+    *,
+    replay_report: str | Path,
+    live_report: str | Path,
+    live_plan_dir: str | Path,
+    harness_config_sha256: str,
+    harness_config_file_sha256: str,
+    teacher_config_sha256: str,
+    teacher_config_file_sha256: str,
+    prompt_policy: TeacherPromptPolicy,
+    source_manifest: SourceTreeArtifactEvidence,
+) -> str:
+    """Re-verify qualified harness evidence before reserving a teacher plan.
+
+    The later sidecar writer intentionally re-runs this validation after the
+    new plan directory exists.  Keeping the first check write-free prevents an
+    invalid replay/live pair from reserving an organizer-data plan path.
+    """
+
+    payload = _build_harness_authorization_payload(
+        replay_report=replay_report,
+        live_report=live_report,
+        live_plan_dir=live_plan_dir,
+        harness_config_sha256=harness_config_sha256,
+        harness_config_file_sha256=harness_config_file_sha256,
+        teacher_config_sha256=teacher_config_sha256,
+        teacher_config_file_sha256=teacher_config_file_sha256,
+        prompt_policy=prompt_policy,
+        source_manifest=source_manifest,
+    )
+    return str(payload["payload_sha256"])
+
+
+def require_harness_live_execution_matches(
+    live_report: str | Path,
+    *,
+    execution: TeacherExecutionConfig,
+) -> None:
+    """Require the organizer plan to use the binary/version proved by canary.
+
+    The report deliberately stores only hashes.  This comparison keeps the
+    private resolved executable and version in the local plan while preventing
+    a qualified canary from being copied to a different Codex installation.
+    """
+
+    payload, _ = _load_harness_report(live_report, HARNESS_LIVE_SCHEMA)
+    if (
+        payload.get("codex_binary_sha256") != _codex_binary_sha256(execution)
+        or payload.get("codex_cli_version_sha256")
+        != _text_sha256(execution.codex_cli_version)
+    ):
+        raise TeacherHarnessValidationError(
+            "teacher execution does not match the qualified live harness"
+        )
 
 
 def _build_harness_authorization_payload(

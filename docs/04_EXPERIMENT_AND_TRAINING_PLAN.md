@@ -59,13 +59,16 @@
   bank 최대 worker 2, raw-free status/lock PID를 고정한다.
   실제 v3 initial은 4호출 중 parsed 2/failed 2, local 승인 52/128로 103/128 gate에 미달했다.
   따라서 repair 없이 fail-closed했고 v1/v2/v3 ledger를 모두 재개하지 않는다. versioned
-  synthetic live-eval harness가 설계·승인되기 전에는 v4 config를 allowlist에 추가하지 않는다.
+  synthetic live-eval harness v1은 별도 PR에서 구현·CPU 검증됐다. v4 config는 v3와
+  cardinality/ID/order 사전 확인 한 문장만 다른 policy-bound candidate이며, v4-qualified
+  replay·2×32 canary·immutable authorization 전에는 organizer-data plan/run을 허용하지 않는다.
   CLI는 빈 workdir와 auth-only temporary `CODEX_HOME`을 사용해 전역 skill/config/API token을
   넘기지 않는다. Codex tool/error/schema/ID/order violation은 fail-closed이며, reference
   answer는 local finalizer에만 있고 prompt에는 절대 들어가지 않는다.
 - 비용 절약 순서는 stable-hash stratified 128문제 fold-0 training pilot → local exact-match
   finalization/retry → 64문제 answer-hidden rationale logic audit → full fold-0 bank v1이다.
-  첫 finalize의 initial 승인이 103/128 미만이면 repair 없이 즉시 종료한다. 그 이상일 때만
+  v4는 첫 finalize의 initial 승인이 103/128 미만이면 raw-free immutable marker를 쓰고 이후
+  teacher run을 전역 거부한다. 그 이상일 때만
   canonical rejected row를 wave당 최대 2호출로 repair하고 매 wave 뒤 다시 finalize한다. pilot이
   총 3회 내 128/128 complete가 아니거나 exhaustion이 하나라도 생기거나 audit가 60/64 미만이면 full bank와
   GPU candidate를 시작하지 않는다. fold-0 GPU harm screen이 통과하기 전 나머지 2,942

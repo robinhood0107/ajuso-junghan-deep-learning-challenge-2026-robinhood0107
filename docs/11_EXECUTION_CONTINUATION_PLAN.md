@@ -6,6 +6,11 @@
 이어가기 위한 실행 원장이다. 상태 값이 바뀌는 GPU 사용량이나 Kaggle 제출 한도는 이
 문서의 숫자를 재사용하지 않고 해당 명령 직전 다시 관측한다.
 
+> **현재 실행 override:** v1/v2/v3은 forensic ledger이고 새 run/resume 대상이 아니다.
+> harness v1은 merged code이며, next operational candidate인 v4는
+> [`14_GATE_B_TEACHER_V4_RUNBOOK.md`](14_GATE_B_TEACHER_V4_RUNBOOK.md)의 fresh v4
+> replay/live authorization을 통과하기 전 organizer-data plan/run을 시작하지 않는다.
+
 ## 1. 공개 저장소 경계
 
 공개 GitHub 저장소에는 다음만 넣는다.
@@ -70,7 +75,7 @@ PYTHONPATH=src python3 -m deep_challenge.public_repo_guard --all
 | B1.0 | fold 0 base direct-answer | B0.3 green | `20260810T234907KST` JSONL + **v2 provenance manifest**, 1,653/2,942 | invalid parser/artifact or any source/B0/config hash mismatch |
 | B1.1 | parser golden corpus | B1.0 real generations | added regression tests + full CPU suite | conflict is hidden or test fails |
 | B2.0 | fold 0 answer-only QLoRA | same-fold base manifest | 627/2,942; significant harm로 candidate 중단 | train IDs or provenance mismatch |
-| B2.1 | concise-rationale CPU gate | **harness v1 CPU-ready / organizer-data teacher BLOCKED:** v3 initial 52/128 | qualified replay/live authorization 뒤 새 후보만 별도 검토 | v1/v2/v3 resume, v4 allowlist 조기 추가, initial <103/128 |
+| B2.1 | concise-rationale CPU gate | **harness v1 merged / organizer-data teacher BLOCKED:** v3 initial 52/128 | v4-qualified replay/live authorization 뒤 v4 128행 pilot만 별도 검토 | v1/v2/v3 resume, v4 organizer plan 조기 시작, initial <103/128 |
 | B2.2 | fold 0 rationale QLoRA probe | B2.1와 새 source/B0 green | adapter v4 + generation + paired harm screen | corpus/adapter binding mismatch 또는 significant harm |
 | B1/B2.3 | folds 1–4 repeat | fold 0 harm screen authorizes exact candidate | five base + five candidate OOF runs | any fold incomplete or method fingerprint drift |
 | B2.4 | complete OOF comparison | all five folds | grouped paired bootstrap, exact McNemar, Holm | single fold/reused run/mixed method |
@@ -324,7 +329,8 @@ rationale adapter, GPU generation과 모델 점수는 아직 없다. 다음 GPU 
 16. **R9-C (blocked, CPU→GPU):** R9-B4가 green이 아니므로 logical audit, authorization,
     full 11,794행 bank, corpus/SFT preflight, source manifest/B0 pair, fold 0 rationale QLoRA,
     adapter generation, paired harm screen을 실행하지 않는다. synthetic harness v1 CPU path는
-    구현됐지만 qualified replay/live authorization 전에는 v4를 allowlist에 추가하지 않는다.
+    merged code다. v4 config는 synthetic candidate로만 존재하며, v4-qualified replay/live
+    authorization 전에는 v4 organizer-data plan/run을 시작하지 않는다.
 17. **R9-D (조건부 GPU):** R9-C가 `candidate_full_oof_authorized=true`일 때만 folds 1--4의
     fold별 corpus/adapter/base/generation을 완성하고 complete OOF grouped paired bootstrap,
     exact McNemar, Holm을 수행한다.
@@ -356,7 +362,7 @@ DATA_DIR="$PROJECT/deep-learning-challenge-2026"
 GPU_ENV=/absolute/path/to/deep-challenge-gpu-venv
 REVISION=aa8e72537993ba99e69dfaafa59ed015b17504d1
 RUN_TAG=replace-with-new-unique-tag
-SOURCE_MANIFEST="$PROJECT/artifacts/analysis/source-manifest-gate-b-teacher-pilot-v3-$RUN_TAG.json"
+SOURCE_MANIFEST="$PROJECT/artifacts/analysis/source-manifest-gate-b-teacher-pilot-v4-$RUN_TAG.json"
 
 cd "$PROJECT"
 uv sync --extra model --group dev
@@ -372,11 +378,11 @@ teacher JSONL, logical audit, bank/corpus/preflight/GPU는 시작하지 않았�
 ledger/tag를 재개하지 않으며 Kaggle token은 대회 metadata 확인용이지 teacher credential이
 아니다.
 
-다음 safe task는 `docs/13_SYNTHETIC_TEACHER_HARNESS_V1.md`의 harness v1을 committed clean
-source에서 CPU 검증하고, fresh manifest를 만든 뒤 offline replay와 explicit 2×32 synthetic
-live canary를 qualified로 닫는 것이다. replay/live authorization 전에는 v4 config를
-allowlist에 추가하거나 organizer-data teacher를 호출하지 않는다. 아래 source-manifest 명령은
-그 no-overwrite pattern을 따른다.
+다음 safe task는 `docs/14_GATE_B_TEACHER_V4_RUNBOOK.md`에 따라 v4 code를 committed clean
+source에서 CPU 검증하고, fresh manifest를 만든 뒤 v4 offline replay와 explicit 2×32 synthetic
+live canary를 qualified로 닫는 것이다. replay/live authorization 전에는 v4 organizer-data
+plan/run을 만들거나 teacher를 호출하지 않는다. 아래 source-manifest 명령은 그 no-overwrite
+pattern을 따른다.
 
 ```bash
 test ! -e "$SOURCE_MANIFEST"

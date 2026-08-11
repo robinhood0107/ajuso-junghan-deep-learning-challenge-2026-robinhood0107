@@ -250,7 +250,7 @@ def test_pilot_v2_prompt_is_template_bound_and_treats_questions_as_untrusted(
             prompt_template_sha256="0" * 64,
         )
     with pytest.raises(TeacherRationaleValidationError, match="approved immutable"):
-        TeacherPromptPolicy(prompt_version="gate-b-codex-teacher-prompt-v4")
+        TeacherPromptPolicy(prompt_version="gate-b-codex-teacher-prompt-v5")
 
 
 def test_pilot_v3_prompt_bytes_and_policy_hash_are_locked(tmp_path: Path) -> None:
@@ -302,6 +302,59 @@ def test_pilot_v3_prompt_bytes_and_policy_hash_are_locked(tmp_path: Path) -> Non
     with pytest.raises(TeacherRationaleValidationError, match="template SHA"):
         TeacherPromptPolicy(
             prompt_version="gate-b-codex-teacher-prompt-v3",
+            prompt_template_sha256="0" * 64,
+        )
+
+
+def test_pilot_v4_prompt_adds_only_the_cardinality_instruction(tmp_path: Path) -> None:
+    records = (_record(1, -900_001),)
+    v3_policy = TeacherPromptPolicy(
+        prompt_version="gate-b-codex-teacher-prompt-v3",
+        prompt_template_sha256=(
+            "cf56fc2c021410337f8be8f5f519912eabf6390aa8892ecd92cac1ced6175c72"
+        ),
+    )
+    v4_policy = TeacherPromptPolicy(
+        prompt_version="gate-b-codex-teacher-prompt-v4",
+        prompt_template_sha256=(
+            "3029e9297bdda504e0f48e1ce4d57e363e5d3a5342edf18253b11c4f75ecd8a7"
+        ),
+    )
+    v3_plan = create_teacher_plan(
+        records,
+        (records[0].id,),
+        tmp_path / "teacher-pilot-v3",
+        chunk_size=1,
+        label="codex-gpt-5.6-sol-teacher-pilot-v3",
+        version="pilot-v3",
+        prompt_policy=v3_policy,
+    )
+    v4_plan = create_teacher_plan(
+        records,
+        (records[0].id,),
+        tmp_path / "teacher-pilot-v4",
+        chunk_size=1,
+        label="codex-gpt-5.6-sol-teacher-pilot-v4",
+        version="pilot-v4",
+        prompt_policy=v4_policy,
+    )
+    v3_prompt = build_teacher_prompt(load_teacher_plan(v3_plan.plan_dir), 0)
+    v4_prompt = build_teacher_prompt(load_teacher_plan(v4_plan.plan_dir), 0)
+    inserted = (
+        "Before returning the JSON object, compare the completed items against INPUT_JSON: "
+        "output exactly one item for every supplied problem_id, with the same item count "
+        "and original order, and with no duplicate or omitted IDs. "
+    )
+
+    assert v4_prompt == v3_prompt.replace(
+        "Return only one JSON object matching this exact schema:\n",
+        inserted + "Return only one JSON object matching this exact schema:\n",
+        1,
+    )
+    assert v4_policy.sha256 == "8de961862f2cabf245753ee276d4b833d8917934d4ba84fa8f9caa20a64ab924"
+    with pytest.raises(TeacherRationaleValidationError, match="template SHA"):
+        TeacherPromptPolicy(
+            prompt_version="gate-b-codex-teacher-prompt-v4",
             prompt_template_sha256="0" * 64,
         )
 
