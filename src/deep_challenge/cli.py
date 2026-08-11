@@ -5,9 +5,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import shutil
+import subprocess
 import sys
+import tempfile
+import time
 from collections import Counter
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -62,7 +68,7 @@ from .gate_b_selection import (
 from .gate_b_sft_preflight import run_sft_encoding_preflight
 from .gpu_smoke import run_final_gpu_smoke
 from .independent_submission import verify_submission_independently
-from .model_preflight import run_model_preflight
+from .model_preflight import OFFICIAL_MODEL_ID, OFFICIAL_REVISION, run_model_preflight
 from .parser_golden import (
     audit_development_parser_golden,
     audit_development_parser_rescore,
@@ -87,6 +93,10 @@ from .rationale_corpus import (
     load_concise_rationale_config,
     load_verified_rationale_corpus,
 )
+from .rationale_materialization import (
+    FinalizedTeacherBank,
+    materialize_teacher_bank_source,
+)
 from .splits import (
     SplitManifest,
     build_group_clusters,
@@ -96,6 +106,31 @@ from .splits import (
     make_grouped_split_manifest,
 )
 from .submission import SubmissionSchema, validate_submission_csv, write_submission_csv
+from .teacher_pilot_authorization import (
+    PILOT_AUTHORIZATION_INITIAL_EXACT_MATCH_PERCENT,
+    PILOT_AUTHORIZATION_LOGICAL_AUDIT_MIN_CONSISTENT,
+    PILOT_AUTHORIZATION_LOGICAL_AUDIT_SAMPLE_SIZE,
+    TeacherPilotAuthorizationContract,
+    create_teacher_pilot_authorization,
+    verify_teacher_pilot_authorization,
+    write_teacher_full_v1_bank_authorization,
+)
+from .teacher_rationale import (
+    CodexCommandResult,
+    TeacherExecutionConfig,
+    TeacherLogicalAuditPlan,
+    TeacherPlan,
+    create_teacher_logical_audit_plan,
+    create_teacher_plan,
+    finalize_teacher_bank,
+    finalize_teacher_logical_audit,
+    load_teacher_logical_audit_plan,
+    load_teacher_plan,
+    run_teacher_logical_audit,
+    run_teacher_plan,
+    teacher_logical_audit_status,
+    teacher_status,
+)
 from .tokenizer_profile import (
     DEFAULT_SYSTEM_PROMPT,
     load_and_profile_datasets,
@@ -105,6 +140,67 @@ from .tokenizer_profile import (
 _HARD_CLUSTER_METHOD = (
     "transitive union of math-aware and narrowly source-format-insensitive exact "
     "fingerprints; number-masked templates remain soft audit candidates"
+)
+
+_LOCKED_CODEX_TEACHER_CONFIG: dict[str, object] = {
+    "schema_version": "gate-b-codex-teacher-config-v1",
+    "label": "codex-gpt-5.6-sol-teacher",
+    "version": "v1",
+    "provider": "chatgpt_codex_cli",
+    "model_id": "gpt-5.6-sol",
+    "model_revision": "gpt-5.6-sol",
+    "initial_reasoning_effort": "high",
+    "repair_reasoning_effort": "xhigh",
+    "seed": 20_260_731,
+    "initial_chunk_size": 64,
+    "repair_chunk_size": 16,
+    "max_attempts": 3,
+    "pilot_size": 128,
+    "max_concurrent_workers": 2,
+    "reference_answer_in_prompt": False,
+    "allow_tool_use": False,
+    "network_scope": "training_only",
+}
+
+# This is a separate immutable profile from the rationale-generation profile
+# above.  It deliberately has no editable file: the audit must always sample
+# exactly 64 accepted teacher rows and require at least 60 internally
+# consistent judgments before the pilot can advance.  The model/provider
+# contract remains bound to ``_LOCKED_CODEX_TEACHER_CONFIG``.
+_LOCKED_CODEX_LOGICAL_AUDIT_PROFILE: dict[str, object] = {
+    "schema_version": "gate-b-codex-teacher-logical-audit-cli-v1",
+    "label": "codex-gpt-5.6-sol-logical-audit",
+    "version": "v1",
+    "sample_size": 64,
+    "min_consistent": 60,
+    "reference_answer_read": False,
+    "allow_tool_use": False,
+    "network_scope": "training_only",
+}
+
+# v2 is a distinct, post-probe expansion scope.  It is intentionally not an
+# edit to the v1 teacher profile or plan: v1 covers fold-0 training IDs, while
+# v2 can cover only the remaining eligible development-CV IDs after a verified
+# candidate-probe decision has authorized completing OOF work.
+_CODEX_TEACHER_V2_PLAN_LABEL = "codex-gpt-5.6-sol-teacher-development-v2"
+_CODEX_TEACHER_V2_PLAN_VERSION = "v2"
+_CODEX_TEACHER_V2_SCOPE = "remaining_development_cv_after_fold0_training"
+_CODEX_TEACHER_V2_AUTHORIZATION_SCHEMA = (
+    "gate-b-codex-teacher-v2-authorization-v1"
+)
+_CODEX_TEACHER_V2_AUTHORIZATION_FILENAME = "v2-authorization.json"
+_CANDIDATE_PROBE_DECISION_SCHEMA = "gate-b-candidate-probe-decision-v1"
+
+_CODEX_TEACHER_SAFE_ENV_NAMES = frozenset(
+    {
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "LOGNAME",
+        "PATH",
+        "TMPDIR",
+        "USER",
+    }
 )
 
 
@@ -146,7 +242,10 @@ def _add_split_scope(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_required_gate_b_data_contract(
-    parser: argparse.ArgumentParser, *, require_development_shard: bool = True
+    parser: argparse.ArgumentParser,
+    *,
+    require_development_shard: bool = True,
+    require_development_shard_sha256: bool = True,
 ) -> None:
     parser.add_argument("--train", required=True, type=Path)
     parser.add_argument("--train-exclusions", required=True, type=Path)
@@ -156,9 +255,35 @@ def _add_required_gate_b_data_contract(
     parser.add_argument("--expected-exclusions-sha256", required=True)
     parser.add_argument("--expected-exclusion-count", required=True, type=int)
     parser.add_argument("--expected-split-sha256", required=True)
-    parser.add_argument("--expected-development-shard-sha256", required=True)
+    if require_development_shard_sha256:
+        parser.add_argument("--expected-development-shard-sha256", required=True)
     if require_development_shard:
         parser.add_argument("--development-shard", required=True, type=Path)
+
+
+def _add_teacher_v2_authorization_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add the non-optional probe-decision binding for v2 teacher work."""
+
+    parser.add_argument("--candidate-probe-decision", required=True, type=Path)
+    parser.add_argument("--candidate-label", required=True)
+
+
+def _add_teacher_pilot_authorization_arguments(
+    parser: argparse.ArgumentParser, *, require_receipt: bool
+) -> None:
+    """Add explicit private evidence paths for the v1 full-bank promotion gate.
+
+    These paths are intentionally supplied again when a full plan is created:
+    the immutable receipt alone cannot detect a source-bank or logical-audit
+    artifact that was tampered with after receipt publication.
+    """
+
+    if require_receipt:
+        parser.add_argument("--pilot-authorization", type=Path)
+    parser.add_argument("--pilot-plan-dir", type=Path)
+    parser.add_argument("--pilot-source-jsonl", type=Path)
+    parser.add_argument("--pilot-source-manifest", type=Path)
+    parser.add_argument("--pilot-logical-audit-dir", type=Path)
 
 
 def _add_gpu_runtime_gate(parser: argparse.ArgumentParser) -> None:
@@ -308,6 +433,30 @@ def build_parser() -> argparse.ArgumentParser:
     rationale_build.add_argument("--output-manifest", required=True, type=Path)
     rationale_build.set_defaults(handler=_command_build_rationale_corpus)
 
+    teacher_materialize = subparsers.add_parser(
+        "gate-b-materialize-teacher-bank",
+        help=(
+            "CPU-only exact fold-training selection from one or more finalized "
+            "private Codex teacher banks"
+        ),
+    )
+    _add_required_gate_b_data_contract(teacher_materialize)
+    teacher_materialize.add_argument(
+        "--teacher-bank",
+        action="append",
+        nargs=3,
+        type=Path,
+        metavar=("PLAN_DIR", "SOURCE_JSONL", "SOURCE_MANIFEST"),
+        required=True,
+        help=(
+            "repeat for each finalized private bank; each value is its plan "
+            "directory, source JSONL, and source manifest"
+        ),
+    )
+    teacher_materialize.add_argument("--output-jsonl", required=True, type=Path)
+    teacher_materialize.add_argument("--output-manifest", required=True, type=Path)
+    teacher_materialize.set_defaults(handler=_command_gate_b_materialize_teacher_bank)
+
     rationale_audit = subparsers.add_parser(
         "audit-rationale-corpus",
         help="CPU-only raw-free audit of a canonical concise-rationale corpus",
@@ -319,6 +468,304 @@ def build_parser() -> argparse.ArgumentParser:
     rationale_audit.add_argument("--output", required=True, type=Path)
     rationale_audit.set_defaults(handler=_command_audit_rationale_corpus)
 
+    teacher_plan = subparsers.add_parser(
+        "gate-b-teacher-plan",
+        help=(
+            "create a question-only Codex teacher plan from fold-0 training IDs "
+            "without opening the locked holdout"
+        ),
+    )
+    _add_required_gate_b_data_contract(teacher_plan)
+    teacher_plan.add_argument("--teacher-config", required=True, type=Path)
+    teacher_plan.add_argument("--output-dir", required=True, type=Path)
+    teacher_plan.add_argument(
+        "--pilot-size",
+        type=int,
+        help=(
+            "use the locked deterministic 128-problem stratified pilot; omit for "
+            "the complete fold-0 training bank, which requires a passed pilot receipt"
+        ),
+    )
+    _add_teacher_pilot_authorization_arguments(teacher_plan, require_receipt=True)
+    teacher_plan.set_defaults(handler=_command_gate_b_teacher_plan)
+
+    teacher_run = subparsers.add_parser(
+        "gate-b-teacher-run",
+        help=(
+            "execute pending question-only Codex teacher chunks with a ChatGPT "
+            "login; raw events remain private"
+        ),
+    )
+    teacher_run.add_argument("--plan-dir", required=True, type=Path)
+    teacher_run.add_argument("--teacher-config", required=True, type=Path)
+    teacher_run.add_argument(
+        "--acknowledge-codex-teacher",
+        action="store_true",
+        help="required acknowledgement before organizer training questions are sent to Codex",
+    )
+    teacher_run.add_argument(
+        "--max-invocations",
+        type=int,
+        help="optional positive cap on this invocation's Codex calls for a bounded pilot",
+    )
+    teacher_run.add_argument(
+        "--max-workers",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help="bounded concurrent Codex calls; start pilots with one worker",
+    )
+    teacher_run.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=1_800,
+        help="per-Codex-call timeout; a timeout is recorded as a failed private attempt",
+    )
+    teacher_run.add_argument(
+        "--recover-stale-lock",
+        action="store_true",
+        help="explicitly recover a verified stale teacher-plan lock before resuming",
+    )
+    teacher_run.set_defaults(handler=_command_gate_b_teacher_run)
+
+    teacher_status_parser = subparsers.add_parser(
+        "gate-b-teacher-status",
+        help="show a raw-free Codex teacher ledger status",
+    )
+    teacher_status_parser.add_argument("--plan-dir", required=True, type=Path)
+    teacher_status_parser.add_argument("--teacher-config", required=True, type=Path)
+    teacher_status_parser.add_argument(
+        "--output",
+        type=Path,
+        help="optional atomic raw-free status snapshot; safe to refresh in place",
+    )
+    teacher_status_parser.set_defaults(handler=_command_gate_b_teacher_status)
+
+    teacher_finalize = subparsers.add_parser(
+        "gate-b-teacher-finalize",
+        help=(
+            "locally exact-match Codex answers and publish a private rationale "
+            "source bank only when every planned row is accepted"
+        ),
+    )
+    _add_required_gate_b_data_contract(teacher_finalize)
+    teacher_finalize.add_argument("--teacher-config", required=True, type=Path)
+    teacher_finalize.add_argument("--plan-dir", required=True, type=Path)
+    teacher_finalize.add_argument("--output-jsonl", required=True, type=Path)
+    teacher_finalize.add_argument("--output-manifest", required=True, type=Path)
+    teacher_finalize.add_argument(
+        "--pilot-size",
+        type=int,
+        help="must repeat the locked pilot selection used when the plan was created",
+    )
+    teacher_finalize.add_argument(
+        "--recover-stale-lock",
+        action="store_true",
+        help="explicitly recover a verified stale teacher-plan lock before finalizing",
+    )
+    teacher_finalize.set_defaults(handler=_command_gate_b_teacher_finalize)
+
+    teacher_pilot_authorize = subparsers.add_parser(
+        "gate-b-teacher-pilot-authorize",
+        help=(
+            "verify the complete 128-row Codex teacher pilot and publish one "
+            "raw-free immutable authorization receipt before full v1 planning"
+        ),
+    )
+    _add_required_gate_b_data_contract(teacher_pilot_authorize)
+    teacher_pilot_authorize.add_argument("--teacher-config", required=True, type=Path)
+    _add_teacher_pilot_authorization_arguments(
+        teacher_pilot_authorize,
+        require_receipt=False,
+    )
+    teacher_pilot_authorize.add_argument("--output", required=True, type=Path)
+    teacher_pilot_authorize.set_defaults(
+        handler=_command_gate_b_teacher_pilot_authorize
+    )
+
+    teacher_v2_plan = subparsers.add_parser(
+        "gate-b-teacher-v2-plan",
+        help=(
+            "create a post-probe question-only Codex teacher plan from only the "
+            "remaining eligible development-CV IDs"
+        ),
+    )
+    _add_required_gate_b_data_contract(teacher_v2_plan)
+    _add_teacher_v2_authorization_arguments(teacher_v2_plan)
+    teacher_v2_plan.add_argument("--teacher-config", required=True, type=Path)
+    teacher_v2_plan.add_argument("--output-dir", required=True, type=Path)
+    teacher_v2_plan.set_defaults(handler=_command_gate_b_teacher_v2_plan)
+
+    teacher_v2_run = subparsers.add_parser(
+        "gate-b-teacher-v2-run",
+        help=(
+            "execute the authorized remaining-development-CV Codex teacher plan; "
+            "raw events remain private"
+        ),
+    )
+    _add_required_gate_b_data_contract(
+        teacher_v2_run,
+        require_development_shard=False,
+        require_development_shard_sha256=False,
+    )
+    _add_teacher_v2_authorization_arguments(teacher_v2_run)
+    teacher_v2_run.add_argument("--teacher-config", required=True, type=Path)
+    teacher_v2_run.add_argument("--plan-dir", required=True, type=Path)
+    teacher_v2_run.add_argument(
+        "--acknowledge-codex-teacher",
+        action="store_true",
+        help="required acknowledgement before organizer training questions are sent to Codex",
+    )
+    teacher_v2_run.add_argument(
+        "--max-invocations",
+        type=int,
+        help="optional positive cap on this invocation's Codex calls",
+    )
+    teacher_v2_run.add_argument(
+        "--max-workers",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help="bounded concurrent Codex calls; do not exceed the locked profile cap",
+    )
+    teacher_v2_run.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=1_800,
+        help="per-Codex-call timeout; a timeout is recorded as a failed private attempt",
+    )
+    teacher_v2_run.add_argument(
+        "--recover-stale-lock",
+        action="store_true",
+        help="explicitly recover a verified stale teacher-plan lock before resuming",
+    )
+    teacher_v2_run.set_defaults(handler=_command_gate_b_teacher_v2_run)
+
+    teacher_v2_status = subparsers.add_parser(
+        "gate-b-teacher-v2-status",
+        help="show raw-free status for an authorized v2 teacher ledger",
+    )
+    _add_required_gate_b_data_contract(
+        teacher_v2_status,
+        require_development_shard=False,
+        require_development_shard_sha256=False,
+    )
+    _add_teacher_v2_authorization_arguments(teacher_v2_status)
+    teacher_v2_status.add_argument("--teacher-config", required=True, type=Path)
+    teacher_v2_status.add_argument("--plan-dir", required=True, type=Path)
+    teacher_v2_status.add_argument(
+        "--output",
+        type=Path,
+        help="optional atomic raw-free status snapshot; safe to refresh in place",
+    )
+    teacher_v2_status.set_defaults(handler=_command_gate_b_teacher_v2_status)
+
+    teacher_v2_finalize = subparsers.add_parser(
+        "gate-b-teacher-v2-finalize",
+        help=(
+            "locally exact-match an authorized v2 ledger and publish its private "
+            "rationale source bank only when every row is accepted"
+        ),
+    )
+    _add_required_gate_b_data_contract(teacher_v2_finalize)
+    _add_teacher_v2_authorization_arguments(teacher_v2_finalize)
+    teacher_v2_finalize.add_argument("--teacher-config", required=True, type=Path)
+    teacher_v2_finalize.add_argument("--plan-dir", required=True, type=Path)
+    teacher_v2_finalize.add_argument("--output-jsonl", required=True, type=Path)
+    teacher_v2_finalize.add_argument("--output-manifest", required=True, type=Path)
+    teacher_v2_finalize.add_argument(
+        "--recover-stale-lock",
+        action="store_true",
+        help="explicitly recover a verified stale teacher-plan lock before finalizing",
+    )
+    teacher_v2_finalize.set_defaults(handler=_command_gate_b_teacher_v2_finalize)
+
+    teacher_audit_plan = subparsers.add_parser(
+        "gate-b-teacher-logical-audit-plan",
+        help=(
+            "create the fixed 64-row, candidate-only Codex logical-audit plan "
+            "from a finalized private teacher bank"
+        ),
+    )
+    teacher_audit_plan.add_argument("--teacher-config", required=True, type=Path)
+    teacher_audit_plan.add_argument("--teacher-plan-dir", required=True, type=Path)
+    teacher_audit_plan.add_argument("--source-jsonl", required=True, type=Path)
+    teacher_audit_plan.add_argument("--source-manifest", required=True, type=Path)
+    teacher_audit_plan.add_argument("--output-dir", required=True, type=Path)
+    teacher_audit_plan.set_defaults(handler=_command_gate_b_teacher_logical_audit_plan)
+
+    teacher_audit_run = subparsers.add_parser(
+        "gate-b-teacher-logical-audit-run",
+        help=(
+            "run one restartable, candidate-only Codex logical audit with a "
+            "ChatGPT login; raw events remain private"
+        ),
+    )
+    teacher_audit_run.add_argument("--teacher-config", required=True, type=Path)
+    teacher_audit_run.add_argument("--teacher-plan-dir", required=True, type=Path)
+    teacher_audit_run.add_argument("--audit-dir", required=True, type=Path)
+    teacher_audit_run.add_argument(
+        "--acknowledge-codex-teacher",
+        action="store_true",
+        help=(
+            "required acknowledgement before Codex receives private training "
+            "questions and candidate rationales"
+        ),
+    )
+    teacher_audit_run.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=1_800,
+        help="per-Codex-call timeout; a timeout is recorded as a failed private attempt",
+    )
+    teacher_audit_run.add_argument(
+        "--recover-stale-lock",
+        action="store_true",
+        help="explicitly recover a verified stale logical-audit lock before resuming",
+    )
+    teacher_audit_run.set_defaults(handler=_command_gate_b_teacher_logical_audit_run)
+
+    teacher_audit_status_parser = subparsers.add_parser(
+        "gate-b-teacher-logical-audit-status",
+        help="show a raw-free Codex teacher logical-audit ledger status",
+    )
+    teacher_audit_status_parser.add_argument(
+        "--teacher-config", required=True, type=Path
+    )
+    teacher_audit_status_parser.add_argument(
+        "--teacher-plan-dir", required=True, type=Path
+    )
+    teacher_audit_status_parser.add_argument("--audit-dir", required=True, type=Path)
+    teacher_audit_status_parser.add_argument(
+        "--output",
+        type=Path,
+        help="optional atomic raw-free status snapshot; safe to refresh in place",
+    )
+    teacher_audit_status_parser.set_defaults(
+        handler=_command_gate_b_teacher_logical_audit_status
+    )
+
+    teacher_audit_finalize = subparsers.add_parser(
+        "gate-b-teacher-logical-audit-finalize",
+        help=(
+            "publish or inspect the immutable fixed-64 logical-audit verdict "
+            "without reading organizer answers"
+        ),
+    )
+    teacher_audit_finalize.add_argument("--teacher-config", required=True, type=Path)
+    teacher_audit_finalize.add_argument(
+        "--teacher-plan-dir", required=True, type=Path
+    )
+    teacher_audit_finalize.add_argument("--audit-dir", required=True, type=Path)
+    teacher_audit_finalize.add_argument(
+        "--recover-stale-lock",
+        action="store_true",
+        help="explicitly recover a verified stale logical-audit lock before finalizing",
+    )
+    teacher_audit_finalize.set_defaults(
+        handler=_command_gate_b_teacher_logical_audit_finalize
+    )
+
     development = subparsers.add_parser(
         "gate-b-development",
         help="run one fixed base or verified-adapter development fold",
@@ -328,6 +775,20 @@ def build_parser() -> argparse.ArgumentParser:
     _add_current_source_provenance(development)
     development.add_argument("--output-jsonl", required=True, type=Path)
     development.add_argument("--output-manifest", required=True, type=Path)
+    development.add_argument(
+        "--resume-dir",
+        type=Path,
+        help=(
+            "private persistent chunk ledger for interruption-safe development "
+            "generation; final output paths must still be new"
+        ),
+    )
+    development.add_argument(
+        "--resume-chunk-size",
+        type=int,
+        default=25,
+        help="validated development problems per private resume chunk",
+    )
     development.add_argument("--adapter", type=Path)
     development.add_argument(
         "--base-baseline-manifest",
@@ -364,6 +825,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add_optional_rationale_training_inputs(train_fold)
     train_fold.add_argument("--base-baseline-manifest", required=True, type=Path)
     train_fold.add_argument("--output-dir", required=True, type=Path)
+    train_fold.add_argument(
+        "--resume-dir",
+        type=Path,
+        help=(
+            "private persistent QLoRA checkpoint ledger; resume is allowed only "
+            "when its immutable contract exactly matches this invocation"
+        ),
+    )
     train_fold.set_defaults(handler=_command_gate_b_train_fold)
 
     compare = subparsers.add_parser(
@@ -1308,6 +1777,56 @@ def _command_build_rationale_corpus(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_gate_b_materialize_teacher_bank(args: argparse.Namespace) -> int:
+    """Select an exact fold-training source from private finalized teacher banks."""
+
+    train, exclusions, manifest = _load_gate_b_data_contract(args)
+    expected_ids = eligible_training_ids(manifest, args.fold, exclusions.ids)
+    bank_arguments = args.teacher_bank
+    if not isinstance(bank_arguments, list) or not bank_arguments:
+        raise ValueError("--teacher-bank is required at least once")
+    banks: list[FinalizedTeacherBank] = []
+    for index, raw_bank in enumerate(bank_arguments):
+        if not isinstance(raw_bank, list) or len(raw_bank) != 3 or not all(
+            isinstance(value, Path) for value in raw_bank
+        ):
+            raise ValueError(
+                f"--teacher-bank occurrence {index + 1} must contain three paths"
+            )
+        banks.append(
+            FinalizedTeacherBank(
+                plan_dir=raw_bank[0],
+                source_jsonl=raw_bank[1],
+                source_manifest=raw_bank[2],
+            )
+        )
+    result = materialize_teacher_bank_source(
+        banks,
+        _records_for_ids(train.records, expected_ids),
+        split_manifest=manifest,
+        fold=args.fold,
+        excluded_ids=exclusions.ids,
+        output_jsonl=args.output_jsonl,
+        output_manifest=args.output_manifest,
+    )
+    print(
+        json.dumps(
+            {
+                "event": "gate_b_teacher_bank_materialized",
+                **result.as_dict(),
+                "raw_rationale_serialized": False,
+                "problem_id_serialized": False,
+                "reference_answer_serialized": False,
+                "leaderboard_or_test_used": False,
+                "locked_holdout_accessed": False,
+                "torch_or_cuda_used": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def _command_audit_rationale_corpus(args: argparse.Namespace) -> int:
     train, exclusions, manifest = _load_gate_b_data_contract(args)
     training_records = _records_for_ids(
@@ -1336,6 +1855,784 @@ def _command_audit_rationale_corpus(args: argparse.Namespace) -> int:
                 "leaderboard_or_test_used": False,
                 "locked_holdout_accessed": False,
                 "torch_or_cuda_used": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _command_gate_b_teacher_plan(args: argparse.Namespace) -> int:
+    """Create a question-only, fold-0-only Codex teacher plan."""
+
+    teacher_config, config_file_sha256 = _load_locked_codex_teacher_config(
+        args.teacher_config
+    )
+    _require_teacher_fold_zero(args.fold)
+    train, exclusions, manifest = _load_gate_b_data_contract(args)
+    fold0_training_ids = tuple(
+        sorted(eligible_training_ids(manifest, args.fold, exclusions.ids))
+    )
+    allowed_ids = _teacher_plan_ids(
+        train.records,
+        fold0_training_ids,
+        pilot_size=args.pilot_size,
+        configured_pilot_size=_teacher_config_int(teacher_config, "pilot_size"),
+    )
+    pilot_receipt = None
+    if args.pilot_size is None:
+        pilot_receipt = _require_teacher_full_v1_pilot_authorization(
+            args,
+            teacher_config=teacher_config,
+            config_file_sha256=config_file_sha256,
+            train=train,
+            exclusions=exclusions,
+            manifest=manifest,
+            fold0_training_ids=fold0_training_ids,
+        )
+    elif _teacher_pilot_authorization_argument_values(args):
+        raise ValueError(
+            "pilot authorization evidence is only valid when --pilot-size is omitted "
+            "for the complete fold-0 v1 bank"
+        )
+    codex_binary, codex_cli_version = _probe_codex_chatgpt_cli()
+    execution = _teacher_execution_from_config(
+        teacher_config,
+        codex_binary=codex_binary,
+        codex_cli_version=codex_cli_version,
+    )
+    plan = create_teacher_plan(
+        _records_for_ids(train.records, allowed_ids),
+        allowed_ids,
+        args.output_dir,
+        chunk_size=_teacher_config_int(teacher_config, "initial_chunk_size"),
+        label=_teacher_config_string(teacher_config, "label"),
+        version=_teacher_config_string(teacher_config, "version"),
+        execution=execution,
+    )
+    full_v1_authorization_payload_sha256 = None
+    if pilot_receipt is not None:
+        # The full v1 plan is an immutable promotion artifact.  Bind it to the
+        # already re-verified pilot receipt so later private materialization
+        # cannot accept an unqualified plan/source tuple.
+        full_v1_authorization_payload_sha256 = write_teacher_full_v1_bank_authorization(
+            plan.plan_dir,
+            pilot_receipt,
+        )
+    print(
+        json.dumps(
+            {
+                "event": "gate_b_teacher_plan_created",
+                "plan_dir": str(plan.plan_dir),
+                "plan_sha256": plan.plan_sha256,
+                "allowed_problem_count": len(plan.problem_ids),
+                "chunk_count": len(plan.chunks),
+                "allowed_ids_sha256": plan.allowed_ids_sha256,
+                "teacher_config_sha256": _teacher_config_sha256(teacher_config),
+                "teacher_config_file_sha256": config_file_sha256,
+                "codex_cli_version": codex_cli_version,
+                "pilot_authorization_file_sha256": (
+                    pilot_receipt.file_sha256 if pilot_receipt is not None else None
+                ),
+                "pilot_authorization_payload_sha256": (
+                    pilot_receipt.payload_sha256 if pilot_receipt is not None else None
+                ),
+                "full_v1_authorization_payload_sha256": (
+                    full_v1_authorization_payload_sha256
+                ),
+                "reference_answer_in_prompt": False,
+                "locked_holdout_accessed": False,
+                "leaderboard_or_test_used": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _command_gate_b_teacher_pilot_authorize(args: argparse.Namespace) -> int:
+    """Publish one immutable raw-free receipt only after every pilot gate passes."""
+
+    teacher_config, config_file_sha256 = _load_locked_codex_teacher_config(
+        args.teacher_config
+    )
+    _require_teacher_fold_zero(args.fold)
+    train, exclusions, manifest = _load_gate_b_data_contract(args)
+    fold0_training_ids = tuple(
+        sorted(eligible_training_ids(manifest, args.fold, exclusions.ids))
+    )
+    contract = _teacher_pilot_authorization_contract(
+        args,
+        teacher_config=teacher_config,
+        config_file_sha256=config_file_sha256,
+        train=train,
+        exclusions=exclusions,
+        manifest=manifest,
+        fold0_training_ids=fold0_training_ids,
+    )
+    pilot_plan_dir, source_jsonl, source_manifest, audit_dir = (
+        _required_teacher_pilot_evidence_paths(args, require_receipt=False)
+    )
+    pilot_plan = load_teacher_plan(pilot_plan_dir)
+    _require_teacher_plan_matches_config(pilot_plan, teacher_config)
+    audit_plan = load_teacher_logical_audit_plan(audit_dir)
+    _require_teacher_logical_audit_plan_matches_contract(
+        audit_plan,
+        pilot_plan,
+        teacher_config,
+    )
+    receipt = create_teacher_pilot_authorization(
+        args.output,
+        contract=contract,
+        pilot_plan_dir=pilot_plan_dir,
+        source_jsonl=source_jsonl,
+        source_manifest=source_manifest,
+        logical_audit_dir=audit_dir,
+    )
+    print(
+        json.dumps(
+            {
+                "event": "gate_b_teacher_pilot_authorized",
+                "teacher_config_sha256": _teacher_config_sha256(teacher_config),
+                "teacher_config_file_sha256": config_file_sha256,
+                "receipt": receipt.as_dict(),
+                "pilot_problem_count": _teacher_config_int(teacher_config, "pilot_size"),
+                "initial_exact_match_threshold_percent": (
+                    PILOT_AUTHORIZATION_INITIAL_EXACT_MATCH_PERCENT
+                ),
+                "logical_audit_sample_size": PILOT_AUTHORIZATION_LOGICAL_AUDIT_SAMPLE_SIZE,
+                "logical_audit_min_consistent": (
+                    PILOT_AUTHORIZATION_LOGICAL_AUDIT_MIN_CONSISTENT
+                ),
+                "raw_generation_serialized": False,
+                "reference_answer_in_prompt": False,
+                "locked_holdout_accessed": False,
+                "leaderboard_or_test_used": False,
+                "torch_or_cuda_used": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _command_gate_b_teacher_run(args: argparse.Namespace) -> int:
+    """Execute a bounded, restartable Codex teacher round with no shell."""
+
+    if args.acknowledge_codex_teacher is not True:
+        raise ValueError(
+            "--acknowledge-codex-teacher is required before Codex receives "
+            "organizer training questions"
+        )
+    if args.timeout_seconds <= 0:
+        raise ValueError("--timeout-seconds must be a positive integer")
+    teacher_config, config_file_sha256 = _load_locked_codex_teacher_config(
+        args.teacher_config
+    )
+    plan = load_teacher_plan(args.plan_dir)
+    _require_teacher_plan_matches_config(plan, teacher_config)
+    worker_cap = _teacher_config_int(teacher_config, "max_concurrent_workers")
+    if args.max_workers > worker_cap:
+        raise ValueError(
+            f"--max-workers exceeds locked teacher cap: {args.max_workers} > {worker_cap}"
+        )
+    if (
+        len(plan.problem_ids) == _teacher_config_int(teacher_config, "pilot_size")
+        and args.max_workers != 1
+    ):
+        raise ValueError("the locked Codex teacher pilot requires --max-workers 1")
+    _require_current_codex_cli_execution(plan.execution)
+    with tempfile.TemporaryDirectory(
+        prefix="deep-challenge-codex-teacher-workspace-"
+    ) as working_dir, tempfile.TemporaryDirectory(
+        prefix="deep-challenge-codex-teacher-auth-"
+    ) as auth_root:
+
+        def run_one_command(command: tuple[str, ...]) -> CodexCommandResult:
+            # The model's `-C` workspace remains empty.  Its auth-only
+            # CODEX_HOME is a separately managed sibling temp tree, never
+            # reachable from that workspace.
+            with tempfile.TemporaryDirectory(
+                prefix="codex-home-", dir=auth_root
+            ) as home_parent:
+                return _run_trusted_codex_teacher_command(
+                    command,
+                    execution=plan.execution,
+                    timeout_seconds=args.timeout_seconds,
+                    isolated_codex_home=_prepare_isolated_codex_home(
+                        Path(home_parent)
+                    ),
+                )
+
+        result = run_teacher_plan(
+            plan.plan_dir,
+            run_one_command,
+            max_attempts=_teacher_config_int(teacher_config, "max_attempts"),
+            repair_chunk_size=_teacher_config_int(
+                teacher_config, "repair_chunk_size"
+            ),
+            max_chunks=args.max_invocations,
+            max_workers=args.max_workers,
+            working_directory=working_dir,
+            allow_stale_lock_recovery=args.recover_stale_lock,
+        )
+    status = teacher_status(
+        plan.plan_dir,
+        max_attempts=_teacher_config_int(teacher_config, "max_attempts"),
+    )
+    print(
+        json.dumps(
+            {
+                "event": "gate_b_teacher_run_finished",
+                "teacher_config_sha256": _teacher_config_sha256(teacher_config),
+                "teacher_config_file_sha256": config_file_sha256,
+                "reasoning_effort_policy": {
+                    "initial": _teacher_config_string(
+                        teacher_config, "initial_reasoning_effort"
+                    ),
+                    "repair": _teacher_config_string(
+                        teacher_config, "repair_reasoning_effort"
+                    ),
+                },
+                "max_workers": args.max_workers,
+                "run": result.as_dict(),
+                "status": status.as_dict(),
+                "raw_generation_serialized": False,
+                "reference_answer_in_prompt": False,
+                "locked_holdout_accessed": False,
+                "leaderboard_or_test_used": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _command_gate_b_teacher_status(args: argparse.Namespace) -> int:
+    """Emit a monitor-safe teacher status without raw problems or answers."""
+
+    teacher_config, config_file_sha256 = _load_locked_codex_teacher_config(
+        args.teacher_config
+    )
+    plan = load_teacher_plan(args.plan_dir)
+    _require_teacher_plan_matches_config(plan, teacher_config)
+    status = teacher_status(
+        plan.plan_dir,
+        max_attempts=_teacher_config_int(teacher_config, "max_attempts"),
+    )
+    payload = {
+        "event": "gate_b_teacher_status",
+        "teacher_config_sha256": _teacher_config_sha256(teacher_config),
+        "teacher_config_file_sha256": config_file_sha256,
+        "status": status.as_dict(),
+    }
+    if args.output is not None:
+        write_json_atomic(args.output, payload)
+    print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
+def _command_gate_b_teacher_finalize(args: argparse.Namespace) -> int:
+    """Locally assess the private ledger against fold-0 training answers only."""
+
+    teacher_config, config_file_sha256 = _load_locked_codex_teacher_config(
+        args.teacher_config
+    )
+    _require_teacher_fold_zero(args.fold)
+    train, exclusions, manifest = _load_gate_b_data_contract(args)
+    expected_ids = _teacher_plan_ids(
+        train.records,
+        eligible_training_ids(manifest, args.fold, exclusions.ids),
+        pilot_size=args.pilot_size,
+        configured_pilot_size=_teacher_config_int(teacher_config, "pilot_size"),
+    )
+    plan = load_teacher_plan(args.plan_dir)
+    _require_teacher_plan_matches_config(plan, teacher_config)
+    if plan.problem_ids != expected_ids:
+        raise ValueError(
+            "teacher plan IDs do not exactly match the derived fold-0 training scope"
+        )
+    result = finalize_teacher_bank(
+        plan.plan_dir,
+        _records_for_ids(train.records, expected_ids),
+        output_jsonl=args.output_jsonl,
+        output_manifest=args.output_manifest,
+        max_attempts=_teacher_config_int(teacher_config, "max_attempts"),
+        allow_stale_lock_recovery=args.recover_stale_lock,
+    )
+    print(
+        json.dumps(
+            {
+                "event": "gate_b_teacher_finalize",
+                "teacher_config_sha256": _teacher_config_sha256(teacher_config),
+                "teacher_config_file_sha256": config_file_sha256,
+                "result": result.as_dict(),
+                "reference_answer_used_locally": True,
+                "reference_answer_in_prompt": False,
+                "locked_holdout_accessed": False,
+                "leaderboard_or_test_used": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _command_gate_b_teacher_logical_audit_plan(args: argparse.Namespace) -> int:
+    """Create a fixed 64-row audit from an already verified private bank.
+
+    This handler intentionally has no train/leaderboard arguments.  The
+    lower-level planner re-derives the source-bank provenance from the original
+    teacher ledger without opening organizer reference answers.
+    """
+
+    teacher_config, config_file_sha256 = _load_locked_codex_teacher_config(
+        args.teacher_config
+    )
+    teacher_plan = load_teacher_plan(args.teacher_plan_dir)
+    _require_teacher_plan_matches_config(teacher_plan, teacher_config)
+    codex_binary, codex_cli_version = _probe_codex_chatgpt_cli()
+    execution = _teacher_execution_from_config(
+        teacher_config,
+        codex_binary=codex_binary,
+        codex_cli_version=codex_cli_version,
+    )
+    profile = _LOCKED_CODEX_LOGICAL_AUDIT_PROFILE
+    audit_plan = create_teacher_logical_audit_plan(
+        teacher_plan.plan_dir,
+        args.source_jsonl,
+        args.source_manifest,
+        args.output_dir,
+        sample_size=profile["sample_size"],
+        min_consistent=profile["min_consistent"],
+        label=profile["label"],
+        version=profile["version"],
+        execution=execution,
+    )
+    print(
+        json.dumps(
+            {
+                "event": "gate_b_teacher_logical_audit_plan_created",
+                "audit_plan_dir": str(audit_plan.audit_dir),
+                "audit_plan_sha256": audit_plan.plan_sha256,
+                "teacher_plan_sha256": audit_plan.teacher_plan_sha256,
+                "sample_size": audit_plan.sample_size,
+                "min_consistent": audit_plan.min_consistent,
+                "selected_ids_sha256": audit_plan.selected_ids_sha256,
+                "teacher_config_sha256": _teacher_config_sha256(teacher_config),
+                "teacher_config_file_sha256": config_file_sha256,
+                "logical_audit_profile_sha256": _logical_audit_profile_sha256(),
+                "codex_cli_version": codex_cli_version,
+                "source_bank_provenance_reverified": True,
+                "reference_answer_read": False,
+                "reference_answer_in_prompt": False,
+                "candidate_rationale_in_prompt": True,
+                "tool_use_allowed": False,
+                "locked_holdout_accessed": False,
+                "leaderboard_or_test_used": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _command_gate_b_teacher_logical_audit_run(args: argparse.Namespace) -> int:
+    """Run at most one restartable candidate-only Codex logical audit."""
+
+    if args.acknowledge_codex_teacher is not True:
+        raise ValueError(
+            "--acknowledge-codex-teacher is required before Codex receives private "
+            "training questions and candidate rationales"
+        )
+    if args.timeout_seconds <= 0:
+        raise ValueError("--timeout-seconds must be a positive integer")
+    (
+        teacher_config,
+        config_file_sha256,
+        teacher_plan,
+        audit_plan,
+    ) = _load_verified_teacher_logical_audit_cli_contract(
+        teacher_config_path=args.teacher_config,
+        teacher_plan_dir=args.teacher_plan_dir,
+        audit_dir=args.audit_dir,
+    )
+    max_attempts = _teacher_config_int(teacher_config, "max_attempts")
+    status_before = teacher_logical_audit_status(
+        audit_plan.audit_dir,
+        max_attempts=max_attempts,
+    )
+    reasoning_effort = _logical_audit_reasoning_effort(
+        total_attempts=status_before.total_attempts,
+        parsed_attempts=status_before.parsed_attempts,
+        exhausted=status_before.exhausted,
+        config=teacher_config,
+    )
+    _require_current_codex_cli_execution(audit_plan.execution)
+    with tempfile.TemporaryDirectory(
+        prefix="deep-challenge-codex-logical-audit-workspace-"
+    ) as working_dir, tempfile.TemporaryDirectory(
+        prefix="deep-challenge-codex-logical-audit-auth-"
+    ) as auth_root:
+
+        def run_one_command(command: tuple[str, ...]) -> CodexCommandResult:
+            # Keep the auth-only home outside the model workspace, even for
+            # an unexpected read-only tool call.
+            with tempfile.TemporaryDirectory(
+                prefix="codex-home-", dir=auth_root
+            ) as home_parent:
+                return _run_trusted_codex_teacher_command(
+                    command,
+                    execution=audit_plan.execution,
+                    timeout_seconds=args.timeout_seconds,
+                    isolated_codex_home=_prepare_isolated_codex_home(
+                        Path(home_parent)
+                    ),
+                )
+
+        result = run_teacher_logical_audit(
+            audit_plan.audit_dir,
+            run_one_command,
+            max_attempts=max_attempts,
+            working_directory=working_dir,
+            allow_stale_lock_recovery=args.recover_stale_lock,
+        )
+    status = teacher_logical_audit_status(
+        audit_plan.audit_dir,
+        max_attempts=max_attempts,
+    )
+    print(
+        json.dumps(
+            {
+                "event": "gate_b_teacher_logical_audit_run_finished",
+                "teacher_plan_sha256": teacher_plan.plan_sha256,
+                "teacher_config_sha256": _teacher_config_sha256(teacher_config),
+                "teacher_config_file_sha256": config_file_sha256,
+                "logical_audit_profile_sha256": _logical_audit_profile_sha256(),
+                "reasoning_effort": reasoning_effort,
+                "run": result.as_dict(),
+                "status": status.as_dict(),
+                "raw_generation_serialized": False,
+                "reference_answer_read": False,
+                "reference_answer_in_prompt": False,
+                "candidate_rationale_in_prompt": True,
+                "tool_use_allowed": False,
+                "locked_holdout_accessed": False,
+                "leaderboard_or_test_used": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _command_gate_b_teacher_logical_audit_status(args: argparse.Namespace) -> int:
+    """Emit a monitor-safe logical-audit status without questions or text."""
+
+    teacher_config, config_file_sha256, teacher_plan, audit_plan = (
+        _load_verified_teacher_logical_audit_cli_contract(
+            teacher_config_path=args.teacher_config,
+            teacher_plan_dir=args.teacher_plan_dir,
+            audit_dir=args.audit_dir,
+        )
+    )
+    status = teacher_logical_audit_status(
+        audit_plan.audit_dir,
+        max_attempts=_teacher_config_int(teacher_config, "max_attempts"),
+    )
+    payload = {
+        "event": "gate_b_teacher_logical_audit_status",
+        "teacher_plan_sha256": teacher_plan.plan_sha256,
+        "teacher_config_sha256": _teacher_config_sha256(teacher_config),
+        "teacher_config_file_sha256": config_file_sha256,
+        "logical_audit_profile_sha256": _logical_audit_profile_sha256(),
+        "status": status.as_dict(),
+        "raw_generation_serialized": False,
+        "reference_answer_read": False,
+        "locked_holdout_accessed": False,
+        "leaderboard_or_test_used": False,
+    }
+    if args.output is not None:
+        write_json_atomic(args.output, payload)
+    print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
+def _command_gate_b_teacher_logical_audit_finalize(args: argparse.Namespace) -> int:
+    """Publish only the raw-free 64/60 audit verdict; no answers are loaded."""
+
+    teacher_config, config_file_sha256, teacher_plan, audit_plan = (
+        _load_verified_teacher_logical_audit_cli_contract(
+            teacher_config_path=args.teacher_config,
+            teacher_plan_dir=args.teacher_plan_dir,
+            audit_dir=args.audit_dir,
+        )
+    )
+    result = finalize_teacher_logical_audit(
+        audit_plan.audit_dir,
+        max_attempts=_teacher_config_int(teacher_config, "max_attempts"),
+        allow_stale_lock_recovery=args.recover_stale_lock,
+    )
+    print(
+        json.dumps(
+            {
+                "event": "gate_b_teacher_logical_audit_finalize",
+                "teacher_plan_sha256": teacher_plan.plan_sha256,
+                "teacher_config_sha256": _teacher_config_sha256(teacher_config),
+                "teacher_config_file_sha256": config_file_sha256,
+                "logical_audit_profile_sha256": _logical_audit_profile_sha256(),
+                "result": result.as_dict(),
+                "reference_answer_read": False,
+                "reference_answer_in_prompt": False,
+                "candidate_rationale_in_prompt": True,
+                "tool_use_allowed": False,
+                "locked_holdout_accessed": False,
+                "leaderboard_or_test_used": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _command_gate_b_teacher_v2_plan(args: argparse.Namespace) -> int:
+    """Create the separately authorized remaining-development-CV teacher plan."""
+
+    teacher_config, config_file_sha256 = _load_locked_codex_teacher_config(
+        args.teacher_config
+    )
+    _require_teacher_fold_zero(args.fold)
+    train, exclusions, manifest = _load_gate_b_data_contract(args)
+    scope = _derive_teacher_v2_scope(manifest, exclusions.ids, fold=args.fold)
+    decision = _load_verified_candidate_probe_decision(
+        args.candidate_probe_decision,
+        candidate_label=args.candidate_label,
+        manifest=manifest,
+        fold=args.fold,
+    )
+    codex_binary, codex_cli_version = _probe_codex_chatgpt_cli()
+    execution = _teacher_execution_from_config(
+        teacher_config,
+        codex_binary=codex_binary,
+        codex_cli_version=codex_cli_version,
+    )
+    plan = create_teacher_plan(
+        _records_for_ids(train.records, scope["remaining_ids"]),
+        scope["remaining_ids"],
+        args.output_dir,
+        chunk_size=_teacher_config_int(teacher_config, "initial_chunk_size"),
+        label=_CODEX_TEACHER_V2_PLAN_LABEL,
+        version=_CODEX_TEACHER_V2_PLAN_VERSION,
+        execution=execution,
+    )
+    authorization_sha256 = _write_teacher_v2_authorization(
+        plan,
+        decision=decision,
+        scope=scope,
+    )
+    print(
+        json.dumps(
+            {
+                "event": "gate_b_teacher_v2_plan_created",
+                "plan_dir": str(plan.plan_dir),
+                "plan_sha256": plan.plan_sha256,
+                "plan_label": plan.label,
+                "plan_version": plan.version,
+                "scope": _CODEX_TEACHER_V2_SCOPE,
+                "allowed_problem_count": len(plan.problem_ids),
+                "chunk_count": len(plan.chunks),
+                "allowed_ids_sha256": plan.allowed_ids_sha256,
+                "authorization_sha256": authorization_sha256,
+                "candidate_probe_decision_sha256": decision["file_sha256"],
+                "candidate_probe_decision_payload_sha256": decision["payload_sha256"],
+                "teacher_config_sha256": _teacher_config_sha256(teacher_config),
+                "teacher_config_file_sha256": config_file_sha256,
+                "codex_cli_version": codex_cli_version,
+                "reference_answer_in_prompt": False,
+                "locked_holdout_accessed": False,
+                "leaderboard_or_test_used": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _command_gate_b_teacher_v2_run(args: argparse.Namespace) -> int:
+    """Run an already authorized v2 teacher ledger without opening train Q/A."""
+
+    if args.acknowledge_codex_teacher is not True:
+        raise ValueError(
+            "--acknowledge-codex-teacher is required before Codex receives "
+            "organizer training questions"
+        )
+    if args.timeout_seconds <= 0:
+        raise ValueError("--timeout-seconds must be a positive integer")
+    teacher_config, config_file_sha256 = _load_locked_codex_teacher_config(
+        args.teacher_config
+    )
+    _require_teacher_fold_zero(args.fold)
+    exclusions, manifest = _load_gate_b_preclaim_contract(args)
+    scope = _derive_teacher_v2_scope(manifest, exclusions.ids, fold=args.fold)
+    decision = _load_verified_candidate_probe_decision(
+        args.candidate_probe_decision,
+        candidate_label=args.candidate_label,
+        manifest=manifest,
+        fold=args.fold,
+    )
+    plan = load_teacher_plan(args.plan_dir)
+    _require_teacher_v2_plan_matches_config(plan, teacher_config)
+    _require_teacher_v2_authorization(plan, decision=decision, scope=scope)
+    worker_cap = _teacher_config_int(teacher_config, "max_concurrent_workers")
+    if args.max_workers > worker_cap:
+        raise ValueError(
+            f"--max-workers exceeds locked teacher cap: {args.max_workers} > {worker_cap}"
+        )
+    _require_current_codex_cli_execution(plan.execution)
+    with tempfile.TemporaryDirectory(
+        prefix="deep-challenge-codex-teacher-workspace-"
+    ) as working_dir, tempfile.TemporaryDirectory(
+        prefix="deep-challenge-codex-teacher-auth-"
+    ) as auth_root:
+
+        def run_one_command(command: tuple[str, ...]) -> CodexCommandResult:
+            with tempfile.TemporaryDirectory(
+                prefix="codex-home-", dir=auth_root
+            ) as home_parent:
+                return _run_trusted_codex_teacher_command(
+                    command,
+                    execution=plan.execution,
+                    timeout_seconds=args.timeout_seconds,
+                    isolated_codex_home=_prepare_isolated_codex_home(
+                        Path(home_parent)
+                    ),
+                )
+
+        result = run_teacher_plan(
+            plan.plan_dir,
+            run_one_command,
+            max_attempts=_teacher_config_int(teacher_config, "max_attempts"),
+            repair_chunk_size=_teacher_config_int(
+                teacher_config, "repair_chunk_size"
+            ),
+            max_chunks=args.max_invocations,
+            max_workers=args.max_workers,
+            working_directory=working_dir,
+            allow_stale_lock_recovery=args.recover_stale_lock,
+        )
+    status = teacher_status(
+        plan.plan_dir,
+        max_attempts=_teacher_config_int(teacher_config, "max_attempts"),
+    )
+    print(
+        json.dumps(
+            {
+                "event": "gate_b_teacher_v2_run_finished",
+                "scope": _CODEX_TEACHER_V2_SCOPE,
+                "teacher_config_sha256": _teacher_config_sha256(teacher_config),
+                "teacher_config_file_sha256": config_file_sha256,
+                "candidate_probe_decision_sha256": decision["file_sha256"],
+                "reasoning_effort_policy": {
+                    "initial": _teacher_config_string(
+                        teacher_config, "initial_reasoning_effort"
+                    ),
+                    "repair": _teacher_config_string(
+                        teacher_config, "repair_reasoning_effort"
+                    ),
+                },
+                "max_workers": args.max_workers,
+                "run": result.as_dict(),
+                "status": status.as_dict(),
+                "raw_generation_serialized": False,
+                "reference_answer_in_prompt": False,
+                "locked_holdout_accessed": False,
+                "leaderboard_or_test_used": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _command_gate_b_teacher_v2_status(args: argparse.Namespace) -> int:
+    """Emit raw-free status only after re-verifying v2 authorization binding."""
+
+    teacher_config, config_file_sha256 = _load_locked_codex_teacher_config(
+        args.teacher_config
+    )
+    _require_teacher_fold_zero(args.fold)
+    exclusions, manifest = _load_gate_b_preclaim_contract(args)
+    scope = _derive_teacher_v2_scope(manifest, exclusions.ids, fold=args.fold)
+    decision = _load_verified_candidate_probe_decision(
+        args.candidate_probe_decision,
+        candidate_label=args.candidate_label,
+        manifest=manifest,
+        fold=args.fold,
+    )
+    plan = load_teacher_plan(args.plan_dir)
+    _require_teacher_v2_plan_matches_config(plan, teacher_config)
+    _require_teacher_v2_authorization(plan, decision=decision, scope=scope)
+    status = teacher_status(
+        plan.plan_dir,
+        max_attempts=_teacher_config_int(teacher_config, "max_attempts"),
+    )
+    payload = {
+        "event": "gate_b_teacher_v2_status",
+        "scope": _CODEX_TEACHER_V2_SCOPE,
+        "teacher_config_sha256": _teacher_config_sha256(teacher_config),
+        "teacher_config_file_sha256": config_file_sha256,
+        "candidate_probe_decision_sha256": decision["file_sha256"],
+        "status": status.as_dict(),
+    }
+    if args.output is not None:
+        write_json_atomic(args.output, payload)
+    print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
+def _command_gate_b_teacher_v2_finalize(args: argparse.Namespace) -> int:
+    """Assess only the sealed v2 scope against local organizer-train answers."""
+
+    teacher_config, config_file_sha256 = _load_locked_codex_teacher_config(
+        args.teacher_config
+    )
+    _require_teacher_fold_zero(args.fold)
+    train, exclusions, manifest = _load_gate_b_data_contract(args)
+    scope = _derive_teacher_v2_scope(manifest, exclusions.ids, fold=args.fold)
+    decision = _load_verified_candidate_probe_decision(
+        args.candidate_probe_decision,
+        candidate_label=args.candidate_label,
+        manifest=manifest,
+        fold=args.fold,
+    )
+    plan = load_teacher_plan(args.plan_dir)
+    _require_teacher_v2_plan_matches_config(plan, teacher_config)
+    _require_teacher_v2_authorization(plan, decision=decision, scope=scope)
+    if plan.problem_ids != scope["remaining_ids"]:
+        raise ValueError(
+            "v2 teacher plan IDs do not exactly match the derived remaining development-CV scope"
+        )
+    result = finalize_teacher_bank(
+        plan.plan_dir,
+        _records_for_ids(train.records, scope["remaining_ids"]),
+        output_jsonl=args.output_jsonl,
+        output_manifest=args.output_manifest,
+        max_attempts=_teacher_config_int(teacher_config, "max_attempts"),
+        allow_stale_lock_recovery=args.recover_stale_lock,
+    )
+    print(
+        json.dumps(
+            {
+                "event": "gate_b_teacher_v2_finalize",
+                "scope": _CODEX_TEACHER_V2_SCOPE,
+                "teacher_config_sha256": _teacher_config_sha256(teacher_config),
+                "teacher_config_file_sha256": config_file_sha256,
+                "candidate_probe_decision_sha256": decision["file_sha256"],
+                "result": result.as_dict(),
+                "reference_answer_used_locally": True,
+                "reference_answer_in_prompt": False,
+                "locked_holdout_accessed": False,
+                "leaderboard_or_test_used": False,
             },
             sort_keys=True,
         )
@@ -1431,12 +2728,15 @@ def _command_gate_b_development(args: argparse.Namespace) -> int:
             config=config,
             samples_per_problem=1,
             progress_callback=report_progress,
+            resume_dir=args.resume_dir,
+            chunk_size=args.resume_chunk_size,
         )
         result = write_development_artifacts(
             records,
             jsonl_path=args.output_jsonl,
             manifest_path=args.output_manifest,
             execution_evidence=execution_evidence,
+            resume_dir=args.resume_dir,
         )
     finally:
         backend.close()
@@ -1550,6 +2850,7 @@ def _command_gate_b_train_fold(args: argparse.Namespace) -> int:
         gpu_smoke_artifact=args.gpu_smoke_report,
         output_dir=args.output_dir,
         gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+        resume_dir=args.resume_dir,
         rationale_corpus=rationale_corpus,
         rationale_config=rationale_config,
         config=config,
@@ -1812,6 +3113,882 @@ def _capture_development_execution_evidence(
         gpu_smoke_report_sha256=runtime_gate.smoke_sha256,
         gpu_device_name=runtime_gate.device_name,
     )
+
+
+def _load_locked_codex_teacher_config(path: Path) -> tuple[dict[str, object], str]:
+    """Load the public no-API teacher profile without permitting drift."""
+
+    payload = _load_json_object(path)
+    stored_sha256 = payload.pop("config_sha256", None)
+    if not isinstance(stored_sha256, str):
+        raise ValueError("Codex teacher config is missing config_sha256")
+    semantic_sha256 = _teacher_config_sha256(payload)
+    if (
+        payload != _LOCKED_CODEX_TEACHER_CONFIG
+        or stored_sha256 != semantic_sha256
+    ):
+        raise ValueError("Codex teacher config differs from the locked no-API profile")
+    return payload, sha256_file(path)
+
+
+def _teacher_config_sha256(config: dict[str, object]) -> str:
+    return hashlib.sha256(canonical_json_bytes(config)).hexdigest()
+
+
+def _logical_audit_profile_sha256() -> str:
+    """Return the semantic hash for the fixed candidate-only audit contract."""
+
+    return _teacher_config_sha256(_LOCKED_CODEX_LOGICAL_AUDIT_PROFILE)
+
+
+def _teacher_config_string(config: dict[str, object], field: str) -> str:
+    value = config.get(field)
+    if not isinstance(value, str):  # pragma: no cover - locked config check above
+        raise RuntimeError(f"locked Codex teacher config field is not text: {field}")
+    return value
+
+
+def _teacher_config_int(config: dict[str, object], field: str) -> int:
+    value = config.get(field)
+    if isinstance(value, bool) or not isinstance(value, int):  # pragma: no cover
+        raise RuntimeError(f"locked Codex teacher config field is not an integer: {field}")
+    return value
+
+
+def _teacher_execution_from_config(
+    config: dict[str, object],
+    *,
+    codex_binary: str,
+    codex_cli_version: str,
+) -> TeacherExecutionConfig:
+    return TeacherExecutionConfig(
+        provider=_teacher_config_string(config, "provider"),
+        model_id=_teacher_config_string(config, "model_id"),
+        model_revision=_teacher_config_string(config, "model_revision"),
+        codex_cli_version=codex_cli_version,
+        reasoning_effort=_teacher_config_string(config, "initial_reasoning_effort"),
+        codex_binary=codex_binary,
+        seed=_teacher_config_int(config, "seed"),
+    )
+
+
+def _require_current_codex_cli_execution(
+    execution: TeacherExecutionConfig,
+) -> tuple[str, str]:
+    """Fail closed if a resume would use a different Codex executable/version.
+
+    The private plan records the resolved executable and CLI version at plan
+    creation.  Re-probing immediately before every privileged teacher run
+    makes that provenance live rather than merely historical, and prevents a
+    recomputed plan from selecting an arbitrary executable.
+    """
+
+    codex_binary, codex_cli_version = _probe_codex_chatgpt_cli()
+    if (
+        execution.codex_binary != codex_binary
+        or execution.codex_cli_version != codex_cli_version
+    ):
+        raise ValueError(
+            "fresh ChatGPT Codex CLI binary/version does not match the immutable "
+            "teacher execution plan"
+        )
+    return codex_binary, codex_cli_version
+
+
+def _teacher_pilot_authorization_argument_values(
+    args: argparse.Namespace,
+) -> tuple[Path, ...]:
+    """Return supplied private v1-pilot evidence paths, omitting absent flags."""
+
+    values = (
+        getattr(args, "pilot_authorization", None),
+        getattr(args, "pilot_plan_dir", None),
+        getattr(args, "pilot_source_jsonl", None),
+        getattr(args, "pilot_source_manifest", None),
+        getattr(args, "pilot_logical_audit_dir", None),
+    )
+    if any(value is not None and not isinstance(value, Path) for value in values):
+        raise RuntimeError("teacher pilot evidence argument is not a path")
+    return tuple(value for value in values if isinstance(value, Path))
+
+
+def _required_teacher_pilot_evidence_paths(
+    args: argparse.Namespace,
+    *,
+    require_receipt: bool,
+) -> tuple[Path, ...]:
+    """Require every live private artifact needed to re-verify promotion."""
+
+    names = (
+        "pilot_authorization",
+        "pilot_plan_dir",
+        "pilot_source_jsonl",
+        "pilot_source_manifest",
+        "pilot_logical_audit_dir",
+    )
+    if not require_receipt:
+        names = names[1:]
+    values = tuple(getattr(args, name, None) for name in names)
+    missing = [name for name, value in zip(names, values, strict=True) if value is None]
+    if missing:
+        raise ValueError(
+            "complete fold-0 v1 teacher planning requires a passed pilot authorization "
+            f"and all live private pilot evidence; missing={missing!r}"
+        )
+    if any(not isinstance(value, Path) for value in values):
+        raise RuntimeError("teacher pilot evidence argument is not a path")
+    return tuple(value for value in values if isinstance(value, Path))
+
+
+def _teacher_pilot_authorization_contract(
+    args: argparse.Namespace,
+    *,
+    teacher_config: dict[str, object],
+    config_file_sha256: str,
+    train: CsvDataset,
+    exclusions: TrainExclusionSet,
+    manifest: SplitManifest,
+    fold0_training_ids: tuple[str, ...],
+) -> TeacherPilotAuthorizationContract:
+    """Re-derive the exact 128-row pilot from the current sealed split contract."""
+
+    pilot_ids = _teacher_plan_ids(
+        train.records,
+        fold0_training_ids,
+        pilot_size=_teacher_config_int(teacher_config, "pilot_size"),
+        configured_pilot_size=_teacher_config_int(teacher_config, "pilot_size"),
+    )
+    return TeacherPilotAuthorizationContract(
+        teacher_config_sha256=_teacher_config_sha256(teacher_config),
+        teacher_config_file_sha256=config_file_sha256,
+        train_sha256=train.manifest.sha256,
+        exclusions_sha256=exclusions.manifest.sha256,
+        exclusion_count=len(exclusions),
+        split_artifact_sha256=sha256_file(args.split_artifact),
+        development_shard_sha256=sha256_file(
+            args.development_shard / "CHECKSUMS.sha256"
+        ),
+        split_version=manifest.version,
+        split_sha256=manifest.sha256,
+        source_groups_sha256=manifest.source_groups_sha256,
+        fold=args.fold,
+        fold0_training_ids=fold0_training_ids,
+        pilot_ids=pilot_ids,
+        teacher_plan_label=_teacher_config_string(teacher_config, "label"),
+        teacher_plan_version=_teacher_config_string(teacher_config, "version"),
+        logical_audit_label=str(_LOCKED_CODEX_LOGICAL_AUDIT_PROFILE["label"]),
+        logical_audit_version=str(_LOCKED_CODEX_LOGICAL_AUDIT_PROFILE["version"]),
+    )
+
+
+def _require_teacher_full_v1_pilot_authorization(
+    args: argparse.Namespace,
+    *,
+    teacher_config: dict[str, object],
+    config_file_sha256: str,
+    train: CsvDataset,
+    exclusions: TrainExclusionSet,
+    manifest: SplitManifest,
+    fold0_training_ids: tuple[str, ...],
+):
+    """Fail closed unless an immutable receipt and live evidence still agree."""
+
+    (
+        authorization_path,
+        pilot_plan_dir,
+        source_jsonl,
+        source_manifest,
+        audit_dir,
+    ) = _required_teacher_pilot_evidence_paths(args, require_receipt=True)
+    contract = _teacher_pilot_authorization_contract(
+        args,
+        teacher_config=teacher_config,
+        config_file_sha256=config_file_sha256,
+        train=train,
+        exclusions=exclusions,
+        manifest=manifest,
+        fold0_training_ids=fold0_training_ids,
+    )
+    pilot_plan = load_teacher_plan(pilot_plan_dir)
+    _require_teacher_plan_matches_config(pilot_plan, teacher_config)
+    audit_plan = load_teacher_logical_audit_plan(audit_dir)
+    _require_teacher_logical_audit_plan_matches_contract(
+        audit_plan,
+        pilot_plan,
+        teacher_config,
+    )
+    return verify_teacher_pilot_authorization(
+        authorization_path,
+        contract=contract,
+        pilot_plan_dir=pilot_plan_dir,
+        source_jsonl=source_jsonl,
+        source_manifest=source_manifest,
+        logical_audit_dir=audit_dir,
+    )
+
+
+def _require_teacher_fold_zero(fold: int) -> None:
+    if fold != 0:
+        raise ValueError("Codex teacher plans are locked to fold 0 development training IDs")
+
+
+def _require_teacher_plan_matches_config(
+    plan: TeacherPlan, config: dict[str, object]
+) -> None:
+    """Ensure an immutable private plan still corresponds to the public profile."""
+
+    if (
+        plan.label != _teacher_config_string(config, "label")
+        or plan.version != _teacher_config_string(config, "version")
+        or plan.execution.provider != _teacher_config_string(config, "provider")
+        or plan.execution.model_id != _teacher_config_string(config, "model_id")
+        or plan.execution.model_revision != _teacher_config_string(config, "model_revision")
+        or plan.execution.reasoning_effort
+        != _teacher_config_string(config, "initial_reasoning_effort")
+        or plan.execution.seed != _teacher_config_int(config, "seed")
+        or plan.execution.codex_cli_version == "unknown"
+    ):
+        raise ValueError("teacher plan does not match the locked Codex teacher profile")
+
+
+def _require_teacher_logical_audit_plan_matches_contract(
+    audit_plan: TeacherLogicalAuditPlan,
+    teacher_plan: TeacherPlan,
+    config: dict[str, object],
+) -> None:
+    """Bind an audit to its immutable teacher plan and the fixed 64/60 gate."""
+
+    profile = _LOCKED_CODEX_LOGICAL_AUDIT_PROFILE
+    execution = audit_plan.execution
+    if (
+        audit_plan.label != profile["label"]
+        or audit_plan.version != profile["version"]
+        or audit_plan.sample_size != profile["sample_size"]
+        or audit_plan.min_consistent != profile["min_consistent"]
+        or audit_plan.teacher_plan_sha256 != teacher_plan.plan_sha256
+        or execution.provider != _teacher_config_string(config, "provider")
+        or execution.model_id != _teacher_config_string(config, "model_id")
+        or execution.model_revision != _teacher_config_string(config, "model_revision")
+        or execution.reasoning_effort
+        != _teacher_config_string(config, "initial_reasoning_effort")
+        or execution.seed != _teacher_config_int(config, "seed")
+        or execution.codex_cli_version == "unknown"
+    ):
+        raise ValueError(
+            "teacher logical-audit plan does not match the locked 64/60 Codex contract"
+        )
+
+
+def _load_verified_teacher_logical_audit_cli_contract(
+    *,
+    teacher_config_path: Path,
+    teacher_plan_dir: Path,
+    audit_dir: Path,
+) -> tuple[dict[str, object], str, TeacherPlan, TeacherLogicalAuditPlan]:
+    """Load only provenance-bound private plans; never organizer train answers."""
+
+    teacher_config, config_file_sha256 = _load_locked_codex_teacher_config(
+        teacher_config_path
+    )
+    teacher_plan = load_teacher_plan(teacher_plan_dir)
+    _require_teacher_plan_matches_config(teacher_plan, teacher_config)
+    audit_plan = load_teacher_logical_audit_plan(audit_dir)
+    _require_teacher_logical_audit_plan_matches_contract(
+        audit_plan,
+        teacher_plan,
+        teacher_config,
+    )
+    return teacher_config, config_file_sha256, teacher_plan, audit_plan
+
+
+def _logical_audit_reasoning_effort(
+    *,
+    total_attempts: int,
+    parsed_attempts: int,
+    exhausted: bool,
+    config: dict[str, object],
+) -> str:
+    """Select high initially and xhigh only for an automatic audit retry."""
+
+    if parsed_attempts > 0 or exhausted:
+        # ``run_teacher_logical_audit`` will publish no new attempt in either
+        # terminal state.  Keep the returned value deterministic and private.
+        return _teacher_config_string(config, "initial_reasoning_effort")
+    return _teacher_config_string(
+        config,
+        "initial_reasoning_effort" if total_attempts == 0 else "repair_reasoning_effort",
+    )
+
+
+def _require_teacher_v2_plan_matches_config(
+    plan: TeacherPlan, config: dict[str, object]
+) -> None:
+    """Verify the immutable v2 scope label plus the unchanged teacher profile."""
+
+    if (
+        plan.label != _CODEX_TEACHER_V2_PLAN_LABEL
+        or plan.version != _CODEX_TEACHER_V2_PLAN_VERSION
+        or plan.execution.provider != _teacher_config_string(config, "provider")
+        or plan.execution.model_id != _teacher_config_string(config, "model_id")
+        or plan.execution.model_revision != _teacher_config_string(config, "model_revision")
+        or plan.execution.reasoning_effort
+        != _teacher_config_string(config, "initial_reasoning_effort")
+        or plan.execution.seed != _teacher_config_int(config, "seed")
+        or plan.execution.codex_cli_version == "unknown"
+    ):
+        raise ValueError("v2 teacher plan does not match its locked scope/profile")
+
+
+def _derive_teacher_v2_scope(
+    manifest: SplitManifest,
+    excluded_ids: Sequence[str],
+    *,
+    fold: int,
+) -> dict[str, Any]:
+    """Derive the only permissible v2 IDs without loading organizer answers.
+
+    The v1 bank contains ``training_ids(0)``.  The only remaining eligible
+    development-CV rows are therefore fold 0 validation rows.  Re-deriving the
+    result from the complete CV union makes that implication explicit and
+    fails closed if future split behavior would violate it.
+    """
+
+    _require_teacher_fold_zero(fold)
+    fold0_training_ids = tuple(
+        sorted(eligible_training_ids(manifest, fold, excluded_ids))
+    )
+    development_cv_ids = tuple(
+        sorted(
+            problem_id
+            for fold_index in range(manifest.n_folds)
+            for problem_id in eligible_validation_ids(
+                manifest, fold_index, excluded_ids
+            )
+        )
+    )
+    if len(development_cv_ids) != len(set(development_cv_ids)):
+        raise RuntimeError("eligible development-CV scope contains duplicate IDs")
+    remaining_ids = tuple(
+        sorted(set(development_cv_ids) - set(fold0_training_ids))
+    )
+    fold0_validation_ids = tuple(
+        sorted(eligible_validation_ids(manifest, fold, excluded_ids))
+    )
+    if remaining_ids != fold0_validation_ids:
+        raise RuntimeError(
+            "remaining development-CV scope must equal fold-0 validation IDs"
+        )
+    if not remaining_ids:
+        raise ValueError("v2 teacher scope has no eligible remaining development-CV IDs")
+    holdout_ids = set(manifest.final_holdout_ids())
+    if (
+        set(remaining_ids) & set(fold0_training_ids)
+        or set(remaining_ids) & holdout_ids
+        or set(fold0_training_ids) & holdout_ids
+    ):
+        raise RuntimeError("v2 teacher scope crosses a sealed split boundary")
+    return {
+        "fold": fold,
+        "development_cv_ids": development_cv_ids,
+        "fold0_training_ids": fold0_training_ids,
+        "remaining_ids": remaining_ids,
+    }
+
+
+def _load_verified_candidate_probe_decision(
+    decision_path: Path,
+    *,
+    candidate_label: str,
+    manifest: SplitManifest,
+    fold: int,
+) -> dict[str, Any]:
+    """Recompute and bind a positive single-fold probe decision fail-closed.
+
+    A self-hash alone does not establish that a decision was generated from its
+    comparison evidence.  This intentionally re-runs the pure CPU decision
+    function into a temporary no-publish path and requires byte-equivalent
+    payload semantics before the teacher expansion can start.
+    """
+
+    raw = Path(decision_path)
+    if raw.is_symlink():
+        raise ValueError("candidate probe decision refuses symbolic links")
+    source = raw.resolve(strict=True)
+    if not source.is_file() or source.is_symlink():
+        raise ValueError("candidate probe decision must be a regular file")
+    payload = _load_json_object(source)
+    expected_keys = {
+        "schema_version",
+        "decision_scope",
+        "policy",
+        "comparison_artifact",
+        "model_id",
+        "revision",
+        "split_version",
+        "split_sha256",
+        "source_groups_sha256",
+        "fold",
+        "reference_label",
+        "candidate_label",
+        "evidence",
+        "significant_regression",
+        "candidate_action",
+        "candidate_full_oof_authorized",
+        "final_selection_eligible",
+        "complete_oof_required_before_freeze",
+        "selection_frozen",
+        "locked_holdout_accessed",
+        "leaderboard_or_test_used",
+        "payload_sha256",
+    }
+    if set(payload) != expected_keys:
+        raise ValueError("candidate probe decision schema differs from the locked v1 schema")
+    stored_payload_sha256 = payload.get("payload_sha256")
+    if (
+        not isinstance(stored_payload_sha256, str)
+        or len(stored_payload_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in stored_payload_sha256)
+    ):
+        raise ValueError("candidate probe decision payload SHA-256 is invalid")
+    payload_without_hash = dict(payload)
+    payload_without_hash.pop("payload_sha256")
+    if (
+        hashlib.sha256(canonical_json_bytes(payload_without_hash)).hexdigest()
+        != stored_payload_sha256
+    ):
+        raise ValueError("candidate probe decision payload SHA-256 does not match content")
+    if payload.get("schema_version") != _CANDIDATE_PROBE_DECISION_SCHEMA:
+        raise ValueError("candidate probe decision schema version is unsupported")
+    if payload.get("candidate_label") != candidate_label:
+        raise ValueError("candidate probe decision does not authorize the requested candidate")
+    if (
+        payload.get("candidate_full_oof_authorized") is not True
+        or payload.get("candidate_action") != "continue_to_complete_oof"
+        or payload.get("significant_regression") is not False
+        or payload.get("final_selection_eligible") is not False
+        or payload.get("complete_oof_required_before_freeze") is not True
+        or payload.get("selection_frozen") is not False
+        or payload.get("locked_holdout_accessed") is not False
+        or payload.get("leaderboard_or_test_used") is not False
+    ):
+        raise ValueError("candidate probe decision does not authorize v2 teacher expansion")
+    comparison = payload.get("comparison_artifact")
+    if not isinstance(comparison, dict):
+        raise ValueError("candidate probe decision comparison evidence is invalid")
+    comparison_path = comparison.get("path")
+    if not isinstance(comparison_path, str) or not comparison_path:
+        raise ValueError("candidate probe decision comparison path is invalid")
+    comparison_source = Path(comparison_path)
+    if comparison_source.is_symlink() or not comparison_source.is_file():
+        raise ValueError("candidate probe comparison artifact is unavailable")
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="deep-challenge-probe-decision-verify-"
+        ) as temporary_directory:
+            recomputed_path = Path(temporary_directory) / "decision.json"
+            decide_candidate_probe_promotion(
+                comparison_source,
+                candidate_label=candidate_label,
+                output_path=recomputed_path,
+            )
+            recomputed = _load_json_object(recomputed_path)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "candidate probe decision cannot be independently verified from its comparison"
+        ) from exc
+    if payload != recomputed:
+        raise ValueError(
+            "candidate probe decision does not match its independently recomputed evidence"
+        )
+    if (
+        payload.get("model_id") != OFFICIAL_MODEL_ID
+        or payload.get("revision") != OFFICIAL_REVISION
+        or payload.get("decision_scope") != "single_fold_gpu_cost_control_only"
+        or payload.get("split_version") != manifest.version
+        or payload.get("split_sha256") != manifest.sha256
+        or payload.get("source_groups_sha256") != manifest.source_groups_sha256
+        or payload.get("fold") != fold
+    ):
+        raise ValueError("candidate probe decision does not match the current split/model contract")
+    return {
+        "candidate_label": candidate_label,
+        "candidate_full_oof_authorized": payload["candidate_full_oof_authorized"],
+        "candidate_action": payload["candidate_action"],
+        "file_sha256": sha256_file(source),
+        "payload_sha256": stored_payload_sha256,
+        "split_sha256": manifest.sha256,
+        "source_groups_sha256": manifest.source_groups_sha256,
+        "fold": fold,
+    }
+
+
+def _teacher_v2_authorization_payload(
+    plan: TeacherPlan,
+    *,
+    decision: dict[str, Any],
+    scope: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the raw-free immutable v2-plan authorization payload."""
+
+    return {
+        "schema_version": _CODEX_TEACHER_V2_AUTHORIZATION_SCHEMA,
+        "plan_sha256": plan.plan_sha256,
+        "plan_label": plan.label,
+        "plan_version": plan.version,
+        "scope": _CODEX_TEACHER_V2_SCOPE,
+        "fold": scope["fold"],
+        "candidate_label": decision["candidate_label"],
+        "candidate_full_oof_authorized": decision["candidate_full_oof_authorized"],
+        "candidate_action": decision["candidate_action"],
+        "candidate_probe_decision_sha256": decision["file_sha256"],
+        "candidate_probe_decision_payload_sha256": decision["payload_sha256"],
+        "split_sha256": decision["split_sha256"],
+        "source_groups_sha256": decision["source_groups_sha256"],
+        "eligible_development_cv_ids_sha256": _ids_sha256(
+            scope["development_cv_ids"]
+        ),
+        "fold0_training_ids_sha256": _ids_sha256(scope["fold0_training_ids"]),
+        "allowed_ids_sha256": plan.allowed_ids_sha256,
+        "allowed_problem_count": len(plan.problem_ids),
+    }
+
+
+def _write_teacher_v2_authorization(
+    plan: TeacherPlan,
+    *,
+    decision: dict[str, Any],
+    scope: dict[str, Any],
+) -> str:
+    """Publish the v2 decision binding once, atomically and without overwrite."""
+
+    if plan.problem_ids != scope["remaining_ids"]:
+        raise RuntimeError("v2 authorization cannot bind a plan outside its remaining scope")
+    payload_without_hash = _teacher_v2_authorization_payload(
+        plan,
+        decision=decision,
+        scope=scope,
+    )
+    payload = {
+        **payload_without_hash,
+        "payload_sha256": hashlib.sha256(
+            canonical_json_bytes(payload_without_hash)
+        ).hexdigest(),
+    }
+    serialized = (
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            indent=2,
+        )
+        + "\n"
+    ).encode("utf-8")
+    _write_bytes_noreplace(
+        plan.plan_dir / _CODEX_TEACHER_V2_AUTHORIZATION_FILENAME,
+        serialized,
+        label="v2 teacher authorization",
+    )
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def _require_teacher_v2_authorization(
+    plan: TeacherPlan,
+    *,
+    decision: dict[str, Any],
+    scope: dict[str, Any],
+) -> None:
+    """Ensure run/status/finalize receive exactly the approval bound at planning."""
+
+    if plan.problem_ids != scope["remaining_ids"]:
+        raise ValueError("v2 teacher plan IDs are outside the sealed remaining scope")
+    path = plan.plan_dir / _CODEX_TEACHER_V2_AUTHORIZATION_FILENAME
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("v2 teacher plan is missing its immutable authorization binding")
+    payload = _load_json_object(path)
+    expected_without_hash = _teacher_v2_authorization_payload(
+        plan,
+        decision=decision,
+        scope=scope,
+    )
+    expected = {
+        **expected_without_hash,
+        "payload_sha256": hashlib.sha256(
+            canonical_json_bytes(expected_without_hash)
+        ).hexdigest(),
+    }
+    if payload != expected:
+        raise ValueError("v2 teacher authorization does not match its plan/probe/scope")
+
+
+def _write_bytes_noreplace(path: Path, payload: bytes, *, label: str) -> None:
+    """Atomically publish one private sidecar without replacing an existing file."""
+
+    raw = Path(path)
+    if raw.is_symlink() or raw.parent.is_symlink():
+        raise ValueError(f"{label} refuses symbolic links")
+    target = raw.resolve(strict=False)
+    if not target.parent.is_dir():
+        raise ValueError(f"{label} parent must be an existing regular directory")
+    if target.exists():
+        raise ValueError(f"refusing to overwrite {label}")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, target)
+        except FileExistsError as exc:
+            raise ValueError(f"refusing to overwrite {label}") from exc
+    finally:
+        with suppress(FileNotFoundError):
+            temporary.unlink()
+
+
+def _teacher_plan_ids(
+    records: Sequence[MathRecord],
+    training_ids: Sequence[str],
+    *,
+    pilot_size: int | None,
+    configured_pilot_size: int,
+) -> tuple[str, ...]:
+    """Return all fold-0 training IDs or its locked deterministic pilot subset."""
+
+    canonical_ids = tuple(sorted(training_ids))
+    if len(canonical_ids) != len(set(canonical_ids)):
+        raise RuntimeError("fold-0 training IDs must be unique")
+    if pilot_size is None:
+        return canonical_ids
+    if pilot_size != configured_pilot_size:
+        raise ValueError(
+            f"--pilot-size is locked to {configured_pilot_size} when it is supplied"
+        )
+    if pilot_size > len(canonical_ids):
+        raise ValueError("locked teacher pilot is larger than the fold-0 training scope")
+    by_id = {record.id: record for record in records}
+    if set(canonical_ids) - set(by_id):  # pragma: no cover - data contract precedes this
+        raise RuntimeError("teacher pilot IDs are missing from the development shard")
+    strata: dict[str, list[str]] = {}
+    for problem_id in canonical_ids:
+        answer = by_id[problem_id].answer
+        if answer is None:  # pragma: no cover - train loader contract precedes this
+            raise RuntimeError("teacher pilot may use only organizer-train integer answers")
+        sign = "negative" if answer < 0 else "zero" if answer == 0 else "positive"
+        magnitude = abs(answer)
+        if magnitude <= 9:
+            magnitude_bucket = "single_digit"
+        elif magnitude <= 99:
+            magnitude_bucket = "double_digit"
+        elif magnitude <= 999:
+            magnitude_bucket = "triple_digit"
+        else:
+            magnitude_bucket = "four_plus_digit"
+        strata.setdefault(f"{sign}:{magnitude_bucket}", []).append(problem_id)
+
+    total = len(canonical_ids)
+    quotas = {
+        key: (pilot_size * len(problem_ids)) // total
+        for key, problem_ids in strata.items()
+    }
+    remaining = pilot_size - sum(quotas.values())
+    priority = sorted(
+        strata,
+        key=lambda key: (
+            -((pilot_size * len(strata[key])) % total),
+            key,
+        ),
+    )
+    for key in priority:
+        if remaining == 0:
+            break
+        if quotas[key] < len(strata[key]):
+            quotas[key] += 1
+            remaining -= 1
+    if remaining != 0:  # pragma: no cover - quota arithmetic above is exhaustive
+        raise RuntimeError("teacher pilot stratification could not allocate its exact size")
+
+    selected: list[str] = []
+    for key in sorted(strata):
+        ranked = sorted(
+            strata[key],
+            key=lambda problem_id: hashlib.sha256(
+                f"gate-b-teacher-pilot-v1:{problem_id}".encode()
+            ).hexdigest(),
+        )
+        selected.extend(ranked[: quotas[key]])
+    if len(selected) != pilot_size or len(set(selected)) != pilot_size:
+        raise RuntimeError("teacher pilot selection has invalid exact coverage")
+    return tuple(sorted(selected))
+
+
+def _codex_teacher_environment(
+    *, isolated_codex_home: Path | None = None
+) -> dict[str, str]:
+    """Keep ChatGPT login discovery while excluding supplied API credentials."""
+
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key in _CODEX_TEACHER_SAFE_ENV_NAMES and value
+    }
+    if "PATH" not in environment:
+        environment["PATH"] = os.defpath
+    if "HOME" not in environment:
+        raise RuntimeError("Codex teacher requires HOME to read the existing ChatGPT login")
+    if isolated_codex_home is not None:
+        if isolated_codex_home.is_symlink() or not isolated_codex_home.is_dir():
+            raise RuntimeError("isolated Codex teacher home must be a regular directory")
+        environment["CODEX_HOME"] = str(isolated_codex_home.resolve(strict=True))
+    return environment
+
+
+def _prepare_isolated_codex_home(working_directory: Path) -> Path:
+    """Copy only the existing ChatGPT auth state into an empty private Codex home.
+
+    ``CODEX_HOME`` includes skills and configuration as well as authentication.
+    A short-lived home prevents global skills from entering a question-only teacher
+    turn while retaining the user's already authenticated ChatGPT session.
+    """
+
+    if working_directory.is_symlink() or not working_directory.is_dir():
+        raise RuntimeError("teacher working directory must be a regular directory")
+    source_home = Path(_codex_teacher_environment()["HOME"]) / ".codex"
+    source_auth = source_home / "auth.json"
+    if source_auth.is_symlink() or not source_auth.is_file():
+        raise RuntimeError("existing ChatGPT Codex auth state is unavailable")
+    isolated_home = working_directory / "codex-home"
+    isolated_home.mkdir(mode=0o700)
+    target_auth = isolated_home / "auth.json"
+    try:
+        shutil.copyfile(source_auth, target_auth)
+        os.chmod(target_auth, 0o600)
+    except OSError as exc:
+        raise RuntimeError("could not prepare isolated Codex teacher authentication") from exc
+    return isolated_home
+
+
+def _probe_codex_chatgpt_cli() -> tuple[str, str]:
+    """Verify the locally installed CLI and ChatGPT login without exposing either output."""
+
+    environment = _codex_teacher_environment()
+    binary = shutil.which("codex", path=environment["PATH"])
+    if binary is None:
+        raise RuntimeError("Codex CLI is unavailable on PATH")
+    try:
+        version = subprocess.run(
+            (binary, "--version"),
+            check=False,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            env=environment,
+        )
+        login = subprocess.run(
+            (binary, "login", "status"),
+            check=False,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            env=environment,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("Codex CLI probe did not complete") from exc
+    version_text = (version.stdout or "").strip().splitlines()
+    if version.returncode != 0 or not version_text:
+        raise RuntimeError("Codex CLI version probe failed")
+    codex_cli_version = version_text[0]
+    if "\x00" in codex_cli_version or len(codex_cli_version) > 200:
+        raise RuntimeError("Codex CLI version probe returned unsafe text")
+    login_text = f"{login.stdout or ''}\n{login.stderr or ''}".lower()
+    if login.returncode != 0 or "logged in using chatgpt" not in login_text:
+        raise RuntimeError("Codex CLI is not logged in through ChatGPT")
+    return str(Path(binary).resolve()), codex_cli_version
+
+
+def _run_trusted_codex_teacher_command(
+    command: tuple[str, ...],
+    *,
+    execution: TeacherExecutionConfig,
+    timeout_seconds: int,
+    isolated_codex_home: Path,
+) -> CodexCommandResult:
+    """Execute only the executable freshly bound to the immutable plan.
+
+    ``run_teacher_plan`` reloads its private plan when a resumable run starts.
+    This final argv[0] check therefore also closes the gap between the live
+    pre-run probe and command construction without exposing the auth-only
+    home to an unexpected executable.
+    """
+
+    if not command or command[0] != execution.codex_binary:
+        raise RuntimeError(
+            "teacher command executable differs from the freshly verified Codex plan"
+        )
+    return _run_codex_teacher_command(
+        command,
+        timeout_seconds=timeout_seconds,
+        isolated_codex_home=isolated_codex_home,
+    )
+
+
+def _run_codex_teacher_command(
+    command: tuple[str, ...],
+    *,
+    timeout_seconds: int,
+    isolated_codex_home: Path | None = None,
+) -> CodexCommandResult:
+    """Run a prevalidated no-shell Codex command and keep raw output private."""
+
+    started = time.monotonic_ns()
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+            env=_codex_teacher_environment(isolated_codex_home=isolated_codex_home),
+        )
+        stdout = completed.stdout or ""
+        stderr = completed.stderr or ""
+        returncode = completed.returncode
+    except subprocess.TimeoutExpired as exc:
+        stdout = _subprocess_text(exc.stdout)
+        stderr = "codex_timeout"
+        returncode = 124
+    except OSError:
+        stdout = ""
+        stderr = "codex_subprocess_os_error"
+        returncode = 127
+    latency_ms = (time.monotonic_ns() - started) // 1_000_000
+    return CodexCommandResult(
+        stdout=stdout,
+        stderr=stderr,
+        returncode=returncode,
+        latency_ms=latency_ms,
+    )
+
+
+def _subprocess_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
 
 
 def _load_locked_gate_b_config(path: Path) -> GateBConfig:

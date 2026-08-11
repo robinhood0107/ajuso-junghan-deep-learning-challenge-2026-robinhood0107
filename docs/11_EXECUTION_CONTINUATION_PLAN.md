@@ -70,7 +70,7 @@ PYTHONPATH=src python3 -m deep_challenge.public_repo_guard --all
 | B1.0 | fold 0 base direct-answer | B0.3 green | `20260810T234907KST` JSONL + **v2 provenance manifest**, 1,653/2,942 | invalid parser/artifact or any source/B0/config hash mismatch |
 | B1.1 | parser golden corpus | B1.0 real generations | added regression tests + full CPU suite | conflict is hidden or test fails |
 | B2.0 | fold 0 answer-only QLoRA | same-fold base manifest | 627/2,942; significant harm로 candidate 중단 | train IDs or provenance mismatch |
-| B2.1 | concise-rationale CPU gate | training-only private teacher rows | canonical corpus+manifest, raw-free audit, SFT preflight v4 | any coverage/reference/provenance/policy mismatch |
+| B2.1 | concise-rationale CPU gate | question-only Codex ledger + training-only private teacher rows | pilot/full bank, local exact-match finalization, answer-hidden logic audit, canonical corpus+manifest, raw-free audit, SFT preflight v4 | tool/error/schema/ID/reference/provenance mismatch, retry exhaustion, audit threshold miss |
 | B2.2 | fold 0 rationale QLoRA probe | B2.1와 새 source/B0 green | adapter v4 + generation + paired harm screen | corpus/adapter binding mismatch 또는 significant harm |
 | B1/B2.3 | folds 1–4 repeat | fold 0 harm screen authorizes exact candidate | five base + five candidate OOF runs | any fold incomplete or method fingerprint drift |
 | B2.4 | complete OOF comparison | all five folds | grouped paired bootstrap, exact McNemar, Holm | single fold/reused run/mixed method |
@@ -294,10 +294,17 @@ rationale adapter, GPU generation과 모델 점수는 아직 없다. 다음 GPU 
 11. **R9-A (완료, CPU):** concise-rationale v1 config, exact fold-training corpus
     canonicalizer, raw-free audit, pinned-tokenizer SFT preflight v4, adapter v4 provenance와
     selection/freeze compatibility를 구현·회귀검증했다.
-12. **R9-B (대기, 외부 입력→CPU):** rules상 허용된 training-only teacher로 fold 0의
-    private JSONL을 만들되 leaderboard/test/holdout/tool을 사용하지 않는다. 전체 11,794
-    eligible training ID가 organizer reference/parser/provenance gate를 통과하도록
-    `build-rationale-corpus`→`audit-rationale-corpus`→SFT preflight v4를 실행한다.
+12. **R9-B (완료, fail-closed CPU pilot):** ChatGPT 로그인 Codex `gpt-5.6-sol` question-only
+    ledger를 구현하고 fold 0 training ID의 deterministic 128문제 pilot을 실행했다. first
+    pass는 103/128(80.47%)로 80% 기준을 통과했지만, initial high/worker 1 64문제 chunk 두
+    개 → local reference exact-match finalizer → failed row만 xhigh/16문제 이하로 총 3회
+    cap을 마친 뒤 111/128 승인·17 exhaustion으로 끝났다. gold-answer re-prompt, tool,
+    leaderboard/test/holdout은 사용하지 않았다. 이 plan은 source bank·64문제 answer-hidden
+    logical audit·full 11,794 ID bank v1·corpus/SFT preflight v4로 승격하지 않는다. full
+    v1 plan에는 향후 별도 versioned pilot의 immutable receipt가 필요하며, receipt는 80%,
+    128/128, passed 64→60 audit와 live provenance를 모두 재검증한다. 이 historic ledger는
+    `shell_environment_policy.inherit="none"` safe-command contract 이전의 것이므로 current
+    status/finalize가 fail-closed로 거부하며, raw-free aggregate만 보존 증거로 남긴다.
 13. **R9-C (대기, GPU):** R9-B green, 전체 회귀, Git 기록 뒤 새 source manifest/B0 pair를
     만들고 fold 0 rationale QLoRA→adapter generation→paired harm screen을 실행한다. 실제
     corpus가 없으면 시작하지 않는다.

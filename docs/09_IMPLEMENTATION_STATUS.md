@@ -23,7 +23,7 @@
 | Gate B0 final GPU smoke | **READY / 다음 GPU workload 전 재실행** | `gpu-smoke-20260810T234907KST.json`은 local `2+3` only, pinned NF4 load, LoRA backward/optimizer step, cache-on generation을 green으로 닫았다. 다음 source에서는 같은 smoke를 새 no-overwrite tag로 다시 실행한다. |
 | Gate B1 base direct-answer | **current-source v2 완료** | `20260810T234907KST` organizer-only fold 0 run은 parser v2 stored/current 일치 상태로 1,653/2,942 EM (56.1863%), parser `2705/3/234`, finish `2134/808`을 atomic 기록했다. records/manifest와 raw-free parser audit v6 checksum을 검증했다. |
 | Gate B2 QLoRA SFT | **fold 0 완료 / candidate 중단** | 첫 시도 `20260810T192204KST`는 tokenizer byte drift를 publish 전에 fail-closed로 거부했다. 수정 뒤 `20260810T210605KST` 재시도는 738/738 step, runtime 5,171.3711초, loss 0.4800419로 완료했고 exact pinned tokenizer와 504 LoRA tensor를 검증한 adapter를 atomic publish했다. adapter EM은 627/2,942(21.3120%)로 base보다 -19.8165%p여서 나머지 fold를 중단했다. |
-| concise-rationale candidate | **CPU 경로 READY / 실제 corpus·학습 미실행** | exact fold-training ID coverage, question/target/teacher/config SHA, reference-answer/parser 검증, training-only/no-tool/no-test/no-holdout 정책, atomic corpus+manifest, raw-free audit, v4 SFT preflight/adapter provenance를 구현했다. teacher JSONL이 없으므로 실제 QLoRA와 점수는 없다. |
+| concise-rationale candidate | **CPU teacher pilot fail-closed / GPU 모델 단계 미실행** | exact fold-training ID coverage, question/target/teacher/config SHA, reference-answer/parser 검증, training-only/no-tool/no-test/no-holdout 정책, immutable teacher ledger, atomic corpus+manifest, raw-free audit, v4 SFT preflight/adapter provenance를 구현했다. `20260811T103224KST` 128문제 question-only pilot은 first pass 103/128(80.47%)이었지만, 총 3회 뒤 111/128만 승인되고 17행이 exhaustion 됐다. pilot은 source bank 없이 끝났고, 현재 강화된 safe-command contract는 그 historic ledger도 재사용하지 않는다. 따라서 logical audit, canonical corpus, rationale QLoRA, 새 generation과 모델 점수는 없다. |
 | parser v2 | **current-source 재현 완료** | 기존 immutable raw의 CPU rescore는 진단 전용이지만, `20260810T234907KST`에서 새 generation을 atomic publish해 1,653/2,942와 conflict 3건을 selection-eligible stored parse로 재현했다. |
 | leaderboard prediction/submission | **미실행** | 모델 prediction 0건; leaderboard를 학습/API 입력에 쓰지 않음 |
 
@@ -78,7 +78,9 @@ diagnostic generation과 CPU rescore는 새 bundle 대신 selection 근거로 �
 - `cli.py`: current-contract overlay, CV-only audit/profile, uppercase submission default,
   explicit final `gpu-smoke`, complete OOF 비교와 independent submission 교차검증
 - `gate_b.py`: split-bound SFT/dev records, response-only masking, full config SHA,
-  structured generation result, parser conflict 보존, atomic no-overwrite JSONL/manifest
+  structured generation result, parser conflict 보존, atomic no-overwrite JSONL/manifest.
+  development generation resume은 immutable contract와 append-only chunk ledger를 쓰며,
+  records-only orphan은 exact bytes일 때만 manifest commit marker를 붙여 복구한다.
 - `parser_golden.py`: published development JSONL/manifest를 checksum·partition·stored
   parser result·fixed model/revision·exact-match 회계까지 재검증하고 raw
   completion/ID/reference answer/value를 직렬화하지 않는 private parser-golden aggregate audit;
@@ -99,12 +101,46 @@ diagnostic generation과 CPU rescore는 새 bundle 대신 selection 근거로 �
   question, answer, parsed value, teacher prompt를 쓰지 않는다. raw-free aggregate에는
   `reference_answer_in_prompt_true_count=0`을 다시 계산해 기록하며, pair publish의 두 번째
   link가 어떤 I/O 오류로 실패해도 첫 번째 link를 제거하고 디렉터리를 fsync한다.
+- `teacher_rationale.py` 및 teacher CLI: ChatGPT 로그인 Codex `gpt-5.6-sol`을 위한
+  question-only immutable plan, 64문제 chunk ledger, append-only attempt/parsed/assessment
+  기록, raw-free status, 동일 contract의 완전 검증 attempt만 재개 시 재사용하는 정책과
+  fail-closed finalizer를 제공한다.
+  organizer reference answer는 prompt에 넣지 않고 local finalizer에서만 exact match에 쓴다.
+  tool call, Codex error event, schema/ID/order/marker/provenance 위반, 부분·손상 ledger는
+  성공으로 처리하지 않는다. loader는 immutable plan/schema에서 prompt와 safe argv를 다시
+  만들고 저장 evidence와 byte-for-byte 대조한다. 실행 직전에 ChatGPT Codex resolved
+  binary/version도 plan과 다시 대조하며, auth-only 임시 `CODEX_HOME`은 `-C` workspace 밖에
+  만들고 tool shell에는 `shell_environment_policy.inherit="none"`을 고정한다.
+- logical-audit gate는 finalizer가 완전한 private bank를 publish한 뒤에만 실행한다. plan SHA로
+  결정한 64개 row의 candidate rationale과 해당 row가 주장한 final integer만 다시 읽고,
+  organizer answer·reference solution·도구·외부 호출 없이 내부 논리 일관성만 판정한다.
+  output은 ID/order/schema를 엄격히 검증하며 60/64 이상만 통과다. `20260811T103224KST`
+  pilot은 local first pass 103/128(80.47%), 최대 3회 후 111/128 승인·17 exhaustion으로
+  source bank 전에 fail-closed됐으므로 audit은 시작하지 않았다. raw-free aggregate 결과는
+  `artifacts/analysis/gate-b-teacher-pilot-v1-20260811T103224KST-final-v1.json`에 고정했다.
+  이 historic ledger는 `inherit="none"` command contract 이전의 것이므로 current loader가
+  의도적으로 reject하며, 새 pilot은 새 versioned ledger로만 시작한다.
+- `teacher_pilot_authorization.py`: full v1 bank plan은 deterministic 128-row pilot의
+  first-pass 80% 이상, 최대 3회 내 전원 승인, source-bank provenance, passed 64→60 audit을
+  재검증한 immutable raw-free receipt 없이는 만들 수 없다. receipt는 logical-audit의
+  deterministic 64개 selection과 verified-bank question/candidate binding까지 다시 계산하고,
+  full v1 plan에는 `v1-pilot-authorization.json` sidecar를 남긴다. receipt 뒤
+  source/config/split/audit 변조도 full-plan 생성 시 다시 거부한다.
+- `rationale_materialization.py`: 하나 이상의 finalized private bank에서 각 fold의 exact
+  `training_ids(fold)`만 private JSONL로 materialize한다. v1 full bank에는 pilot receipt
+  sidecar, v2 bank에는 positive-probe sidecar가 없으면 거부한다. v1/v2 union,
+  duplicate/missing, holdout/out-of-CV source, ledger/source/manifest tamper는 fail-closed다.
+- teacher bank v1은 pilot의 모든 gate가 green일 때만 fold 0 `training_ids(0)` 전체에
+  한정한다. 나머지 development-CV 2,942 ID의 bank v2는 fold 0 concise-rationale GPU
+  harm screen이 통과하기 전에는 만들지 않는다. locked holdout, filtered leaderboard,
+  final test는 teacher plan·prompt·bank·audit의 입력이 될 수 없다.
 - `gate_b_runtime.py`: base/adapter lazy NF4 generation (eval KV cache on), exact fold QLoRA training (cache off),
   direct-answer v3 또는 audited-rationale v4 adapter manifest와
   36-layer×7-projection×A/B=504 safetensors shape/dtype 검증. rationale v4는 candidate config
   byte/semantic SHA와 corpus records/manifest/audit SHA를 학습 전후에 재결속한다. adapter tokenizer는
   `save_pretrained()` 재직렬화가 아니라 pinned cache의 exact `tokenizer.json`/`tokenizer_config.json`
-  bytes를 각각 고정 SHA로 검증해 복사한다.
+  bytes를 각각 고정 SHA로 검증해 복사한다. persistent resume은 complete, contract-bound 최신
+  checkpoint만 재개하고 partial/corrupt checkpoint는 삭제하지 않고 forensic attempt로 격리한다.
 - `gate_b_selection.py`: single-fold probe와 complete 5-fold OOF union 비교, paired
   duplicate-cluster bootstrap, exact McNemar, 한 family Holm; final freeze는 complete OOF만
   허용하고 base/adapter bundle·fold/data/example SHA·공통 method fingerprint를 결속.
@@ -191,6 +227,11 @@ concise-rationale candidate 정책은
 - `artifacts/analysis/source-manifest-b0-green-v3-20260810.json` (당시 source B0 green
   documentation을 포함한 source tree)
 - `artifacts/analysis/CHECKSUMS.sha256`
+- `artifacts/analysis/gate-b-teacher-pilot-v1-20260811T103224KST-final-v1.json` (private
+  raw-free pilot result; SHA-256 `75f835b2d4159c934c0ab8762d413115fb3eead028dcb4727e87770eaf77f1f0`)
+- `artifacts/analysis/source-manifest-gate-b-codex-teacher-*.json` (CPU teacher/resume
+  implementation finalization 시점마다 새 no-overwrite tag로 작성하는 source-tree snapshot;
+  canonical artifact checksum 목록에는 추가하지 않음)
 
 `model-preflight-current.json`은 기본 개발 환경의 의도적 package 부재까지 기록한다.
 `model-preflight-gpu-runtime-cpu-hidden-v2-20260804.json`은 pinned files와 모든 GPU package import가
