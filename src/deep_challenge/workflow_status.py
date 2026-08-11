@@ -93,6 +93,15 @@ class RunContextWriteResult:
     payload_sha256: str
 
 
+@dataclass(frozen=True, slots=True)
+class ValidatedRunContext:
+    path: str
+    sha256: str
+    payload_sha256: str
+    source_commit: str
+    run_tag: str
+
+
 def development_workflow_status(status: DevelopmentResumeStatus) -> WorkflowStatus:
     """Translate a private development resume ledger to the shared envelope."""
 
@@ -288,10 +297,153 @@ def write_run_context(
     finally:
         with suppress(FileNotFoundError):
             temporary.unlink()
+    validated = validate_run_context(target, source_root=root)
     return RunContextWriteResult(
         path=str(target),
-        sha256=sha256_file(target),
-        payload_sha256=payload_sha256,
+        sha256=validated.sha256,
+        payload_sha256=validated.payload_sha256,
+    )
+
+
+def validate_run_context(
+    path: str | Path, *, source_root: str | Path
+) -> ValidatedRunContext:
+    """Revalidate every current input before any run-context consumer acts."""
+
+    supplied_root = Path(source_root)
+    if supplied_root.is_symlink():
+        raise GateBValidationError("run context source_root must be a real directory")
+    root = supplied_root.resolve(strict=True)
+    supplied = Path(path)
+    if supplied.is_symlink():
+        raise GateBValidationError("run context artifact refuses symlinks")
+    source = supplied.resolve(strict=True)
+    if not source.is_file() or not source.is_relative_to(root):
+        raise GateBValidationError("run context artifact must be a source-root file")
+    try:
+        payload = json.loads(
+            source.read_text(encoding="utf-8", errors="strict"),
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_json_constant,
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise GateBValidationError("run context artifact is invalid JSON") from exc
+    expected_keys = {
+        "schema_version",
+        "source_commit",
+        "run_tag",
+        "configs",
+        "source_manifest",
+        "split_artifact",
+        "runtime_gate",
+        "fold_output_paths",
+        "planned_stages",
+        "payload_sha256",
+    }
+    if not isinstance(payload, dict) or set(payload) != expected_keys:
+        raise GateBValidationError("run context artifact schema is invalid")
+    if payload.get("schema_version") != RUN_CONTEXT_SCHEMA:
+        raise GateBValidationError("run context artifact schema_version is unsupported")
+    stored_payload_sha256 = _required_sha256(
+        payload.get("payload_sha256"), "run context payload_sha256"
+    )
+    unhashed = dict(payload)
+    unhashed.pop("payload_sha256")
+    if hashlib.sha256(canonical_json_bytes(unhashed)).hexdigest() != stored_payload_sha256:
+        raise GateBValidationError("run context payload_sha256 is invalid")
+    source_commit = payload.get("source_commit")
+    run_tag = payload.get("run_tag")
+    if not isinstance(source_commit, str) or _COMMIT_RE.fullmatch(source_commit) is None:
+        raise GateBValidationError("run context source_commit is invalid")
+    if not isinstance(run_tag, str) or _RUN_TAG_RE.fullmatch(run_tag) is None:
+        raise GateBValidationError("run context run_tag is invalid")
+    _require_clean_source_commit(root, source_commit)
+
+    def verify_file_evidence(
+        value: object, label: str, *, source_manifest: bool = False
+    ) -> Path:
+        required_keys = {"path", "sha256"}
+        if source_manifest:
+            required_keys |= {"tree_sha256", "file_count"}
+        if not isinstance(value, Mapping) or set(value) != required_keys:
+            raise GateBValidationError(f"run context {label} evidence is invalid")
+        relative = value.get("path")
+        if not isinstance(relative, str) or not relative or Path(relative).is_absolute():
+            raise GateBValidationError(f"run context {label} path is invalid")
+        candidate = root / relative
+        if candidate.is_symlink():
+            raise GateBValidationError(f"run context {label} path is unsafe")
+        resolved = candidate.resolve(strict=True)
+        if (
+            not resolved.is_file()
+            or not resolved.is_relative_to(root)
+            or resolved.relative_to(root).as_posix() != relative
+        ):
+            raise GateBValidationError(f"run context {label} path is unsafe")
+        expected_sha256 = _required_sha256(
+            value.get("sha256"), f"run context {label} sha256"
+        )
+        if sha256_file(resolved) != expected_sha256:
+            raise GateBValidationError(f"run context {label} bytes changed")
+        return resolved
+
+    configs = payload.get("configs")
+    if not isinstance(configs, Mapping) or not configs:
+        raise GateBValidationError("run context configs are invalid")
+    for label, evidence in configs.items():
+        if not isinstance(label, str) or not label or label != label.strip():
+            raise GateBValidationError("run context config label is invalid")
+        verify_file_evidence(evidence, f"config {label}")
+    manifest_evidence = payload.get("source_manifest")
+    manifest_path = verify_file_evidence(
+        manifest_evidence, "source manifest", source_manifest=True
+    )
+    try:
+        validated_manifest = validate_source_tree_manifest_artifact(
+            manifest_path, root=root
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise GateBValidationError("run context source manifest is invalid") from exc
+    assert isinstance(manifest_evidence, Mapping)
+    if (
+        manifest_evidence.get("tree_sha256") != validated_manifest.tree_sha256
+        or manifest_evidence.get("file_count") != validated_manifest.file_count
+    ):
+        raise GateBValidationError("run context source manifest binding changed")
+    verify_file_evidence(payload.get("split_artifact"), "split artifact")
+    runtime_gate = payload.get("runtime_gate")
+    if not isinstance(runtime_gate, Mapping) or set(runtime_gate) != {
+        "preflight_report",
+        "gpu_smoke_report",
+    }:
+        raise GateBValidationError("run context runtime gate is invalid")
+    verify_file_evidence(runtime_gate.get("preflight_report"), "preflight report")
+    verify_file_evidence(runtime_gate.get("gpu_smoke_report"), "GPU smoke report")
+    fold_paths = payload.get("fold_output_paths")
+    if not isinstance(fold_paths, Mapping) or not fold_paths:
+        raise GateBValidationError("run context fold output paths are invalid")
+    for fold, relative in fold_paths.items():
+        if not isinstance(fold, str) or not fold.isdigit() or not isinstance(relative, str):
+            raise GateBValidationError("run context fold output path is invalid")
+        if _relative_planned_path(root / relative, root, f"fold {fold} output") != relative:
+            raise GateBValidationError("run context fold output path is not canonical")
+    stages = payload.get("planned_stages")
+    if (
+        not isinstance(stages, list)
+        or not stages
+        or len(set(stages)) != len(stages)
+        or any(
+            not isinstance(stage, str) or not stage or stage != stage.strip()
+            for stage in stages
+        )
+    ):
+        raise GateBValidationError("run context planned stages are invalid")
+    return ValidatedRunContext(
+        path=str(source),
+        sha256=sha256_file(source),
+        payload_sha256=stored_payload_sha256,
+        source_commit=source_commit,
+        run_tag=run_tag,
     )
 
 
@@ -331,9 +483,9 @@ def _require_clean_source_commit(root: Path, source_commit: str) -> None:
         raise GateBValidationError("run context Git root is invalid") from exc
     if resolved_top_level != root or head.stdout.strip() != source_commit:
         raise GateBValidationError("run context source_commit does not match source_root HEAD")
-    clean = run_git("diff", "--quiet", "HEAD", "--")
-    if clean.returncode != 0:
-        raise GateBValidationError("run context requires a clean tracked source tree")
+    clean = run_git("status", "--porcelain=v1", "--untracked-files=all")
+    if clean.returncode != 0 or clean.stdout:
+        raise GateBValidationError("run context requires a clean source tree")
 
 
 def _fsync_directory(path: Path) -> None:
@@ -342,3 +494,16 @@ def _fsync_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    output: dict[str, object] = {}
+    for key, value in pairs:
+        if key in output:
+            raise GateBValidationError(f"duplicate JSON key {key!r}")
+        output[key] = value
+    return output
+
+
+def _reject_json_constant(value: str) -> None:
+    raise GateBValidationError(f"non-standard JSON numeric constant {value!r}")

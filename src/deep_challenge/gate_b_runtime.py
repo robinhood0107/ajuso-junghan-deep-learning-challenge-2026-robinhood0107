@@ -588,18 +588,10 @@ def train_qlora_fold(
         source_manifest=source_evidence,
         config=config,
     )
-    if target.exists():
-        if resume is None:
-            raise GateBArtifactExistsError(
-                f"refusing to overwrite adapter directory: {target}"
-            )
-        with _locked_training_resume(resume):
-            return _recover_published_training_artifact(
-                resume,
-                target=target,
-                plan=plan,
-                config=config,
-            )
+    if target.exists() and resume is None:
+        raise GateBArtifactExistsError(
+            f"refusing to overwrite adapter directory: {target}"
+        )
     factory = runtime_factory or (
         lambda evidence: TransformersQLoRATrainingRuntime(
             evidence=evidence,
@@ -617,11 +609,24 @@ def train_qlora_fold(
     runtime: FoldTrainingRuntime | None = None
     try:
         lock = (
-            _locked_training_resume_checkpoint(resume)
+            _locked_training_resume(resume)
             if resume is not None
             else nullcontext(None)
         )
-        with lock as resume_checkpoint:
+        with lock:
+            if resume is not None and target.exists():
+                return _recover_published_training_artifact(
+                    resume,
+                    target=target,
+                    plan=plan,
+                    gate=gate,
+                    data_provenance=data_provenance,
+                    source_manifest=source_evidence,
+                    config=config,
+                )
+            resume_checkpoint = (
+                _select_resume_checkpoint(resume) if resume is not None else None
+            )
             runtime = factory(gate)
             if resume is not None:
                 _require_resume_capable_runtime(runtime)
@@ -2287,6 +2292,9 @@ def _recover_published_training_artifact(
     *,
     target: Path,
     plan: FoldSFTPlan,
+    gate: RuntimeGateEvidence,
+    data_provenance: Mapping[str, str],
+    source_manifest: SourceTreeArtifactEvidence,
     config: GateBConfig,
 ) -> TrainingArtifact:
     """Repair only the marker after an already-verified atomic publish."""
@@ -2304,15 +2312,49 @@ def _recover_published_training_artifact(
         )
     published = validate_adapter_artifact(target, config=config)
     _validate_adapter_target_binding(published, plan)
+    expected = {
+        "config_sha256": config.sha256,
+        "split_version": plan.split_version,
+        "split_sha256": plan.split_sha256,
+        "source_groups_sha256": plan.source_groups_sha256,
+        "fold": plan.fold,
+        "excluded_ids_sha256": plan.excluded_ids_sha256,
+        "training_count": len(plan.training_ids),
+        "training_ids_sha256": plan.training_ids_sha256,
+        "training_examples_sha256": plan.training_examples_sha256,
+        "validation_count": len(plan.validation_ids),
+        "validation_ids_sha256": plan.validation_ids_sha256,
+        "validation_examples_sha256": plan.validation_examples_sha256,
+        "train_file_sha256": data_provenance["train_file_sha256"],
+        "exclusions_file_sha256": data_provenance["exclusions_file_sha256"],
+        "split_artifact_sha256": data_provenance["split_artifact_sha256"],
+        "development_shard_sha256": data_provenance[
+            "development_shard_sha256"
+        ],
+        "preflight_sha256": gate.preflight_sha256,
+        "gpu_smoke_sha256": gate.smoke_sha256,
+        "source_manifest_sha256": source_manifest.sha256,
+        "source_tree_sha256": source_manifest.tree_sha256,
+        "source_file_count": source_manifest.file_count,
+    }
+    mismatched = [
+        field_name
+        for field_name, expected_value in expected.items()
+        if getattr(published, field_name) != expected_value
+    ]
+    if mismatched:
+        raise GateBValidationError(
+            f"published adapter does not match its resume contract: {mismatched!r}"
+        )
     artifact = TrainingArtifact(
         path=published.path,
         artifact_sha256=published.artifact_sha256,
         manifest_sha256=published.manifest_sha256,
         checksums_sha256=published.checksums_sha256,
         file_count=published.file_count,
-        training_count=len(plan.training_ids),
-        validation_count=len(plan.validation_ids),
-        training_target_kind=plan.training_target_kind,
+        training_count=published.training_count,
+        validation_count=published.validation_count,
+        training_target_kind=published.training_target_kind,
     )
     _mark_training_resume_complete(context, artifact)
     return artifact

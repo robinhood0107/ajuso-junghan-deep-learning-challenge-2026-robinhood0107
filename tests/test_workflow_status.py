@@ -17,6 +17,7 @@ from deep_challenge.workflow_status import (
     WorkflowStatus,
     development_workflow_status,
     training_workflow_status,
+    validate_run_context,
     write_run_context,
 )
 
@@ -173,6 +174,7 @@ def _write(path: Path, content: str) -> Path:
 
 
 def _commit_source_tree(root: Path) -> str:
+    (root / ".gitignore").write_text("artifacts/\n", encoding="utf-8")
     subprocess.run(("git", "init", "-q", str(root)), check=True)
     subprocess.run(
         ("git", "-C", str(root), "config", "user.email", "tests@example.invalid"),
@@ -236,7 +238,7 @@ def test_run_context_is_immutable_relative_and_hash_bound(tmp_path: Path) -> Non
         "artifacts/analysis/source-manifest.json"
     )
     assert payload["source_manifest"]["tree_sha256"]
-    assert payload["source_manifest"]["file_count"] == 1
+    assert payload["source_manifest"]["file_count"] == 2
     assert payload["configs"]["base"]["path"] == "configs/base.json"
     assert payload["fold_output_paths"] == {
         str(fold): f"artifacts/gate_b/fold-{fold}" for fold in range(5)
@@ -254,6 +256,13 @@ def test_run_context_is_immutable_relative_and_hash_bound(tmp_path: Path) -> Non
     ).hexdigest()
     assert stored_payload_sha256 == expected_payload_sha256 == result.payload_sha256
     assert hashlib.sha256(output.read_bytes()).hexdigest() == result.sha256
+    validated = validate_run_context(output, source_root=root)
+    assert validated.payload_sha256 == result.payload_sha256
+
+    split.write_text('{"split":"changed"}\n', encoding="utf-8")
+    with pytest.raises(GateBValidationError, match="split artifact bytes changed"):
+        validate_run_context(output, source_root=root)
+    split.write_text('{"split":"v1"}\n', encoding="utf-8")
 
     with pytest.raises(GateBValidationError, match="overwrite"):
         write_run_context(
@@ -272,7 +281,7 @@ def test_run_context_is_immutable_relative_and_hash_bound(tmp_path: Path) -> Non
 
     config.write_text('{"base":false}\n', encoding="utf-8")
     with pytest.raises(
-        GateBValidationError, match="clean tracked source tree|source manifest is invalid"
+        GateBValidationError, match="clean source tree|source manifest is invalid"
     ):
         write_run_context(
             root / "artifacts" / "analysis" / "drift-context.json",
@@ -403,23 +412,35 @@ def test_run_context_rejects_commit_mismatch_and_snapshot_drift(
             **common,
         )
 
-    original_sha256_file = workflow_status_module.sha256_file
-    mutated = False
+    untracked_source = root / "untracked.py"
+    untracked_source.write_text("VALUE = 1\n", encoding="utf-8")
+    with pytest.raises(GateBValidationError, match="clean source tree"):
+        write_run_context(
+            root / "artifacts" / "analysis" / "untracked-source.json",
+            source_commit=source_commit,
+            **common,
+        )
+    untracked_source.unlink()
 
-    def mutate_after_first_preflight_hash(path: str | Path) -> str:
-        nonlocal mutated
+    original_sha256_file = workflow_status_module.sha256_file
+    preflight_hash_count = 0
+
+    def mutate_after_second_preflight_hash(path: str | Path) -> str:
+        nonlocal preflight_hash_count
         digest = original_sha256_file(path)
-        if Path(path) == preflight and not mutated:
-            mutated = True
+        if Path(path) == preflight:
+            preflight_hash_count += 1
+        if Path(path) == preflight and preflight_hash_count == 2:
             preflight.write_text('{"changed":true}\n', encoding="utf-8")
         return digest
 
     monkeypatch.setattr(
-        workflow_status_module, "sha256_file", mutate_after_first_preflight_hash
+        workflow_status_module, "sha256_file", mutate_after_second_preflight_hash
     )
-    with pytest.raises(GateBValidationError, match="changed during evidence snapshot"):
+    with pytest.raises(GateBValidationError, match="preflight report bytes changed"):
         write_run_context(
             root / "artifacts" / "analysis" / "drift.json",
             source_commit=source_commit,
             **common,
         )
+    assert (root / "artifacts" / "analysis" / "drift.json").exists()

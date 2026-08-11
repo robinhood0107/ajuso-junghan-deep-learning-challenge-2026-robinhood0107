@@ -29,6 +29,7 @@ from deep_challenge.gate_b import (
 from deep_challenge.gate_b_runtime import (
     GPU_EXECUTION_ACKNOWLEDGEMENT,
     PINNED_QWEN_ALL_LINEAR_TARGET_MODULES,
+    AdapterArtifactEvidence,
     RuntimeTrainingResult,
     TrainingArtifact,
     build_fold_sft_plan,
@@ -946,6 +947,38 @@ def test_qlora_training_resume_repairs_marker_after_atomic_publish(
         nonlocal factory_called
         factory_called = True
         return _TrainingRuntime()
+
+    original_validate_adapter = runtime_module.validate_adapter_artifact
+
+    def wrong_fold_adapter(
+        path: str | Path, *, config: GateBConfig = DEFAULT_GATE_B_CONFIG
+    ) -> AdapterArtifactEvidence:
+        return replace(original_validate_adapter(path, config=config), fold=1)
+
+    monkeypatch.setattr(
+        runtime_module, "validate_adapter_artifact", wrong_fold_adapter
+    )
+    with pytest.raises(GateBValidationError, match="resume contract"):
+        train_qlora_fold(
+            _records(training_ids),
+            _records(validation_ids),
+            split_manifest=manifest,
+            fold=0,
+            excluded_ids=(),
+            **_data_provenance_args(),
+            source_manifest=source_manifest,
+            preflight_artifact=preflight,
+            gpu_smoke_artifact=smoke,
+            output_dir=output,
+            gpu_acknowledgement=GPU_EXECUTION_ACKNOWLEDGEMENT,
+            resume_dir=resume_dir,
+            runtime_factory=unexpected_factory,
+        )
+    assert factory_called is False
+    assert marker_calls == 1
+    monkeypatch.setattr(
+        runtime_module, "validate_adapter_artifact", original_validate_adapter
+    )
 
     artifact = train_qlora_fold(
         _records(training_ids),
