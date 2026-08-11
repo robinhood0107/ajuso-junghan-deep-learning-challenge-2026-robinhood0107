@@ -619,9 +619,6 @@ def train_qlora_fold(
                     resume,
                     target=target,
                     plan=plan,
-                    gate=gate,
-                    data_provenance=data_provenance,
-                    source_manifest=source_evidence,
                     config=config,
                 )
             resume_checkpoint = (
@@ -1660,7 +1657,10 @@ def read_training_resume_status(resume_dir: str | Path) -> TrainingResumeStatus:
     root = supplied.resolve(strict=True)
     if not root.is_dir():
         raise GateBValidationError("resume_dir must be a real directory")
-    contract_sha256 = _training_resume_contract_from_root(root)
+    contract = _training_resume_contract_payload_from_root(root)
+    contract_sha256 = _required_sha256(
+        contract.get("contract_sha256"), "training resume contract sha256"
+    )
     completion_path = root / _TRAINING_RESUME_COMPLETE_FILENAME
     if completion_path.exists() or completion_path.is_symlink():
         if completion_path.is_symlink() or not completion_path.is_file():
@@ -1697,6 +1697,7 @@ def read_training_resume_status(resume_dir: str | Path) -> TrainingResumeStatus:
             artifact_path,
             config=DEFAULT_GATE_B_CONFIG,
         )
+        _validate_adapter_against_resume_contract(artifact, contract)
         expected_artifact = {
             "artifact_sha256": artifact.artifact_sha256,
             "manifest_sha256": artifact.manifest_sha256,
@@ -2033,6 +2034,17 @@ def _locked_training_resume_checkpoint(
 def _training_resume_contract_from_root(root: Path) -> str:
     """Validate the stored self-hash without accepting an unbound contract."""
 
+    payload = _training_resume_contract_payload_from_root(root)
+    return _required_sha256(
+        payload.get("contract_sha256"), "training resume contract sha256"
+    )
+
+
+def _training_resume_contract_payload_from_root(
+    root: Path,
+) -> Mapping[str, object]:
+    """Load one self-hashed resume contract for semantic adapter checks."""
+
     _, payload, _ = _load_json_artifact(
         root / _TRAINING_RESUME_CONTRACT_FILENAME, "training resume contract"
     )
@@ -2043,7 +2055,7 @@ def _training_resume_contract_from_root(root: Path) -> str:
     unhashed.pop("contract_sha256", None)
     if hashlib.sha256(canonical_json_bytes(unhashed)).hexdigest() != stored_digest:
         raise GateBValidationError("training resume contract hash is invalid")
-    return stored_digest
+    return payload
 
 
 def _select_resume_checkpoint(context: _TrainingResumeContext) -> Path | None:
@@ -2292,9 +2304,6 @@ def _recover_published_training_artifact(
     *,
     target: Path,
     plan: FoldSFTPlan,
-    gate: RuntimeGateEvidence,
-    data_provenance: Mapping[str, str],
-    source_manifest: SourceTreeArtifactEvidence,
     config: GateBConfig,
 ) -> TrainingArtifact:
     """Repair only the marker after an already-verified atomic publish."""
@@ -2312,40 +2321,8 @@ def _recover_published_training_artifact(
         )
     published = validate_adapter_artifact(target, config=config)
     _validate_adapter_target_binding(published, plan)
-    expected = {
-        "config_sha256": config.sha256,
-        "split_version": plan.split_version,
-        "split_sha256": plan.split_sha256,
-        "source_groups_sha256": plan.source_groups_sha256,
-        "fold": plan.fold,
-        "excluded_ids_sha256": plan.excluded_ids_sha256,
-        "training_count": len(plan.training_ids),
-        "training_ids_sha256": plan.training_ids_sha256,
-        "training_examples_sha256": plan.training_examples_sha256,
-        "validation_count": len(plan.validation_ids),
-        "validation_ids_sha256": plan.validation_ids_sha256,
-        "validation_examples_sha256": plan.validation_examples_sha256,
-        "train_file_sha256": data_provenance["train_file_sha256"],
-        "exclusions_file_sha256": data_provenance["exclusions_file_sha256"],
-        "split_artifact_sha256": data_provenance["split_artifact_sha256"],
-        "development_shard_sha256": data_provenance[
-            "development_shard_sha256"
-        ],
-        "preflight_sha256": gate.preflight_sha256,
-        "gpu_smoke_sha256": gate.smoke_sha256,
-        "source_manifest_sha256": source_manifest.sha256,
-        "source_tree_sha256": source_manifest.tree_sha256,
-        "source_file_count": source_manifest.file_count,
-    }
-    mismatched = [
-        field_name
-        for field_name, expected_value in expected.items()
-        if getattr(published, field_name) != expected_value
-    ]
-    if mismatched:
-        raise GateBValidationError(
-            f"published adapter does not match its resume contract: {mismatched!r}"
-        )
+    contract = _training_resume_contract_payload_from_root(context.root)
+    _validate_adapter_against_resume_contract(published, contract)
     artifact = TrainingArtifact(
         path=published.path,
         artifact_sha256=published.artifact_sha256,
@@ -2358,6 +2335,79 @@ def _recover_published_training_artifact(
     )
     _mark_training_resume_complete(context, artifact)
     return artifact
+
+
+def _validate_adapter_against_resume_contract(
+    adapter: AdapterArtifactEvidence,
+    contract: Mapping[str, object],
+) -> None:
+    runtime_gate = contract.get("runtime_gate")
+    source_manifest = contract.get("source_manifest")
+    data_provenance = contract.get("data_provenance")
+    split = contract.get("split")
+    training_target = contract.get("training_target")
+    if not all(
+        isinstance(value, Mapping)
+        for value in (
+            runtime_gate,
+            source_manifest,
+            data_provenance,
+            split,
+            training_target,
+        )
+    ):
+        raise GateBValidationError("training resume contract evidence is invalid")
+    assert isinstance(runtime_gate, Mapping)
+    assert isinstance(source_manifest, Mapping)
+    assert isinstance(data_provenance, Mapping)
+    assert isinstance(split, Mapping)
+    assert isinstance(training_target, Mapping)
+    expected = {
+        "config_sha256": contract.get("config_sha256"),
+        "split_version": split.get("version"),
+        "split_sha256": split.get("sha256"),
+        "source_groups_sha256": split.get("source_groups_sha256"),
+        "fold": split.get("fold"),
+        "excluded_ids_sha256": split.get("excluded_ids_sha256"),
+        "training_ids_sha256": split.get("training_ids_sha256"),
+        "training_examples_sha256": split.get("training_examples_sha256"),
+        "validation_ids_sha256": split.get("validation_ids_sha256"),
+        "validation_examples_sha256": split.get("validation_examples_sha256"),
+        "train_file_sha256": data_provenance.get("train_file_sha256"),
+        "exclusions_file_sha256": data_provenance.get("exclusions_file_sha256"),
+        "split_artifact_sha256": data_provenance.get("split_artifact_sha256"),
+        "development_shard_sha256": data_provenance.get(
+            "development_shard_sha256"
+        ),
+        "preflight_sha256": runtime_gate.get("preflight_sha256"),
+        "gpu_smoke_sha256": runtime_gate.get("gpu_smoke_sha256"),
+        "source_manifest_sha256": source_manifest.get("sha256"),
+        "source_tree_sha256": source_manifest.get("tree_sha256"),
+        "source_file_count": source_manifest.get("file_count"),
+        "training_target_kind": training_target.get("kind"),
+        "rationale_candidate_config_sha256": training_target.get(
+            "candidate_config_sha256"
+        ),
+        "rationale_candidate_config_file_sha256": training_target.get(
+            "candidate_config_file_sha256"
+        ),
+        "rationale_corpus_records_sha256": training_target.get(
+            "corpus_records_sha256"
+        ),
+        "rationale_corpus_manifest_sha256": training_target.get(
+            "corpus_manifest_sha256"
+        ),
+        "rationale_corpus_audit_sha256": training_target.get("corpus_audit_sha256"),
+    }
+    mismatched = [
+        field_name
+        for field_name, expected_value in expected.items()
+        if getattr(adapter, field_name) != expected_value
+    ]
+    if mismatched:
+        raise GateBValidationError(
+            f"published adapter does not match its resume contract: {mismatched!r}"
+        )
 
 
 def _validate_training_resume_started(path: Path, contract_sha256: str) -> None:

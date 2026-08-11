@@ -812,7 +812,7 @@ def test_qlora_fold_training_publishes_complete_atomic_no_overwrite_bundle(
 
 
 def test_qlora_training_resume_keeps_checkpoint_and_reuses_exact_contract(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     preflight, smoke = _gate_artifacts(tmp_path)
     manifest = _split_manifest()
@@ -889,6 +889,22 @@ def test_qlora_training_resume_keeps_checkpoint_and_reuses_exact_contract(
     assert complete_status.completion_artifact_sha256 == artifact.artifact_sha256
 
     completion_marker = resume_dir / "training-complete.json"
+    original_validate_adapter = runtime_module.validate_adapter_artifact
+
+    def wrong_fold_adapter(
+        path: str | Path, *, config: GateBConfig = DEFAULT_GATE_B_CONFIG
+    ) -> AdapterArtifactEvidence:
+        return replace(original_validate_adapter(path, config=config), fold=1)
+
+    monkeypatch.setattr(
+        runtime_module, "validate_adapter_artifact", wrong_fold_adapter
+    )
+    with pytest.raises(GateBValidationError, match="resume contract"):
+        read_training_resume_status(resume_dir)
+    monkeypatch.setattr(
+        runtime_module, "validate_adapter_artifact", original_validate_adapter
+    )
+
     completion_payload = json.loads(completion_marker.read_text(encoding="utf-8"))
     completion_payload["artifact_sha256"] = "f" * 64
     completion_marker.write_text(json.dumps(completion_payload), encoding="utf-8")
