@@ -28,10 +28,12 @@ rationale bank를 만든 뒤, 고정 Qwen base에 QLoRA SFT하는 경로다.
 
 중요한 현재 결론은 다음과 같다.
 
-- historic v1과 fresh v2의 128문제 teacher pilot은 모두 fail-closed됐다.
-- 두 실패 pilot을 재개하거나 고쳐 쓰지 않는다. v3는 같은 128행에서 독립 검증 문구만
-  바꾼 새 versioned prompt/config/ledger로 실행한다.
-- 새 pilot, source bank, logical audit, corpus/SFT preflight가 모두 green이 되기 전에는
+- historic v1, fresh v2, v3의 128문제 teacher pilot은 모두 fail-closed됐다.
+- 세 실패 pilot을 재개하거나 고쳐 쓰지 않는다. v3는 initial 52/128로 103/128 gate에
+  미달해 repair 없이 종료됐다.
+- versioned synthetic live-eval harness가 설계·승인되기 전에는 v4 config를 allowlist에
+  추가하거나 actual teacher를 다시 호출하지 않는다.
+- 향후 승인된 pilot, source bank, logical audit, corpus/SFT preflight가 모두 green이 되기 전에는
   GPU rationale 학습을 시작하지 않는다.
 - leaderboard/test/locked holdout은 teacher, 학습, prompt 개선, self-training seed에 절대
   쓰지 않는다.
@@ -316,6 +318,27 @@ fresh pilot-v2 snapshot:
 - aggregate usage: input 117,241; output 84,014; reasoning telemetry 73,127;
   cached input 0; total attempts 8; total latency 1,809,811 ms
 
+teacher-pilot-v3 snapshot:
+
+- run tag: `20260811T153322KST`
+- source tree SHA:
+  `7b55a352902230325bbf25e6a5bcd81e32b8d488fd23af9f5619b229ad196963`
+- plan SHA:
+  `efed9c4163a673e03ada9862b16e545e05abd0d04b057ec67fed130c2838265b`
+- total: 128 training questions; initial chunks: 32×4; worker: 1
+- initial invocations: parsed 2, failed 2
+- first finalize: accepted 52/128, rejected 12, pending 76
+- 103/128 threshold 미달로 repair invocation: 0
+- outcome: `failed_closed_initial_threshold_unreachable`
+- source JSONL/manifest, logical audit, full bank, GPU started: false
+- leaderboard/test used: false; locked holdout accessed: false
+- raw-free final artifact:
+  `artifacts/analysis/gate-b-teacher-pilot-v3-20260811T153322KST-final-v3.json`
+- final artifact SHA-256:
+  `6b5014b3da16fb31a1334ba101ffa1e6031a1aaac8db0369ac7b9ae81790f5e7`
+- aggregate usage: input 38,028; output 20,753; reasoning telemetry 16,238;
+  cached input 15,104; total attempts 4; total latency 1,938,856 ms
+
 이 historic ledger는 current safe command의
 `shell_environment_policy.inherit="none"` 이전에 생성됐다. current loader가 stored argv를
 재구성한 safe argv와 비교할 때 의도적으로 reject한다. 따라서 다음을 금지한다.
@@ -327,20 +350,19 @@ fresh pilot-v2 snapshot:
 - 17개 실패 row에 organizer answer를 알려 주고 rationale을 다시 쓰게 하기
 - 승인된 111개만 partial bank로 승격하기
 
-historic v1와 fresh v2 artifact 모두 실패 evidence로만 보존한다. 다음 실험은 새
-prompt/config/version/tag와 새 immutable ledger를 사용한다.
+v1/v2/v3 artifact는 모두 실패 evidence로만 보존한다. status/finalize를 읽는 것은 허용하지만
+어느 ledger에도 teacher run을 추가하지 않는다.
 
-6. 다음 실제 개발 목표: teacher candidate v3 검증·동결·live pilot
-=========================================================
+6. 다음 실제 개발 목표: versioned synthetic live-eval harness 설계·승인
+=================================================================
 
 GPU 없이 다음을 수행한다.
 
-1. v1 prompt bytes와 plan/receipt/sidecar 역사 schema가 그대로인지 synthetic regression으로
-   확인한다. v2 이상 policy-bound profile은 prompt-policy SHA를 필수로 유지하고 unknown
-   prompt version은 fail-closed한다.
+1. `TODOS.md`의 조건대로 v1/v2/v3 prompt bytes와 plan/receipt/sidecar 역사 schema를
+   보존하는 synthetic live-eval harness를 먼저 설계하고 별도 승인을 받는다.
 2. raw ledger를 재해석하지 않고 공개-safe aggregate 실패 사실과 synthetic cases만 사용한다.
-3. v1/v2 config나 artifact를 덮어쓰지 않는다. v3는 별도
-   `codex-gpt-5.6-sol-teacher-pilot-v3.json` filename/schema/label/version을 사용한다.
+3. v1/v2/v3 config나 artifact를 덮어쓰지 않는다. 승인 전 v4 filename/schema/config를
+   source allowlist에 추가하지 않는다.
 4. 아래 safety fields와 실행 정책은 완화하지 않는다.
    - provider: ChatGPT-login Codex CLI
    - model: `gpt-5.6-sol`
@@ -372,8 +394,10 @@ v3의 고정 hash는 다음과 같다.
 - prompt template SHA: `cf56fc2c021410337f8be8f5f519912eabf6390aa8892ecd92cac1ced6175c72`
 - prompt policy SHA: `953d62e283d5237f29b2145b5ed513246d737acd7ec40879450d7bcc8d08402b`
 
-새 candidate의 변경 이유와 expected failure mode를 docs에 기록하고, 전체 CPU verification을
-통과한 committed source를 새 manifest로 동결하기 전 actual teacher를 호출하지 않는다.
+이 hash는 v3 forensic evidence 전용이다. harness 설계는 transport/schema/model-quality
+failure를 synthetic하게 분리하고 versioned evaluation contract를 제시해야 한다. 사용자의 별도
+승인과 전체 CPU verification을 모두 통과하기 전 새 config나 actual teacher 호출로 넘어가지
+않는다.
 
 7. 매 구현 묶음의 mandatory CPU 검증
 ====================================
@@ -411,13 +435,12 @@ git diff --check
 기본 `.venv`에 GPU package를 억지로 섞지 않는다. GPU runtime은 ext4의 별도 `$GPU_ENV`를
 사용한다.
 
-8. 다음 128문제 pilot gate
-=========================
+8. 완료된 v3 128문제 pilot gate
+=============================
 
-fresh pilot-v2는 initial 80% gate는 넘었지만 7 exhaustion으로 fail-closed됐다. 따라서 그
-ledger/tag를 재개하지 않고, 새로운 v3 prompt/config/tests가 green일 때만
-`docs/10_GATE_B_CPU_READY_RUNBOOK.md`의 teacher plan/run/status/finalize 명령을 current CLI
-help와 대조한 뒤 새 unique `RUN_TAG`로 실행한다.
+v3는 `20260811T153322KST`에 아래 계약으로 실행됐지만 initial 52/128로 fail-closed됐다.
+따라서 아래 scope와 기준은 forensic 기록이며 새 v3 tag를 만들거나 기존 tag를 resume하지
+않는다.
 
 pilot scope:
 
@@ -445,8 +468,9 @@ pilot scope:
 한 조건이라도 실패하면 full v1 bank와 GPU candidate를 시작하지 않는다. exhaustion이 하나라도
 생기면 남은 retryable row에도 teacher를 더 호출하지 않는다. partial source를 쓰지 않고
 raw-free failure artifact와 blocker만 남긴다. prompt를 수정하면 같은 output path를 덮어쓰지
-말고 새 version/tag에서 처음부터 다시 pilot한다. 이 동일 128행 비교는 development prompt
-gate이며 일반화 성능 증거로 주장하지 않는다.
+말고 새 version/tag에서 처음부터 다시 pilot한다. 다만 v4는 synthetic harness 설계·승인 전
+allowlist에 추가하지 않는다. 이 동일 128행 비교는 development prompt gate이며 일반화 성능
+증거로 주장하지 않는다.
 
 9. logical audit와 pilot authorization
 =====================================
@@ -782,20 +806,21 @@ historical diagnostic, parser-only rescore를 current selection score로 표현�
 1. Git/PR/worktree read-only 확인
 2. mandatory docs/config/source/tests 완독
 3. mandatory CPU validation 재실행
-4. v1/v2/v3 prompt/config/receipt/sidecar compatibility regression 확인
-5. Ruff/full pytest/checksum/public guard
-6. code/config/tests/docs commit과 clean worktree 확인
-7. unique v3 source manifest·plan/status path 사전 부재 확인
-8. fresh 128-row question-only v3 pilot 32×4/worker 1
-9. first finalize 103/128 gate와 bounded repair/finalize waves
-10. 결과에 따라 raw-free fail-closed 또는 64→60 logical audit로 진행
+4. v3 raw-free final/status/checksum과 source JSONL/manifest 부재 재검증
+5. `TODOS.md`의 synthetic live-eval harness 요구사항 정리
+6. v1/v2/v3 prompt/config/receipt/sidecar compatibility regression 유지
+7. harness design을 문서화하되 v4 config/allowlist는 만들지 않기
+8. 별도 사용자 승인 전 actual teacher 호출하지 않기
+9. full bank, logical audit, corpus, GPU가 잠긴 상태인지 확인
+10. Kaggle upload는 계속 별도 명시 요청 전 금지
 
-이 순서를 바꾸지 말고, 새 pilot이 green이 되기 전에는 full bank나 GPU 작업을 시작하지 않는다.
+이 순서를 바꾸지 말고, harness와 새 version이 별도 승인되기 전에는 teacher, full bank, GPU
+작업을 시작하지 않는다.
 ````
 
 ## 이 handoff의 핵심
 
-새 세션이 가장 먼저 해결할 문제는 GPU 학습이 아니다. 안전 계약을 유지한 새 teacher
-candidate가 fresh 128-row pilot에서 **128/128 within three attempts**와 별도 **60/64 logical
-audit**을 통과하게 만드는 것이다. 그 뒤에만 full fold-0 bank, rationale corpus, GPU harm
-screen 순서로 진행한다.
+새 세션이 가장 먼저 해결할 문제는 GPU 학습이나 v4 prompt가 아니다. v3가 initial
+**52/128**로 실패한 뒤 같은 live loop를 반복하지 않도록 **versioned synthetic live-eval
+harness**를 설계하고 승인받는 것이다. 승인된 새 candidate가 나중에 128/128과 60/64 audit을
+통과한 뒤에만 full fold-0 bank, rationale corpus, GPU harm screen 순서로 진행한다.

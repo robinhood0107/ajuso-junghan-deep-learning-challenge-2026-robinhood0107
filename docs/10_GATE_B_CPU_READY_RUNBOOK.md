@@ -2,7 +2,7 @@
 
 기준 시각: **2026-08-11 KST**
 대상 호스트: **WSL2 Ubuntu 24.04 + NVIDIA GeForce RTX 4070 SUPER 12GB**
-현재 판정: **parser v2 current-source base 완료, answer-only QLoRA 중단, teacher-pilot-v3 CPU READY·live pilot 미실행**
+현재 판정: **parser v2 current-source base 완료, answer-only QLoRA 중단, teacher-pilot-v3 initial threshold fail-closed·후속 teacher/GPU 잠금**
 
 이 문서는 현재 코드의 CLI와 정확히 일치하는 실행 순서다. GPU가 필요한 명령은 맨
 뒤의 별도 절에만 둔다. 2026-08-10 이전 source final smoke와 별도로, training cache-off와
@@ -78,6 +78,9 @@ SHA는 각각
 `9480d8d083f1f21b6c78bbf8607de70393ff1011e3919b32bce5a4434499fc75`이며, forensic
 evidence 전용으로 남긴다. failed `teacher-pilot-v2` config와 ledger도 forensic evidence
 전용이며 새 v3 plan/status/finalize 입력으로 쓰지 않는다.
+v3 config도 `20260811T153322KST` 한 번의 고정 pilot에서 실패 evidence가 됐다. 이 config로
+새 plan을 만들거나 기존 plan을 resume하지 않는다. versioned synthetic live-eval harness가
+설계·승인되기 전에는 v4 config를 allowlist에 추가하지 않는다.
 
 현재 canonical 사실은 다음과 같다.
 
@@ -157,6 +160,10 @@ validation 2,942행이다.
 
 ### 3.1 ChatGPT 로그인 Codex teacher bank (GPU 없음)
 
+> **실행 잠금:** 아래 v3 명령은 `20260811T153322KST`에 사용한 계약을 재현하는 forensic
+> 기록이다. 해당 pilot은 initial 52/128로 실패했으므로 새 tag 실행, resume, repair,
+> logical audit, full bank를 현재 승인하지 않는다.
+
 이 경로는 API key나 Kaggle token을 사용하지 않는다. 현재 ChatGPT 로그인 상태의 local
 Codex CLI만 사용하고, 최종 student/추론 모델은 여전히 고정 Qwen 하나뿐이다. Codex에는
 organizer train의 **question만** 전달한다. local finalizer가 나중에 organizer reference와
@@ -170,7 +177,7 @@ authentication state만 짧게 복사한다. 전역 skills/config/API 환경변�
 올라가지 않는다. auth state의 복사본은 실행 중 별도 temporary tree에만 존재하며 종료 시
 정리된다. raw-free status snapshot만 `artifacts/analysis/`에 쓸 수 있다.
 
-먼저 `teacher-pilot-v3` config로 fold 0의 정확한 `training_ids(0)`에서 stable-hash
+실행 당시에는 `teacher-pilot-v3` config로 fold 0의 정확한 `training_ids(0)`에서 stable-hash
 sign/magnitude stratified 128문제 pilot plan을 만든다. `gate-b-teacher-v2-*`는 이 pilot의
 새 이름이 아니라, 이후 positive harm screen 뒤 remaining development-CV bank를 확장하는
 별도 명령이다. full 11,794문제 bank v1은 `--pilot-size`를 생략해 만들 수 있지만, 이 경우
@@ -300,9 +307,17 @@ exhausted 17로 fail-closed 됐다. 이 plan에서 logical audit, full v1 bank, 
 승인되고 7개가 exhaustion되어 fail-closed됐다. raw-free 결과는
 `artifacts/analysis/gate-b-teacher-pilot-v2-20260811T132301KST-final-v2.json` (SHA-256
 `5d50fdb41c0503546e673393d97b24bf7dc5c92e52577738eada35c143ac874e`)에 고정했다. 이 tag의
-ledger를 더 실행하거나 partial source를 materialize하지 않는다. 새 v3 prompt/config는 별도
-version/tag에서만 실행하며 v1/v2 ledger를 resume하지 않는다. v3 pilot이 위의 원자적 성공
-조건을 모두 충족하기 전에는 이 절 아래의 audit/full-bank/GPU 명령을 실행하지 않는다.
+ledger를 더 실행하거나 partial source를 materialize하지 않는다.
+
+`20260811T153322KST` v3 run은 source tree SHA
+`7b55a352902230325bbf25e6a5bcd81e32b8d488fd23af9f5619b229ad196963`, plan SHA
+`efed9c4163a673e03ada9862b16e545e05abd0d04b057ec67fed130c2838265b`에 고정됐다. initial
+4호출 중 parsed 2/failed 2였고 local finalizer는 accepted 52, rejected 12, pending 76을
+기록했다. `52 < 103`이므로 repair invocation은 0이며 source JSONL/manifest도 생성되지
+않았다. raw-free final artifact는
+`artifacts/analysis/gate-b-teacher-pilot-v3-20260811T153322KST-final-v3.json` (SHA-256
+`6b5014b3da16fb31a1334ba101ffa1e6031a1aaac8db0369ac7b9ae81790f5e7`)이다. 이 결과로 아래
+audit/full-bank/corpus/GPU 명령은 모두 잠기며 v1/v2/v3 ledger를 resume하지 않는다.
 
 complete private bank가 생기면 audit agent에는 problem, candidate rationale와 candidate가 주장한
 final integer만 보낸다. organizer reference answer를 다시 열거나 전달하지 않는다. audit의

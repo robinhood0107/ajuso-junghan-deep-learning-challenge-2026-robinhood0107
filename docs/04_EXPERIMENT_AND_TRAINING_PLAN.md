@@ -52,11 +52,14 @@
 - no-API teacher 실행은 ChatGPT 로그인 Codex CLI `gpt-5.6-sol`만 허용한다. historic v1와
   failed `teacher-pilot-v2` ledger는 모두 forensic failure evidence로만 남기고 재개하지 않는다.
   v2는 first pass 105/128(82.03%) 뒤 최대 3회에서 106/128 승인·7 exhaustion으로
-  fail-closed됐다. 다음 후보 `teacher-pilot-v3`는 같은 deterministic 128행에서 풀이를 먼저
+  fail-closed됐다. `teacher-pilot-v3`는 같은 deterministic 128행에서 풀이를 먼저
   도출한 뒤 조건·별도 산술 경로·feasibility·integrality·sign을 독립 검증하는 quality 변수만
   추가한다. JSON suffix와 validator, question-only plan, 32문제×4 initial chunk SHA, append-only
   event/parsed/assessment ledger, retry cap 3, initial high/repair xhigh, pilot worker 1/full
   bank 최대 worker 2, raw-free status/lock PID를 고정한다.
+  실제 v3 initial은 4호출 중 parsed 2/failed 2, local 승인 52/128로 103/128 gate에 미달했다.
+  따라서 repair 없이 fail-closed했고 v1/v2/v3 ledger를 모두 재개하지 않는다. versioned
+  synthetic live-eval harness가 설계·승인되기 전에는 v4 config를 allowlist에 추가하지 않는다.
   CLI는 빈 workdir와 auth-only temporary `CODEX_HOME`을 사용해 전역 skill/config/API token을
   넘기지 않는다. Codex tool/error/schema/ID/order violation은 fail-closed이며, reference
   answer는 local finalizer에만 있고 prompt에는 절대 들어가지 않는다.
