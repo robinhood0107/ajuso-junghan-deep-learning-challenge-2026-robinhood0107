@@ -1,6 +1,6 @@
 [project]
 name = "deep-challenge-toolkit"
-version = "0.1.0"
+version = "0.1.1.0"
 description = "Offline-first data, evaluation, and submission toolkit for Deep Learning Challenge 2026"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
