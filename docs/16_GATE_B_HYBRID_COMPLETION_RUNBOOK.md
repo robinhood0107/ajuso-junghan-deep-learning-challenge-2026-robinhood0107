@@ -32,7 +32,8 @@ manifest를 만든 뒤 tracked source/config/test/docs가 바뀌면 해당 `RUN_
 
 다음 공개 schema를 추가한다.
 
-- `gate-b-base-development-oof-v1`: 고정 base의 정확한 5개 fold와 development OOF
+- `gate-b-base-development-oof-v2`: 고정 base의 정확한 5개 fold와 development OOF,
+  fold별 source/config/B0/device fingerprint의 단일성
   전체를 증명한다.
 - `gate-b-base-selection-freeze-v1`: `primary=base`, `fallback=null`,
   `routing_policy=primary_only`인 단일 방법 freeze다.
@@ -79,8 +80,11 @@ uv run deep-challenge verify-base-development-oof \
   --output "$RUN_ROOT/base-development-oof.json"
 ```
 
-이 명령은 fold 누락·중복, validation ID 중복·누락, 다른 split/config/checkpoint/source/B0,
-동일 run evidence 재사용을 거부한다. base OOF가 qualified되지 않으면 teacher로 진행하지 않는다.
+이 명령은 fold 누락·중복, validation ID 중복·누락, 다른 split/config/checkpoint/source/B0/device,
+동일 run evidence 재사용을 거부한다. v1은 증거 읽기만 허용하고 freeze에는 사용할 수 없다.
+freeze 생성 시와 holdout 진입 시에는 5개 fold의 records·manifest와 그 source/config/B0/device
+입력을 모두 다시 해시하고 binding을 검증한다. base OOF가 v2로 qualified되지 않으면 teacher로
+진행하지 않는다.
 
 `freeze-development-base`는 teacher v5가 terminal이거나 승인된 candidate가 최종 OOF gate를
 통과하지 못했을 때만 사용한다. teacher 결과가 결정되기 전에는 실행하지 않는다.
