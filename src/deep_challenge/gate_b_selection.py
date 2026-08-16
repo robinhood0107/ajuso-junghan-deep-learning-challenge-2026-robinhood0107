@@ -50,7 +50,8 @@ _MAX_JSONL_LINE_BYTES = 16 * 1024 * 1024
 _COMPARISON_SCHEMA = "gate-b-development-comparison-v2"
 _PROBE_DECISION_SCHEMA = "gate-b-candidate-probe-decision-v1"
 _OOF_COMPARISON_SCHEMA = "gate-b-development-oof-comparison-v1"
-_BASE_OOF_SCHEMA = "gate-b-base-development-oof-v1"
+_BASE_OOF_V1_SCHEMA = "gate-b-base-development-oof-v1"
+_BASE_OOF_SCHEMA = "gate-b-base-development-oof-v2"
 _BASE_OOF_FOLD_COUNT = 5
 _FREEZE_SCHEMA = "gate-b-selection-freeze-v3"
 _BASE_FREEZE_SCHEMA = "gate-b-base-selection-freeze-v1"
@@ -230,6 +231,7 @@ class _ValidatedRun:
     manifest_path: Path
     manifest_sha256: str
     manifest_size_bytes: int
+    execution_provenance_sha256: str
     checkpoint_sha256: str
     config_sha256: str
     eligibility_ids_sha256: str
@@ -1178,11 +1180,23 @@ def verify_base_development_oof(
             raise GateBValidationError("base OOF method provenance is invalid")
         validated[fold] = run
 
+    execution_provenance = {
+        run.execution_provenance_sha256 for run in validated.values()
+    }
+    if len(execution_provenance) != 1:
+        raise GateBValidationError(
+            "base OOF folds do not share one execution provenance"
+        )
+    execution_provenance_sha256 = next(iter(execution_provenance))
+
     fold_evidence = {
         str(fold): {
             **_run_evidence(validated[fold], len(expected_by_fold[fold])),
             "method_kind": FIXED_BASE_METHOD_KIND,
             "training_method_fingerprint": _base_method_fingerprint(),
+            "execution_provenance_sha256": (
+                validated[fold].execution_provenance_sha256
+            ),
             "adapter_artifact": None,
         }
         for fold in range(split_manifest.n_folds)
@@ -1235,6 +1249,8 @@ def verify_base_development_oof(
             "exact_fold_coverage": True,
             "validation_ids_unique": True,
             "run_evidence_unique": True,
+            "execution_provenance_consistent": True,
+            "execution_provenance_sha256": execution_provenance_sha256,
             "checkpoint_sha256": BASE_MODEL_CHECKPOINT_SHA256,
             "training_method_fingerprint": _base_method_fingerprint(),
         },
@@ -1697,9 +1713,13 @@ def freeze_base_development_selection(
 
     oof_path, oof, oof_file_sha = _load_hashed_json_artifact(
         base_oof_artifact,
-        expected_schema=_BASE_OOF_SCHEMA,
+        expected_schema=(_BASE_OOF_V1_SCHEMA, _BASE_OOF_SCHEMA),
     )
-    _require_base_oof_qualification(oof)
+    if _require_base_oof_qualification(oof) != _BASE_OOF_SCHEMA:
+        raise GateBValidationError(
+            "legacy base OOF v1 is not selection-eligible; regenerate v2"
+        )
+    _revalidate_base_oof_fold_evidence(oof)
     primary = _validated_label(primary_label)
     if primary != oof.get("base_label"):
         raise GateBValidationError("primary_label does not match base OOF evidence")
@@ -2124,9 +2144,12 @@ def _require_complete_oof_freeze(freeze: Mapping[str, Any]) -> None:
         raise GateBValidationError("final selection must be frozen from complete OOF evidence")
 
 
-def _require_base_oof_qualification(oof: Mapping[str, Any]) -> None:
+def _require_base_oof_qualification(oof: Mapping[str, Any]) -> str:
+    schema_version = oof.get("schema_version")
+    if schema_version not in {_BASE_OOF_V1_SCHEMA, _BASE_OOF_SCHEMA}:
+        raise GateBValidationError("base OOF schema is unsupported")
     expected = {
-        "schema_version": _BASE_OOF_SCHEMA,
+        "schema_version": schema_version,
         "model_id": OFFICIAL_MODEL_ID,
         "revision": PINNED_MODEL_REVISION,
         "route": "direct_answer",
@@ -2197,6 +2220,7 @@ def _require_base_oof_qualification(oof: Mapping[str, Any]) -> None:
     ):
         raise GateBValidationError("base OOF problem count is invalid")
     total_fold_count = 0
+    execution_provenance: set[str] = set()
     for fold in range(n_folds):
         fold_evidence = fold_runs[str(fold)]
         if not isinstance(fold_evidence, Mapping):
@@ -2214,10 +2238,19 @@ def _require_base_oof_qualification(oof: Mapping[str, Any]) -> None:
         if isinstance(fold_count, bool) or not isinstance(fold_count, int) or fold_count <= 0:
             raise GateBValidationError("base OOF fold problem count is invalid")
         total_fold_count += fold_count
+        if schema_version == _BASE_OOF_SCHEMA:
+            execution_provenance.add(
+                _required_sha256(
+                    fold_evidence.get("execution_provenance_sha256"),
+                    "base OOF fold execution_provenance_sha256",
+                )
+            )
     if total_fold_count != problem_count:
         raise GateBValidationError("base OOF fold counts do not match the OOF union")
     qualification = oof.get("qualification")
-    if not isinstance(qualification, Mapping) or dict(qualification) != {
+    if not isinstance(qualification, Mapping):
+        raise GateBValidationError("base OOF qualification flags are invalid")
+    common_qualification = {
         "evidence_scope": "complete_out_of_fold_union",
         "fixed_base_only": True,
         "exact_fold_coverage": True,
@@ -2225,8 +2258,155 @@ def _require_base_oof_qualification(oof: Mapping[str, Any]) -> None:
         "run_evidence_unique": True,
         "checkpoint_sha256": BASE_MODEL_CHECKPOINT_SHA256,
         "training_method_fingerprint": _base_method_fingerprint(),
+    }
+    if schema_version == _BASE_OOF_V1_SCHEMA:
+        if dict(qualification) != common_qualification:
+            raise GateBValidationError("base OOF qualification flags are invalid")
+        return schema_version
+    if len(execution_provenance) != 1:
+        raise GateBValidationError(
+            "base OOF fold execution provenance is inconsistent"
+        )
+    execution_provenance_sha256 = _required_sha256(
+        qualification.get("execution_provenance_sha256"),
+        "base OOF execution_provenance_sha256",
+    )
+    if execution_provenance != {execution_provenance_sha256}:
+        raise GateBValidationError(
+            "base OOF qualification execution provenance does not match its folds"
+        )
+    if dict(qualification) != {
+        **common_qualification,
+        "execution_provenance_consistent": True,
+        "execution_provenance_sha256": execution_provenance_sha256,
     }:
         raise GateBValidationError("base OOF qualification flags are invalid")
+    return schema_version
+
+
+def _revalidate_base_oof_fold_evidence(oof: Mapping[str, Any]) -> None:
+    """Re-hash every fold and its execution inputs before a freeze is trusted."""
+
+    if oof.get("schema_version") != _BASE_OOF_SCHEMA:
+        raise GateBValidationError("base OOF v2 is required for fold revalidation")
+    n_folds = oof.get("n_folds")
+    deployment_fold = oof.get("deployment_fold")
+    label = _validated_label(_required_string(oof.get("base_label"), "base label"))
+    runs = oof.get("runs")
+    if not isinstance(runs, Mapping) or set(runs) != {label}:
+        raise GateBValidationError("base OOF runs must contain exactly the base label")
+    evidence = runs[label]
+    if not isinstance(evidence, Mapping):
+        raise GateBValidationError("base OOF run evidence is invalid")
+    fold_runs = evidence.get("fold_runs")
+    if (
+        isinstance(n_folds, bool)
+        or not isinstance(n_folds, int)
+        or isinstance(deployment_fold, bool)
+        or not isinstance(deployment_fold, int)
+        or not isinstance(fold_runs, Mapping)
+        or set(fold_runs) != {str(fold) for fold in range(n_folds)}
+    ):
+        raise GateBValidationError("base OOF fold run evidence is incomplete")
+    qualification = oof.get("qualification")
+    if not isinstance(qualification, Mapping):
+        raise GateBValidationError("base OOF qualification flags are invalid")
+    expected_execution_provenance = _required_sha256(
+        qualification.get("execution_provenance_sha256"),
+        "base OOF execution_provenance_sha256",
+    )
+
+    run_identities: set[tuple[str, str]] = set()
+    observed_execution_provenance: set[str] = set()
+    for fold in range(n_folds):
+        fold_evidence = fold_runs[str(fold)]
+        if not isinstance(fold_evidence, Mapping):
+            raise GateBValidationError("base OOF fold evidence is invalid")
+        records_path = Path(
+            _required_string(fold_evidence.get("path"), "base fold run path")
+        )
+        if records_path.is_symlink() or not records_path.is_file():
+            raise GateBValidationError("base OOF fold run file is missing or unsafe")
+        records_sha256 = _required_sha256(
+            fold_evidence.get("sha256"), "base fold run sha256"
+        )
+        if sha256_file(records_path) != records_sha256:
+            raise GateBValidationError("base OOF fold run bytes changed after qualification")
+
+        manifest_path = Path(
+            _required_string(
+                fold_evidence.get("manifest_path"), "base fold run manifest path"
+            )
+        )
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            raise GateBValidationError(
+                "base OOF fold run manifest is missing or unsafe"
+            )
+        manifest_sha256 = _required_sha256(
+            fold_evidence.get("manifest_sha256"), "base fold run manifest sha256"
+        )
+        if sha256_file(manifest_path) != manifest_sha256:
+            raise GateBValidationError(
+                "base OOF fold run manifest changed after qualification"
+            )
+        identity = (records_sha256, manifest_sha256)
+        if identity in run_identities:
+            raise GateBValidationError("base OOF reuses run evidence across folds")
+        run_identities.add(identity)
+
+        _, run_manifest = _load_run_manifest(manifest_path)
+        execution_provenance_sha256 = _validate_execution_evidence(
+            run_manifest.get("execution_evidence"),
+            expected_config_sha256=DEFAULT_GATE_B_CONFIG.sha256,
+        )
+        if execution_provenance_sha256 != _required_sha256(
+            fold_evidence.get("execution_provenance_sha256"),
+            "base OOF fold execution_provenance_sha256",
+        ):
+            raise GateBValidationError(
+                "base OOF fold execution provenance changed after qualification"
+            )
+        observed_execution_provenance.add(execution_provenance_sha256)
+
+        run_binding = {
+            "checkpoint_sha256": fold_evidence.get("checkpoint_sha256"),
+            "config_sha256": fold_evidence.get("config_sha256"),
+            "eligibility_ids_sha256": fold_evidence.get("eligibility_ids_sha256"),
+            "model_id": oof.get("model_id"),
+            "revision": oof.get("revision"),
+            "route": oof.get("route"),
+            "split_version": oof.get("split_version"),
+            "split_sha256": oof.get("split_sha256"),
+            "source_groups_sha256": oof.get("source_groups_sha256"),
+            "fold": fold,
+            "partition": oof.get("deployment_partition"),
+        }
+        mismatched = [
+            key for key, value in run_binding.items() if run_manifest.get(key) != value
+        ]
+        if mismatched:
+            raise GateBValidationError(
+                "base OOF fold run binding changed after qualification: "
+                f"{mismatched!r}"
+            )
+
+    if observed_execution_provenance != {expected_execution_provenance}:
+        raise GateBValidationError(
+            "base OOF execution provenance no longer matches its qualification"
+        )
+    deployment_evidence = fold_runs[str(deployment_fold)]
+    if not isinstance(deployment_evidence, Mapping):
+        raise GateBValidationError("base OOF deployment fold evidence is invalid")
+    mismatched_deployment = [
+        key
+        for key, value in deployment_evidence.items()
+        if evidence.get(key) != value
+    ]
+    if mismatched_deployment:
+        raise GateBValidationError(
+            "base OOF deployment evidence differs from its fold evidence: "
+            f"{mismatched_deployment!r}"
+        )
 
 
 def _load_supported_freeze_artifact(
@@ -2261,9 +2441,13 @@ def _load_supported_freeze_artifact(
         raise GateBValidationError("base-only freeze lacks OOF evidence")
     oof_path, oof, oof_file_sha = _load_hashed_json_artifact(
         _required_string(comparison.get("path"), "base OOF path"),
-        expected_schema=_BASE_OOF_SCHEMA,
+        expected_schema=(_BASE_OOF_V1_SCHEMA, _BASE_OOF_SCHEMA),
     )
-    _require_base_oof_qualification(oof)
+    if _require_base_oof_qualification(oof) != _BASE_OOF_SCHEMA:
+        raise GateBValidationError(
+            "legacy base OOF v1 is not selection-eligible; regenerate v2"
+        )
+    _revalidate_base_oof_fold_evidence(oof)
     if (
         comparison.get("sha256") != oof_file_sha
         or comparison.get("payload_sha256") != oof.get("payload_sha256")
@@ -2430,7 +2614,7 @@ def _load_development_run(
     if not path.is_file():
         raise GateBValidationError(f"development JSONL must be a regular file: {path}")
     manifest_path, run_manifest = _load_run_manifest(named.manifest_path)
-    _validate_execution_evidence(
+    execution_provenance_sha256 = _validate_execution_evidence(
         run_manifest.get("execution_evidence"),
         expected_config_sha256=DEFAULT_GATE_B_CONFIG.sha256,
     )
@@ -2569,6 +2753,7 @@ def _load_development_run(
         manifest_path=manifest_path,
         manifest_sha256=sha256_file(manifest_path),
         manifest_size_bytes=manifest_path.stat().st_size,
+        execution_provenance_sha256=execution_provenance_sha256,
         checkpoint_sha256=next(iter(checkpoint_values)),
         config_sha256=next(iter(config_values)),
         eligibility_ids_sha256=eligibility_digest,
@@ -2754,7 +2939,7 @@ def _validate_execution_evidence(
     value: object,
     *,
     expected_config_sha256: str,
-) -> None:
+) -> str:
     """Fail closed unless a run still binds to actual B0/source/config bytes."""
 
     if not isinstance(value, Mapping) or set(value) != _EXECUTION_EVIDENCE_KEYS:
@@ -2816,7 +3001,41 @@ def _validate_execution_evidence(
         label="GPU smoke report",
         expected_sha256_key="sha256",
     )
-    _required_string(runtime.get("gpu_device_name"), "runtime-gate GPU device name")
+    gpu_device_name = _required_string(
+        runtime.get("gpu_device_name"), "runtime-gate GPU device name"
+    )
+    preflight_report = runtime["preflight_report"]
+    gpu_smoke_report = runtime["gpu_smoke_report"]
+    if not isinstance(preflight_report, Mapping) or not isinstance(
+        gpu_smoke_report, Mapping
+    ):
+        raise GateBValidationError(
+            "development runtime-gate file evidence is invalid"
+        )
+    normalized = {
+        "schema_version": "gate-b1-execution-provenance-fingerprint-v1",
+        "source_manifest_sha256": _required_sha256(
+            source.get("sha256"), "source manifest evidence sha256"
+        ),
+        "source_tree_sha256": _required_sha256(
+            source.get("tree_sha256"), "source manifest evidence tree_sha256"
+        ),
+        "source_file_count": source_file_count,
+        "config_file_sha256": _required_sha256(
+            config.get("sha256"), "config evidence sha256"
+        ),
+        "config_sha256": _required_sha256(
+            config.get("config_sha256"), "config evidence config_sha256"
+        ),
+        "preflight_report_sha256": _required_sha256(
+            preflight_report.get("sha256"), "preflight report evidence sha256"
+        ),
+        "gpu_smoke_report_sha256": _required_sha256(
+            gpu_smoke_report.get("sha256"), "GPU smoke report evidence sha256"
+        ),
+        "gpu_device_name": gpu_device_name,
+    }
+    return hashlib.sha256(canonical_json_bytes(normalized)).hexdigest()
 
 
 def _validate_execution_file_evidence(

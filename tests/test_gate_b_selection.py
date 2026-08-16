@@ -93,10 +93,14 @@ def _fixture(*, n_folds: int = 2) -> tuple[SplitManifest, tuple[MathRecord, ...]
     return manifest, records
 
 
-def _execution_evidence(tmp_path: Path) -> DevelopmentExecutionEvidence:
+def _execution_evidence(
+    tmp_path: Path, *, evidence_salt: str = "stable"
+) -> DevelopmentExecutionEvidence:
     source_root = tmp_path / "source"
     source_root.mkdir(exist_ok=True)
-    (source_root / "runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (source_root / "runtime.py").write_text(
+        f"VALUE = {evidence_salt!r}\n", encoding="utf-8"
+    )
     source_manifest_path = tmp_path / "source-manifest.json"
     write_json_atomic(
         source_manifest_path,
@@ -120,8 +124,14 @@ def _execution_evidence(tmp_path: Path) -> DevelopmentExecutionEvidence:
         + "\n",
         encoding="utf-8",
     )
-    preflight.write_text("{}\n", encoding="utf-8")
-    smoke.write_text("{}\n", encoding="utf-8")
+    preflight.write_text(
+        json.dumps({"evidence_salt": evidence_salt}, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    smoke.write_text(
+        json.dumps({"evidence_salt": evidence_salt}, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     return create_development_execution_evidence(
         source_manifest=source_manifest,
         config_path=config,
@@ -481,6 +491,103 @@ def _existing_oof_runs(
             )
         )
     return tuple(output)
+
+
+def _write_hashed_test_artifact(path: Path, payload: dict[str, object]) -> Path:
+    payload.pop("payload_sha256", None)
+    payload["payload_sha256"] = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+@pytest.fixture(scope="module")
+def qualified_base_oof_v2(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[SplitManifest, Path, Path, Path, Path]:
+    tmp_path = tmp_path_factory.mktemp("qualified-base-oof-v2")
+    manifest, records = _fixture(n_folds=5)
+    supplied: list[FoldDevelopmentRun] = []
+    for fold in range(manifest.n_folds):
+        base = _write_run(
+            tmp_path,
+            label="base",
+            manifest=manifest,
+            all_records=records,
+            fold=fold,
+        )
+        supplied.append(
+            FoldDevelopmentRun(
+                fold=fold,
+                label="base",
+                records_path=base.records_path,
+                manifest_path=base.manifest_path,
+                method_kind=FIXED_BASE_METHOD_KIND,
+            )
+        )
+    eligible_ids = tuple(
+        sorted(
+            problem_id
+            for fold in range(manifest.n_folds)
+            for problem_id in eligible_validation_ids(manifest, fold, ())
+        )
+    )
+    by_id = {record.id: record for record in records}
+    oof = tmp_path / "qualified-base-oof-v2.json"
+    verify_base_development_oof(
+        "base",
+        supplied,
+        tuple(by_id[problem_id] for problem_id in eligible_ids),
+        split_manifest=manifest,
+        deployment_fold=0,
+        excluded_ids=(),
+        train_file_sha256="1" * 64,
+        exclusions_file_sha256="2" * 64,
+        split_artifact_sha256="3" * 64,
+        development_shard_sha256="4" * 64,
+        output_path=oof,
+    )
+    source_manifest = tmp_path / "freeze-source.json"
+    source_manifest.write_text(
+        json.dumps({"tree_sha256": "c" * 64, "files": [{"path": "x"}]}) + "\n",
+        encoding="utf-8",
+    )
+    lockfile = tmp_path / "freeze-uv.lock"
+    lockfile.write_text("version = 1\n", encoding="utf-8")
+    freeze = tmp_path / "qualified-base-freeze.json"
+    freeze_base_development_selection(
+        oof,
+        primary_label="base",
+        decision_note="Complete fixed-base OOF evidence is frozen for regression tests.",
+        source_manifest_path=source_manifest,
+        lockfile_path=lockfile,
+        output_path=freeze,
+        now=lambda: datetime(2026, 8, 17, tzinfo=UTC),
+    )
+    return manifest, oof, source_manifest, lockfile, freeze
+
+
+def _assert_base_oof_freeze_rejected(
+    *,
+    tmp_path: Path,
+    payload: dict[str, object],
+    artifact_name: str,
+    match: str,
+    source_manifest: Path,
+    lockfile: Path,
+) -> None:
+    artifact = _write_hashed_test_artifact(tmp_path / artifact_name, payload)
+    with pytest.raises(GateBValidationError, match=match):
+        freeze_base_development_selection(
+            artifact,
+            primary_label="base",
+            decision_note="Tampered evidence must fail closed.",
+            source_manifest_path=source_manifest,
+            lockfile_path=lockfile,
+            output_path=tmp_path / f"{artifact.stem}.freeze.json",
+        )
 
 
 def test_comparison_validates_runs_and_writes_cluster_statistics(tmp_path: Path) -> None:
@@ -869,15 +976,23 @@ def test_base_only_oof_qualifies_freezes_and_authorizes_holdout(
         output_path=oof,
     )
     qualified = json.loads(oof.read_text(encoding="utf-8"))
-    assert qualified["schema_version"] == "gate-b-base-development-oof-v1"
+    assert qualified["schema_version"] == "gate-b-base-development-oof-v2"
     assert qualified["problem_count"] == len(eligible_ids)
     assert qualified["run_order"] == ["base"]
+    assert {
+        item["execution_provenance_sha256"]
+        for item in qualified["runs"]["base"]["fold_runs"].values()
+    } == {qualified["qualification"]["execution_provenance_sha256"]}
     assert qualified["qualification"] == {
         "evidence_scope": "complete_out_of_fold_union",
         "fixed_base_only": True,
         "exact_fold_coverage": True,
         "validation_ids_unique": True,
         "run_evidence_unique": True,
+        "execution_provenance_consistent": True,
+        "execution_provenance_sha256": qualified["qualification"][
+            "execution_provenance_sha256"
+        ],
         "checkpoint_sha256": BASE_MODEL_CHECKPOINT_SHA256,
         "training_method_fingerprint": qualified["runs"]["base"][
             "training_method_fingerprint"
@@ -993,6 +1108,334 @@ def test_base_only_oof_qualifies_freezes_and_authorizes_holdout(
             lockfile_path=lockfile,
             output_path=tmp_path / "must-not-exist.json",
         )
+
+    legacy_oof_payload = json.loads(oof.read_text(encoding="utf-8"))
+    legacy_oof_payload["schema_version"] = "gate-b-base-development-oof-v1"
+    legacy_qualification = legacy_oof_payload["qualification"]
+    legacy_qualification.pop("execution_provenance_consistent")
+    legacy_qualification.pop("execution_provenance_sha256")
+    for fold_evidence in legacy_oof_payload["runs"]["base"]["fold_runs"].values():
+        fold_evidence.pop("execution_provenance_sha256")
+    legacy_oof_payload["runs"]["base"].pop("execution_provenance_sha256")
+    legacy_oof_payload.pop("payload_sha256")
+    legacy_oof_payload["payload_sha256"] = hashlib.sha256(
+        canonical_json_bytes(legacy_oof_payload)
+    ).hexdigest()
+    legacy_oof = tmp_path / "legacy-base-oof-v1.json"
+    legacy_oof.write_text(
+        json.dumps(legacy_oof_payload, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(GateBValidationError, match="legacy base OOF v1"):
+        freeze_base_development_selection(
+            legacy_oof,
+            primary_label="base",
+            decision_note="Legacy evidence must remain readable but cannot be frozen.",
+            source_manifest_path=source_manifest,
+            lockfile_path=lockfile,
+            output_path=tmp_path / "legacy-freeze.json",
+        )
+
+    forged_provenance_payload = json.loads(oof.read_text(encoding="utf-8"))
+    forged_provenance_payload["qualification"]["execution_provenance_sha256"] = (
+        "f" * 64
+    )
+    forged_provenance_payload.pop("payload_sha256")
+    forged_provenance_payload["payload_sha256"] = hashlib.sha256(
+        canonical_json_bytes(forged_provenance_payload)
+    ).hexdigest()
+    forged_provenance = tmp_path / "forged-base-oof-provenance.json"
+    forged_provenance.write_text(
+        json.dumps(forged_provenance_payload, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(GateBValidationError, match="does not match its folds"):
+        freeze_base_development_selection(
+            forged_provenance,
+            primary_label="base",
+            decision_note="A forged provenance summary must not reach freeze.",
+            source_manifest_path=source_manifest,
+            lockfile_path=lockfile,
+            output_path=tmp_path / "forged-provenance-freeze.json",
+        )
+
+    Path(supplied[1].manifest_path).unlink()
+    with pytest.raises(GateBValidationError, match="manifest is missing"):
+        freeze_base_development_selection(
+            oof,
+            primary_label="base",
+            decision_note="Every non-deployment fold must remain available at freeze.",
+            source_manifest_path=source_manifest,
+            lockfile_path=lockfile,
+            output_path=tmp_path / "missing-fold-manifest-freeze.json",
+        )
+
+
+def test_base_oof_rejects_cross_fold_execution_provenance_drift(
+    tmp_path: Path,
+) -> None:
+    manifest, records = _fixture(n_folds=5)
+    supplied: list[FoldDevelopmentRun] = []
+    for fold in range(manifest.n_folds):
+        base = _write_run(
+            tmp_path,
+            label="base",
+            manifest=manifest,
+            all_records=records,
+            fold=fold,
+        )
+        supplied.append(
+            FoldDevelopmentRun(
+                fold=fold,
+                label="base",
+                records_path=base.records_path,
+                manifest_path=base.manifest_path,
+                method_kind=FIXED_BASE_METHOD_KIND,
+            )
+        )
+
+    drift_root = tmp_path / "drift"
+    drift_root.mkdir()
+    drift_manifest_path = Path(supplied[1].manifest_path)
+    drift_manifest = json.loads(drift_manifest_path.read_text(encoding="utf-8"))
+    drift_manifest["execution_evidence"] = _execution_evidence(
+        drift_root, evidence_salt="different-b0"
+    ).as_dict()
+    drift_manifest_path.write_text(
+        json.dumps(drift_manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    eligible_ids = tuple(
+        sorted(
+            problem_id
+            for fold in range(manifest.n_folds)
+            for problem_id in eligible_validation_ids(manifest, fold, ())
+        )
+    )
+    by_id = {record.id: record for record in records}
+    with pytest.raises(GateBValidationError, match="execution provenance"):
+        verify_base_development_oof(
+            "base",
+            supplied,
+            tuple(by_id[problem_id] for problem_id in eligible_ids),
+            split_manifest=manifest,
+            deployment_fold=0,
+            excluded_ids=(),
+            train_file_sha256="1" * 64,
+            exclusions_file_sha256="2" * 64,
+            split_artifact_sha256="3" * 64,
+            development_shard_sha256="4" * 64,
+            output_path=tmp_path / "drifted-base-oof.json",
+        )
+
+
+@pytest.mark.parametrize(
+    ("case_name", "expected_error"),
+    (
+        ("malformed-fold-fingerprint", "lowercase SHA-256"),
+        ("inconsistent-fold-fingerprints", "fold execution provenance is inconsistent"),
+        ("malformed-qualification-flags", "qualification flags are invalid"),
+    ),
+)
+def test_base_oof_v2_rejects_qualification_fingerprint_tampering(
+    tmp_path: Path,
+    qualified_base_oof_v2: tuple[SplitManifest, Path, Path, Path, Path],
+    case_name: str,
+    expected_error: str,
+) -> None:
+    _, oof, source_manifest, lockfile, _ = qualified_base_oof_v2
+    payload = json.loads(oof.read_text(encoding="utf-8"))
+    fold_runs = payload["runs"]["base"]["fold_runs"]
+    if case_name == "malformed-fold-fingerprint":
+        fold_runs["1"]["execution_provenance_sha256"] = "not-a-sha256"
+    elif case_name == "inconsistent-fold-fingerprints":
+        fold_runs["1"]["execution_provenance_sha256"] = "f" * 64
+    else:
+        payload["qualification"]["execution_provenance_consistent"] = False
+
+    _assert_base_oof_freeze_rejected(
+        tmp_path=tmp_path,
+        payload=payload,
+        artifact_name=f"{case_name}.json",
+        match=expected_error,
+        source_manifest=source_manifest,
+        lockfile=lockfile,
+    )
+
+
+@pytest.mark.parametrize(
+    ("case_name", "expected_error"),
+    (
+        ("missing-records", "run file is missing or unsafe"),
+        ("symlinked-records", "run file is missing or unsafe"),
+        ("changed-records", "run bytes changed after qualification"),
+        ("changed-manifest", "run manifest changed after qualification"),
+        ("duplicate-run-identity", "reuses run evidence across folds"),
+    ),
+)
+def test_base_oof_freeze_revalidates_every_fold_file_and_identity(
+    tmp_path: Path,
+    qualified_base_oof_v2: tuple[SplitManifest, Path, Path, Path, Path],
+    case_name: str,
+    expected_error: str,
+) -> None:
+    _, oof, source_manifest, lockfile, _ = qualified_base_oof_v2
+    payload = json.loads(oof.read_text(encoding="utf-8"))
+    fold_runs = payload["runs"]["base"]["fold_runs"]
+    fold_evidence = fold_runs["1"]
+    if case_name == "missing-records":
+        fold_evidence["path"] = str(tmp_path / "missing-fold-1.jsonl")
+    elif case_name == "symlinked-records":
+        linked_records = tmp_path / "linked-fold-1.jsonl"
+        linked_records.symlink_to(Path(fold_evidence["path"]))
+        fold_evidence["path"] = str(linked_records)
+    elif case_name == "changed-records":
+        changed_records = tmp_path / "changed-fold-1.jsonl"
+        changed_records.write_bytes(Path(fold_evidence["path"]).read_bytes() + b" ")
+        fold_evidence["path"] = str(changed_records)
+    elif case_name == "changed-manifest":
+        changed_manifest = tmp_path / "changed-fold-1.manifest.json"
+        changed_manifest.write_bytes(
+            Path(fold_evidence["manifest_path"]).read_bytes() + b" "
+        )
+        fold_evidence["manifest_path"] = str(changed_manifest)
+    else:
+        deployment_evidence = fold_runs["0"]
+        for field_name in ("path", "sha256", "manifest_path", "manifest_sha256"):
+            fold_evidence[field_name] = deployment_evidence[field_name]
+
+    _assert_base_oof_freeze_rejected(
+        tmp_path=tmp_path,
+        payload=payload,
+        artifact_name=f"{case_name}.json",
+        match=expected_error,
+        source_manifest=source_manifest,
+        lockfile=lockfile,
+    )
+
+
+@pytest.mark.parametrize(
+    ("case_name", "expected_error"),
+    (
+        ("forged-all-fingerprints", "execution provenance changed after qualification"),
+        ("run-binding-drift", "run binding changed after qualification"),
+        ("deployment-mirror-drift", "deployment evidence differs"),
+    ),
+)
+def test_base_oof_freeze_recomputes_provenance_and_run_bindings(
+    tmp_path: Path,
+    qualified_base_oof_v2: tuple[SplitManifest, Path, Path, Path, Path],
+    case_name: str,
+    expected_error: str,
+) -> None:
+    _, oof, source_manifest, lockfile, _ = qualified_base_oof_v2
+    payload = json.loads(oof.read_text(encoding="utf-8"))
+    run_evidence = payload["runs"]["base"]
+    fold_runs = run_evidence["fold_runs"]
+    if case_name == "forged-all-fingerprints":
+        forged = "f" * 64
+        for fold_evidence in fold_runs.values():
+            fold_evidence["execution_provenance_sha256"] = forged
+        run_evidence["execution_provenance_sha256"] = forged
+        payload["qualification"]["execution_provenance_sha256"] = forged
+    elif case_name == "run-binding-drift":
+        fold_evidence = fold_runs["1"]
+        changed_manifest = tmp_path / "binding-drift-fold-1.manifest.json"
+        manifest_payload = json.loads(
+            Path(fold_evidence["manifest_path"]).read_text(encoding="utf-8")
+        )
+        manifest_payload["route"] = "tampered-direct-answer"
+        changed_manifest.write_text(
+            json.dumps(manifest_payload, ensure_ascii=False, sort_keys=True, indent=2)
+            + "\n",
+            encoding="utf-8",
+        )
+        fold_evidence["manifest_path"] = str(changed_manifest)
+        fold_evidence["manifest_size_bytes"] = changed_manifest.stat().st_size
+        fold_evidence["manifest_sha256"] = hashlib.sha256(
+            changed_manifest.read_bytes()
+        ).hexdigest()
+    else:
+        run_evidence["size_bytes"] = int(run_evidence["size_bytes"]) + 1
+
+    _assert_base_oof_freeze_rejected(
+        tmp_path=tmp_path,
+        payload=payload,
+        artifact_name=f"{case_name}.json",
+        match=expected_error,
+        source_manifest=source_manifest,
+        lockfile=lockfile,
+    )
+
+
+def test_base_freeze_consumer_rejects_legacy_oof_reference(
+    tmp_path: Path,
+    qualified_base_oof_v2: tuple[SplitManifest, Path, Path, Path, Path],
+) -> None:
+    manifest, oof, _, _, freeze = qualified_base_oof_v2
+    legacy_payload = json.loads(oof.read_text(encoding="utf-8"))
+    legacy_payload["schema_version"] = "gate-b-base-development-oof-v1"
+    legacy_payload["qualification"].pop("execution_provenance_consistent")
+    legacy_payload["qualification"].pop("execution_provenance_sha256")
+    for fold_evidence in legacy_payload["runs"]["base"]["fold_runs"].values():
+        fold_evidence.pop("execution_provenance_sha256")
+    legacy_payload["runs"]["base"].pop("execution_provenance_sha256")
+    legacy_oof = _write_hashed_test_artifact(
+        tmp_path / "legacy-referenced-base-oof.json", legacy_payload
+    )
+
+    freeze_payload = json.loads(freeze.read_text(encoding="utf-8"))
+    freeze_payload["comparison_artifact"] = {
+        "path": str(legacy_oof),
+        "size_bytes": legacy_oof.stat().st_size,
+        "sha256": hashlib.sha256(legacy_oof.read_bytes()).hexdigest(),
+        "payload_sha256": legacy_payload["payload_sha256"],
+    }
+    legacy_freeze = _write_hashed_test_artifact(
+        tmp_path / "legacy-referenced-base-freeze.json", freeze_payload
+    )
+
+    with pytest.raises(GateBValidationError, match="legacy base OOF v1"):
+        validate_frozen_selection_methods(legacy_freeze, split_manifest=manifest)
+
+
+def test_base_freeze_consumer_rejects_deleted_non_deployment_manifest(
+    tmp_path: Path,
+    qualified_base_oof_v2: tuple[SplitManifest, Path, Path, Path, Path],
+) -> None:
+    manifest, oof, _, _, freeze = qualified_base_oof_v2
+    copied_oof_payload = json.loads(oof.read_text(encoding="utf-8"))
+    fold_evidence = copied_oof_payload["runs"]["base"]["fold_runs"]["1"]
+    copied_manifest = tmp_path / "copied-fold-1.manifest.json"
+    copied_manifest.write_bytes(Path(fold_evidence["manifest_path"]).read_bytes())
+    fold_evidence["manifest_path"] = str(copied_manifest)
+    copied_oof = _write_hashed_test_artifact(
+        tmp_path / "copied-base-oof.json", copied_oof_payload
+    )
+
+    copied_freeze_payload = json.loads(freeze.read_text(encoding="utf-8"))
+    copied_freeze_payload["comparison_artifact"] = {
+        "path": str(copied_oof),
+        "size_bytes": copied_oof.stat().st_size,
+        "sha256": hashlib.sha256(copied_oof.read_bytes()).hexdigest(),
+        "payload_sha256": copied_oof_payload["payload_sha256"],
+    }
+    copied_freeze_payload["primary"] = {
+        "label": "base",
+        **copied_oof_payload["runs"]["base"],
+    }
+    copied_freeze = _write_hashed_test_artifact(
+        tmp_path / "copied-base-freeze.json", copied_freeze_payload
+    )
+    validated = validate_frozen_selection_methods(
+        copied_freeze, split_manifest=manifest
+    )
+    assert validated.primary_label == "base"
+
+    copied_manifest.unlink()
+    with pytest.raises(GateBValidationError, match="manifest is missing or unsafe"):
+        validate_frozen_selection_methods(copied_freeze, split_manifest=manifest)
 
 
 def test_rationale_adapter_provenance_survives_oof_comparison_and_freeze(
